@@ -24,3 +24,5 @@ target
 /pki/
 /data/
 /config.toml
+/demo-plc-pki/
+/demo-client-pki/

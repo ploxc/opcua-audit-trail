@@ -4,65 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OPC UA Audit Gateway</title>
-<style>
-  :root { --bg:#f7f7f8; --fg:#1d1d1f; --muted:#6b6b72; --card:#fff; --line:#e3e3e6; --ok:#1a7f37; --bad:#c62828; --unk:#8a6d00; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#141416; --fg:#ececef; --muted:#9a9aa3; --card:#1d1d20; --line:#2e2e33; --ok:#4ac26b; --bad:#ff6b6b; --unk:#e0b400; }
-  }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
-  main { max-width:1100px; margin:0 auto; padding:24px 16px; }
-  h1 { font-size:20px; margin:0 0 4px; }
-  h2 { font-size:15px; margin:28px 0 8px; }
-  .muted { color:var(--muted); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 16px; margin-bottom:8px; overflow-x:auto; }
-  table { border-collapse:collapse; width:100%; }
-  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
-  th { color:var(--muted); font-weight:500; }
-  .state-available { color:var(--ok); } .state-unavailable { color:var(--bad); } .state-unknown { color:var(--unk); }
-  code { font-size:12px; }
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11.5' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js"></script>
 </head>
 <body>
-<main>
-  <h1>OPC UA Audit Gateway</h1>
-  <div class="muted" id="meta">Loading…</div>
-  <h2>Targets</h2>
-  <div id="targets"></div>
-  <h2>Recent audit events</h2>
-  <div class="card"><table><thead><tr><th>#</th><th>Time</th><th>Target</th><th>Event</th><th>Client</th><th>Details</th></tr></thead><tbody id="audit"></tbody></table></div>
-  <p class="muted">Temporary status page. The full configuration UI follows in a later milestone.</p>
-</main>
-<script>
-const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-function details(e) {
-  const { type, ...rest } = e;
-  return Object.entries(rest).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" ");
-}
-async function refresh() {
-  try {
-    const s = await (await fetch("/api/status")).json();
-    document.getElementById("meta").textContent =
-      `v${s.version} · ${s.application_uri} · cert ${s.certificate?.thumbprint ?? "missing"}` +
-      (s.lost_audit_events ? ` · ${s.lost_audit_events} audit events lost` : "");
-    document.getElementById("targets").innerHTML = s.targets.length ? s.targets.map(t => `
-      <div class="card">
-        <b>${esc(t.name)}</b> <span class="state-${t.state}">● ${esc(t.state)}</span>
-        <span class="muted">listen ${esc(t.listen)} → ${esc(t.endpoint_url)}</span>
-        ${t.last_error ? `<div class="state-unavailable">${esc(t.last_error)}</div>` : ""}
-        ${t.endpoints.length ? `<table><thead><tr><th>Policy</th><th>Mode</th><th>Level</th><th>User tokens</th></tr></thead><tbody>
-          ${t.endpoints.map(e => `<tr><td>${esc(e.security_policy)}</td><td>${esc(e.security_mode)}</td><td>${e.security_level}</td>
-            <td>${esc(e.user_tokens.map(u => u.token_type).join(", "))}</td></tr>`).join("")}</tbody></table>` : ""}
-      </div>`).join("") : `<div class="card muted">No targets configured.</div>`;
-    const a = await (await fetch("/api/audit?limit=50")).json();
-    document.getElementById("audit").innerHTML = a.map(r => `<tr>
-      <td>${r.seq}</td><td>${esc(new Date(r.ts).toLocaleString())}</td><td>${esc(r.target)}</td>
-      <td>${esc(r.event.type)}</td><td>${esc(r.client?.remote_addr)}</td><td><code>${esc(details(r.event))}</code></td></tr>`).join("");
-  } catch (err) {
-    document.getElementById("meta").textContent = "Cannot reach the gateway API: " + err;
-  }
-}
-refresh();
-setInterval(refresh, 5000);
-</script>
+<div id="app"><div class="boot">Loading…</div></div>
 </body>
 </html>

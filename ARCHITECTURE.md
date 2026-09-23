@@ -202,7 +202,11 @@ central server).
 
 ## Web UI
 
-Served by the same binary (axum; frontend assets embedded in the binary).
+Served by the same binary (axum). The frontend is plain JavaScript without a
+build step (`src/web/ui/`), embedded in the binary, so one `cargo build`
+produces everything, also for ARMv7. A strict Content-Security-Policy (no
+inline scripts) applies. All rendering goes through an escaping template
+helper.
 
 * **Dashboard**: upstream status per target, active client sessions (IP,
   application, user, security, since), last writes, lost audit events.
@@ -216,11 +220,14 @@ Served by the same binary (axum; frontend assets embedded in the binary).
 * **Audit log**: filters (time, target, client, user, node, event type), live
   tail, CSV export, chain verification.
 * **Users**: local users with roles `admin` (configuration), `operator`
-  (browser) and `auditor` (audit log only). LDAP/AD later. HTTPS with the
-  gateway certificate or an imported one.
+  (browser) and `auditor` (audit log only). LDAP/AD later. Sessions are
+  HttpOnly/SameSite=Strict cookies. Every state-changing request needs a
+  custom header (CSRF protection). UI logins and every change made through
+  the UI are audited. Plain HTTP for now: use a TLS reverse proxy.
 
-Until authentication exists, the web UI binds to `127.0.0.1` by default and the
-compose file only publishes it on the host's loopback.
+The web UI binds to `127.0.0.1` by default. The compose file only publishes it
+on the host's loopback. Targets can be changed at runtime: they are written
+back to `config.toml` with the file's comments preserved.
 
 ## Build and deployment
 
@@ -248,8 +255,8 @@ compose file only publishes it on the host's loopback.
 | 2. Relay, security `None` | Binary protocol relay, session handling, request/response correlation, `write`/`call` audit, connection events | ✅ done |
 | 3. Relay, `Sign` / `SignAndEncrypt` | Certificate and signature rewriting, user token re-encryption, trust lists | ✅ done (interop with real PLCs pending) |
 | 4. Old values & display names | Read-before-write, node name cache | ✅ done |
-| 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard | next |
-| 6. Browser & export | Address space browser, QuestDB export, chain-head publishing | |
+| 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard, browser | ✅ done |
+| 6. Export | QuestDB export, chain-head publishing | next |
 | 7. Packaging | Windows service, systemd unit, multi-arch images, releases | |
 
 ## Decision log
@@ -268,3 +275,5 @@ compose file only publishes it on the host's loopback.
 | X509 / issued user tokens | Rejected with `BadIdentityTokenRejected` and audited, and not offered in the endpoint list; a per-target service account is a later option |
 | Fail-closed guarantee | A `change_intent` record is committed before a change request is forwarded; the outcome follows as a normal record |
 | Web UI login | Local users with roles |
+| Frontend technology | Vanilla JS without a build step, instead of Svelte: a single `cargo build`, no Node toolchain in CI or cross builds |
+| Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |

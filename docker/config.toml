@@ -9,8 +9,8 @@ data_dir = "/data"
 # certificate_hostnames = ["gateway.local", "192.168.0.20"]
 
 [web]
-# The web UI has no login yet: publish this port on the host's loopback only
-# (see docker-compose.yml).
+# Plain HTTP: publish this port on the host's loopback only (see
+# docker-compose.yml) or put a TLS reverse proxy in front.
 listen = "0.0.0.0:8080"
 
 [audit]
