@@ -142,7 +142,7 @@ pub struct TargetStatus {
 }
 
 impl TargetStatus {
-    fn new(target: &TargetConfig) -> Self {
+    pub fn new(target: &TargetConfig) -> Self {
         Self {
             name: target.name.clone(),
             listen: target.listen.to_string(),
@@ -175,12 +175,19 @@ pub async fn monitor_target(
     target: TargetConfig,
     statuses: TargetStatuses,
     audit: AuditHandle,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(target.discovery_interval_secs));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tick.tick().await;
-        let result = discover_raw(&client, &target.endpoint_url).await;
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tick.tick() => {}
+        }
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return,
+            r = discover_raw(&client, &target.endpoint_url) => r,
+        };
 
         let mut map = statuses.write().await;
         let Some(status) = map.get_mut(&target.name) else {
@@ -342,6 +349,7 @@ mod tests {
             config.targets[0].clone(),
             statuses.clone(),
             audit.clone(),
+            Default::default(),
         ));
 
         let wait_for = |state: UpstreamState| {

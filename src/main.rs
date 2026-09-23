@@ -3,6 +3,10 @@ mod config;
 mod discovery;
 mod pki;
 mod relay;
+mod targets;
+#[cfg(test)]
+mod testutil;
+mod users;
 mod web;
 
 use std::path::{Path, PathBuf};
@@ -15,6 +19,7 @@ use clap::{Parser, Subcommand};
 use crate::audit::{AuditEntry, AuditEvent, AuditReader};
 use crate::config::Config;
 use crate::pki::Pki;
+use crate::users::{Role, UserStore};
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +53,28 @@ enum Command {
     },
     /// Check the integrity of the audit trail's hash chain.
     Verify,
+    /// Manage web UI users.
+    #[command(subcommand)]
+    User(UserCommand),
+}
+
+#[derive(Subcommand)]
+enum UserCommand {
+    /// Add a user (asks for the password).
+    Add {
+        username: String,
+        /// admin, operator or auditor
+        #[arg(long, default_value = "auditor")]
+        role: String,
+    },
+    /// Set a new password (asks for it).
+    Passwd { username: String },
+    /// Change a user's role.
+    Role { username: String, role: String },
+    /// Delete a user.
+    Delete { username: String },
+    /// List users.
+    List,
 }
 
 fn main() -> ExitCode {
@@ -74,6 +101,7 @@ fn main() -> ExitCode {
             Command::Run => run(&cli.config).await,
             Command::Discover { endpoint_url } => discover(&cli.config, &endpoint_url).await,
             Command::Verify => verify(&cli.config).await,
+            Command::User(cmd) => user_command(&cli.config, cmd),
         }
     });
     match result {
@@ -108,6 +136,54 @@ fn init(path: &Path) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn user_store(config: &Config) -> anyhow::Result<UserStore> {
+    UserStore::open(&config.gateway.data_dir.join("gateway.db"))
+}
+
+fn read_new_password() -> anyhow::Result<String> {
+    let first = rpassword::prompt_password("password: ")?;
+    let second = rpassword::prompt_password("repeat password: ")?;
+    if first != second {
+        anyhow::bail!("the passwords do not match");
+    }
+    Ok(first)
+}
+
+fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
+    let config = Config::load(path)?;
+    let users = user_store(&config)?;
+    match cmd {
+        UserCommand::Add { username, role } => {
+            let role = Role::parse(&role)?;
+            users.create(&username, &read_new_password()?, role)?;
+            println!("added {username} ({})", role.as_str());
+        }
+        UserCommand::Passwd { username } => {
+            users.set_password(&username, &read_new_password()?)?;
+            println!("password of {username} changed");
+        }
+        UserCommand::Role { username, role } => {
+            users.set_role(&username, Role::parse(&role)?)?;
+            println!("role of {username} changed");
+        }
+        UserCommand::Delete { username } => {
+            users.delete(&username)?;
+            println!("deleted {username}");
+        }
+        UserCommand::List => {
+            for u in users.list()? {
+                println!(
+                    "{:<24} {:<9} since {}",
+                    u.username,
+                    u.role.as_str(),
+                    u.created_at
+                );
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn run(path: &Path) -> anyhow::Result<ExitCode> {
     let config = Arc::new(Config::load(path)?);
 
@@ -134,37 +210,46 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
         config.audit.retention_days,
     ));
 
-    let client = Arc::new(discovery::discovery_client(&config)?);
-    let statuses = discovery::initial_statuses(&config);
-    let mut relays = Vec::new();
-    for target in &config.targets {
-        tokio::spawn(discovery::monitor_target(
-            client.clone(),
-            target.clone(),
-            statuses.clone(),
-            audit.clone(),
-        ));
-        let relay = Arc::new(relay::RelayTarget::new(
-            target.clone(),
-            Arc::new(relay::GatewayIdentity::load(&config, target)?),
-            statuses.clone(),
-            client.clone(),
-            audit.clone(),
-            &config.audit,
-        ));
-        tokio::spawn(relay::serve(relay.clone()));
-        relays.push(relay);
+    let users = Arc::new(user_store(&config)?);
+    if users.count()? == 0 {
+        let password = users::random_password();
+        users.create("admin", &password, Role::Admin)?;
+        tracing::warn!(
+            "created web UI user 'admin' with password '{password}'. \
+             Log in and change it (or: opcua-audit-gateway user passwd admin)"
+        );
+        let _ = audit
+            .record(AuditEntry::new(AuditEvent::ConfigChanged {
+                by: "gateway".into(),
+                summary: "created initial user 'admin'".into(),
+            }))
+            .await;
     }
+
+    let client = Arc::new(discovery::discovery_client(&config)?);
+    let statuses = discovery::initial_statuses(&Config::default());
+    let targets = Arc::new(targets::TargetManager::new(
+        path.to_path_buf(),
+        config.as_ref().clone(),
+        statuses.clone(),
+        client.clone(),
+        audit.clone(),
+    ));
+    targets.start_all().await;
 
     let state = web::AppState {
         config: config.clone(),
+        targets: targets.clone(),
         statuses,
         audit: audit.clone(),
         reader: AuditReader::new(&db),
         client,
         pki: Arc::new(pki),
-        relays,
+        users,
+        sessions: Default::default(),
+        browser: Default::default(),
     };
+    tokio::spawn(state.browser.clone().reap_idle(state.clone()));
     let listener = tokio::net::TcpListener::bind(config.web.listen)
         .await
         .with_context(|| format!("binding web UI to {}", config.web.listen))?;
@@ -174,6 +259,7 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
         .await?;
 
     tracing::info!("shutting down");
+    targets.stop_all().await;
     if let Err(e) = audit
         .record_committed(AuditEntry::new(AuditEvent::GatewayStopped))
         .await

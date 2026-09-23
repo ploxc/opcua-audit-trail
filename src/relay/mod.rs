@@ -3,7 +3,7 @@
 //!
 //! See ARCHITECTURE.md ("Relay design") for what is rewritten and why.
 
-mod audit_map;
+pub(crate) mod audit_map;
 mod connection;
 pub mod endpoints;
 pub mod transport;
@@ -23,6 +23,7 @@ use opcua::crypto::{CertificateStore, PrivateKey, X509};
 use opcua::types::{ByteString, DecodingOptions, EndpointDescription, NodeId, StatusCode};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::audit::event::ClientContext;
 use crate::audit::AuditHandle;
@@ -155,6 +156,9 @@ pub struct RelayTarget {
     channel_ids: AtomicU32,
     connection_ids: AtomicU64,
     request_handles: AtomicU32,
+    /// Cancelled when the target is removed or reconfigured: stops the
+    /// listener and closes all its connections.
+    pub shutdown: CancellationToken,
 }
 
 impl RelayTarget {
@@ -183,6 +187,7 @@ impl RelayTarget {
             channel_ids: AtomicU32::new(1),
             connection_ids: AtomicU64::new(1),
             request_handles: AtomicU32::new(GATEWAY_REQUEST_HANDLES),
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -216,19 +221,13 @@ impl RelayTarget {
     }
 }
 
-/// Accepts clients for one target until the process stops.
-pub async fn serve(target: Arc<RelayTarget>) {
-    let listener = match tokio::net::TcpListener::bind(target.config.listen).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(
-                target = %target.config.name,
-                "cannot listen on {}: {e}",
-                target.config.listen
-            );
-            return;
-        }
-    };
+/// Binds the target's listen address.
+pub async fn bind(target: &RelayTarget) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(target.config.listen).await
+}
+
+/// Accepts clients for one target until its `shutdown` token is cancelled.
+pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) {
     tracing::info!(
         target = %target.config.name,
         "accepting OPC UA clients on opc.tcp://{} -> {}",
@@ -236,16 +235,20 @@ pub async fn serve(target: Arc<RelayTarget>) {
         target.config.endpoint_url
     );
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let _ = stream.set_nodelay(true);
-                let id = target.connection_ids.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(connection::run(target.clone(), stream, peer, id));
-            }
-            Err(e) => {
-                tracing::warn!("accept failed: {e}");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+        tokio::select! {
+            _ = target.shutdown.cancelled() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer)) => {
+                    let _ = stream.set_nodelay(true);
+                    let id = target.connection_ids.fetch_add(1, Ordering::Relaxed);
+                    tokio::spawn(connection::run(target.clone(), stream, peer, id));
+                }
+                Err(e) => {
+                    tracing::warn!("accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            },
         }
     }
+    tracing::info!(target = %target.config.name, "stopped accepting clients");
 }

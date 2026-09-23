@@ -1,47 +1,30 @@
 //! End-to-end tests: a real OPC UA client talks to a real OPC UA server
 //! through the gateway, and the audit trail is checked.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use opcua::client::{ClientBuilder, IdentityToken, Password, Session};
 use opcua::crypto::{CertificateStore, SecurityPolicy};
-use opcua::server::address_space::{MethodBuilder, VariableBuilder};
-use opcua::server::diagnostics::NamespaceMetadata;
-use opcua::server::node_manager::memory::{simple_node_manager, SimpleNodeManager};
-use opcua::server::{ServerBuilder, ServerHandle, ServerUserToken, ANONYMOUS_USER_TOKEN_ID};
 use opcua::types::{
-    AttributeId, CallMethodRequest, DataTypeId, DataValue, MessageSecurityMode, NodeId,
-    NumericRange, ObjectId, ReadValueId, StatusCode, TimestampsToReturn, Variant, WriteValue,
+    AttributeId, CallMethodRequest, DataValue, MessageSecurityMode, NodeId, NumericRange, ObjectId,
+    ReadValueId, StatusCode, TimestampsToReturn, Variant, WriteValue,
 };
 
-use super::{serve, GatewayIdentity, RelayTarget};
+use super::{bind, serve, GatewayIdentity, RelayTarget};
 use crate::audit::event::{AuditEvent, UserIdentity};
 use crate::audit::store::{AuditQuery, StoredRecord};
 use crate::audit::{AuditHandle, AuditReader};
 use crate::config::{Config, FailMode};
 use crate::discovery;
 use crate::pki::Pki;
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn trust(store_dir: &Path, cert_file: &Path) {
-    let cert = CertificateStore::read_cert(cert_file).unwrap();
-    let dir = CertificateStore::new(store_dir).trusted_certs_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(cert_file, dir.join(CertificateStore::cert_file_name(&cert))).unwrap();
-}
+use crate::testutil::{free_port, start_test_plc, trust, wait_listening, TestPlc};
 
 struct Harness {
+    // Field order matters: the server stops before its directory is removed.
+    _plc: TestPlc,
     dir: tempfile::TempDir,
-    server: ServerHandle,
     gateway_url: String,
     gateway_pki: PathBuf,
     db: PathBuf,
@@ -51,98 +34,11 @@ struct Harness {
     method: NodeId,
 }
 
-impl Drop for Harness {
-    fn drop(&mut self) {
-        self.server.cancel();
-    }
-}
-
 /// Starts a test server ("the PLC") and a gateway in front of it.
 async fn harness(fail_mode: FailMode) -> Harness {
     let dir = tempfile::tempdir().unwrap();
-    let server_port = free_port();
-    let tokens = [ANONYMOUS_USER_TOKEN_ID, "operator"];
-    let endpoint =
-        |policy: SecurityPolicy, mode: MessageSecurityMode| ("/", policy, mode, &tokens as &[&str]);
-    let (server, handle) = ServerBuilder::new()
-        .application_name("Test PLC")
-        .application_uri("urn:test-plc")
-        .host("127.0.0.1")
-        .port(server_port)
-        .pki_dir(dir.path().join("plc-pki"))
-        .create_sample_keypair(true)
-        // The PLC trusts the gateway (in production: only the gateway).
-        .trust_client_certs(true)
-        .discovery_urls(vec!["/".into()])
-        .add_user_token("operator", ServerUserToken::user_pass("operator", "secret"))
-        .add_endpoint(
-            "none",
-            endpoint(SecurityPolicy::None, MessageSecurityMode::None),
-        )
-        .add_endpoint(
-            "b256_sign",
-            endpoint(SecurityPolicy::Basic256Sha256, MessageSecurityMode::Sign),
-        )
-        .add_endpoint(
-            "b256_encrypt",
-            endpoint(
-                SecurityPolicy::Basic256Sha256,
-                MessageSecurityMode::SignAndEncrypt,
-            ),
-        )
-        .add_endpoint(
-            "pss_encrypt",
-            endpoint(
-                SecurityPolicy::Aes256Sha256RsaPss,
-                MessageSecurityMode::SignAndEncrypt,
-            ),
-        )
-        .with_node_manager(simple_node_manager(
-            NamespaceMetadata {
-                namespace_uri: "urn:test".into(),
-                ..Default::default()
-            },
-            "test",
-        ))
-        .build()
-        .unwrap();
-    tokio::spawn(server.run());
-
-    let manager = handle
-        .node_managers()
-        .get_of_type::<SimpleNodeManager>()
-        .unwrap();
-    let ns = handle.get_namespace_index("urn:test").unwrap();
-    let setpoint = NodeId::new(ns, "Setpoint");
-    let method = NodeId::new(ns, "Reset");
-    let read_only = NodeId::new(ns, "ReadOnly");
-    {
-        let mut space = manager.address_space().write();
-        VariableBuilder::new(&setpoint, "Setpoint", "Setpoint")
-            .data_type(DataTypeId::Double)
-            .value(0.0f64)
-            .writable()
-            .organized_by(ObjectId::ObjectsFolder)
-            .insert(&mut *space);
-        VariableBuilder::new(&read_only, "ReadOnly", "ReadOnly")
-            .data_type(DataTypeId::Double)
-            .value(1.0f64)
-            .organized_by(ObjectId::ObjectsFolder)
-            .insert(&mut *space);
-        MethodBuilder::new(&method, "Reset", "Reset")
-            .component_of(ObjectId::ObjectsFolder)
-            .executable(true)
-            .user_executable(true)
-            .input_args(
-                &mut *space,
-                &NodeId::new(ns, "ResetArgs"),
-                &[("Level", DataTypeId::Int32).into()],
-            )
-            .insert(&mut *space);
-    }
-    manager
-        .inner()
-        .add_method_callback(method.clone(), |_args| Ok(Vec::new()));
+    let plc = start_test_plc(dir.path()).await;
+    let server_port = plc.port;
 
     // Gateway.
     let gateway_port = free_port();
@@ -166,10 +62,7 @@ async fn harness(fail_mode: FailMode) -> Harness {
     let pki = Pki::open(&config.gateway.pki_dir).unwrap();
     pki.ensure_own_certificate(&config.gateway).unwrap();
     // The gateway trusts the PLC. The server creates its keypair on build.
-    trust(
-        &config.gateway.pki_dir,
-        &dir.path().join("plc-pki/own/cert.der"),
-    );
+    trust(&config.gateway.pki_dir, &plc.certificate);
 
     let db = dir.path().join("audit.db");
     let audit = crate::audit::start(&db, &config.audit).unwrap();
@@ -184,33 +77,22 @@ async fn harness(fail_mode: FailMode) -> Harness {
         audit.clone(),
         &config.audit,
     ));
-    tokio::spawn(serve(relay));
+    let listener = bind(&relay).await.unwrap();
+    tokio::spawn(serve(relay, listener));
 
     let gateway_url = format!("opc.tcp://127.0.0.1:{gateway_port}/");
-    // Wait until both are listening.
-    for _ in 0..100 {
-        let up = tokio::net::TcpStream::connect(("127.0.0.1", server_port))
-            .await
-            .is_ok()
-            && tokio::net::TcpStream::connect(("127.0.0.1", gateway_port))
-                .await
-                .is_ok();
-        if up {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    wait_listening(gateway_port).await;
 
     Harness {
         gateway_pki: config.gateway.pki_dir.clone(),
+        setpoint: plc.setpoint.clone(),
+        read_only: plc.read_only.clone(),
+        method: plc.method.clone(),
+        _plc: plc,
         dir,
-        server: handle,
         gateway_url,
         db,
         audit,
-        setpoint,
-        read_only,
-        method,
     }
 }
 

@@ -196,10 +196,6 @@ impl Config {
             .clone()
             .unwrap_or_else(|| self.gateway.data_dir.join("audit.db"))
     }
-
-    pub fn target(&self, name: &str) -> Option<&TargetConfig> {
-        self.targets.iter().find(|t| t.name == name)
-    }
 }
 
 /// Commented starting point written by `opcua-audit-gateway init`.

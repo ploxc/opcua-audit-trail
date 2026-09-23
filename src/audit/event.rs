@@ -97,6 +97,12 @@ pub enum AuditEvent {
         by: String,
         summary: String,
     },
+    UiLogin {
+        user: String,
+    },
+    UiLoginFailed {
+        user: String,
+    },
     /// Records that audit records up to and including `last_seq` were deleted by
     /// retention. `last_hash` is the hash of that record, so the remaining chain
     /// stays verifiable from this point on.
@@ -195,6 +201,8 @@ impl AuditEvent {
             AuditEvent::GatewayStarted { .. } => "gateway_started",
             AuditEvent::GatewayStopped => "gateway_stopped",
             AuditEvent::ConfigChanged { .. } => "config_changed",
+            AuditEvent::UiLogin { .. } => "ui_login",
+            AuditEvent::UiLoginFailed { .. } => "ui_login_failed",
             AuditEvent::RetentionPruned { .. } => "retention_pruned",
             AuditEvent::EventsLost { .. } => "events_lost",
             AuditEvent::UpstreamAvailable { .. } => "upstream_available",

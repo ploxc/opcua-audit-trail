@@ -166,6 +166,10 @@ impl Connection {
         self.transport.enqueue_error(status, reason);
     }
 
+    fn transport_closing(&self) -> bool {
+        self.close_reason.is_some()
+    }
+
     fn respond(&mut self, request_id: u32, response: ResponseMessage) {
         if let Err(status) = self.transport.enqueue(&self.channel, response, request_id) {
             self.close(status, "failed to encode response");
@@ -180,7 +184,11 @@ impl Connection {
                     None => std::future::pending().await,
                 }
             };
+            let shutdown = self.target.shutdown.clone();
             tokio::select! {
+                _ = shutdown.cancelled(), if !self.transport_closing() => {
+                    self.close(StatusCode::BadServerHalted, "target stopped or reconfigured");
+                }
                 _ = tokio::time::sleep_until(self.deadline.into()) => {
                     self.deadline = Instant::now() + Duration::from_secs(3600);
                     self.close(StatusCode::BadTimeout, "secure channel expired");
