@@ -1,0 +1,16 @@
+services:
+  gateway:
+    build: .
+    image: opcua-audit-gateway:dev
+    restart: unless-stopped
+    ports:
+      # Web UI: loopback only until it has authentication.
+      - "127.0.0.1:8080:8080"
+      # One port per target (OPC UA clients connect here).
+      - "4841:4841"
+    volumes:
+      - ./docker/config.toml:/etc/opcua-audit-gateway/config.toml:ro
+      - gateway-data:/data
+
+volumes:
+  gateway-data:
