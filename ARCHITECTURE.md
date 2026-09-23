@@ -101,12 +101,15 @@ only changes what is bound to certificates or to the channel:
 The status comes from the upstream response, so **rejected writes are audited
 too** (`BadUserAccessDenied` is valuable information).
 
-**Old value.** With `record_old_value = true` the relay reads the current values
-of all nodes in a `Write` request with one `Read` call just before forwarding
-it. This costs one extra round trip per write request.
-
-**Display names.** Written node IDs are resolved to display name / browse path
-in the background and cached. Resolving never delays forwarding.
+**Old value and display name.** With `record_old_value = true`, the relay
+sends one `Read` in the client's own session right before a `Write`. It asks
+for the current value of every written node and, for nodes not yet in the
+per-target name cache, their `DisplayName`. Method calls get the method's
+`DisplayName` the same way. The read and the change are queued back to back,
+so they reach the server in that order. The change does not wait for the
+read, which usually adds only the server's time to answer the read. The read
+runs with the client's permissions: if the user may not read a node, the old
+value simply stays empty.
 
 ### Future: write policies
 
@@ -244,8 +247,8 @@ compose file only publishes it on the host's loopback.
 | 1. Foundation | Config, PKI, audit store with hash chain and retention, discovery and target monitor, REST API, status page, CI, Docker | ✅ done |
 | 2. Relay, security `None` | Binary protocol relay, session handling, request/response correlation, `write`/`call` audit, connection events | ✅ done |
 | 3. Relay, `Sign` / `SignAndEncrypt` | Certificate and signature rewriting, user token re-encryption, trust lists | ✅ done (interop with real PLCs pending) |
-| 4. Old values & display names | Read-before-write, node name cache | next |
-| 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard | |
+| 4. Old values & display names | Read-before-write, node name cache | ✅ done |
+| 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard | next |
 | 6. Browser & export | Address space browser, QuestDB export, chain-head publishing | |
 | 7. Packaging | Windows service, systemd unit, multi-arch images, releases | |
 

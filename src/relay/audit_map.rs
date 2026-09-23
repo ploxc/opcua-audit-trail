@@ -5,12 +5,15 @@
 //! combines that with the response, so every record carries the server's
 //! actual result, including rejections.
 
+use std::collections::HashMap;
+
 use opcua::core::{RequestMessage, ResponseMessage};
 use opcua::types::{
-    AttributeId, DeleteAtTimeDetails, DeleteEventDetails, DeleteRawModifiedDetails,
-    ExtensionObject, StatusCode, UpdateDataDetails, UpdateEventDetails, UpdateStructureDataDetails,
-    Variant,
+    AttributeId, DataValue, DeleteAtTimeDetails, DeleteEventDetails, DeleteRawModifiedDetails,
+    ExtensionObject, NodeId, NumericRange, ReadValueId, StatusCode, UpdateDataDetails,
+    UpdateEventDetails, UpdateStructureDataDetails, Variant,
 };
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use crate::audit::event::{AuditEvent, AuditValue};
@@ -18,17 +21,58 @@ use crate::audit::event::{AuditEvent, AuditValue};
 /// Byte strings and opaque structures longer than this are truncated in the trail.
 const MAX_BYTES: usize = 4096;
 
+/// Most node names the per-target cache keeps before it starts over.
+const NAME_CACHE_SIZE: usize = 100_000;
+
 pub struct WriteItem {
+    node: NodeId,
+    attribute_id: u32,
+    range: NumericRange,
     node_id: String,
     attribute: String,
     index_range: Option<String>,
     new_value: AuditValue,
+    old_value: Option<AuditValue>,
+    display_name: Option<String>,
 }
 
 pub struct CallItem {
+    method: NodeId,
     object_id: String,
     method_id: String,
     input_arguments: Vec<AuditValue>,
+    display_name: Option<String>,
+}
+
+/// Display names of nodes, per target, so a name is read only once.
+#[derive(Default)]
+pub struct NameCache {
+    names: Mutex<HashMap<NodeId, String>>,
+}
+
+impl NameCache {
+    fn get(&self, node: &NodeId) -> Option<String> {
+        self.names.lock().get(node).cloned()
+    }
+
+    fn insert(&self, node: NodeId, name: String) {
+        let mut names = self.names.lock();
+        if names.len() >= NAME_CACHE_SIZE {
+            names.clear();
+        }
+        names.insert(node, name);
+    }
+}
+
+enum PreReadKind {
+    OldValue,
+    Name,
+}
+
+/// Reads sent together with a change request: old values and display names.
+pub struct PreRead {
+    pub nodes_to_read: Vec<ReadValueId>,
+    targets: Vec<(usize, PreReadKind)>,
 }
 
 pub struct HistoryItem {
@@ -53,6 +97,11 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
                 .iter()
                 .flatten()
                 .map(|w| WriteItem {
+                    node: w.node_id.clone(),
+                    attribute_id: w.attribute_id,
+                    range: w.index_range.clone(),
+                    old_value: None,
+                    display_name: None,
                     node_id: w.node_id.to_string(),
                     attribute: attribute_name(w.attribute_id),
                     index_range: (!w.index_range.is_none()).then(|| w.index_range.to_string()),
@@ -71,6 +120,8 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
                 .iter()
                 .flatten()
                 .map(|c| CallItem {
+                    method: c.method_id.clone(),
+                    display_name: None,
                     object_id: c.object_id.to_string(),
                     method_id: c.method_id.to_string(),
                     input_arguments: c
@@ -131,6 +182,91 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
 }
 
 impl AuditPlan {
+    /// Fills in cached names and returns the reads still needed: the current
+    /// value of written nodes (when `old_values`) and uncached display names.
+    pub fn pre_read(&mut self, old_values: bool, names: &NameCache) -> Option<PreRead> {
+        let mut pre = PreRead {
+            nodes_to_read: Vec::new(),
+            targets: Vec::new(),
+        };
+        let want_name =
+            |pre: &mut PreRead, i: usize, node: &NodeId, name: &mut Option<String>| match names
+                .get(node)
+            {
+                Some(cached) => *name = Some(cached),
+                None => {
+                    pre.nodes_to_read.push(ReadValueId {
+                        node_id: node.clone(),
+                        attribute_id: AttributeId::DisplayName as u32,
+                        ..Default::default()
+                    });
+                    pre.targets.push((i, PreReadKind::Name));
+                }
+            };
+        match self {
+            AuditPlan::Write(_, items) => {
+                for (i, item) in items.iter_mut().enumerate() {
+                    if old_values {
+                        pre.nodes_to_read.push(ReadValueId {
+                            node_id: item.node.clone(),
+                            attribute_id: item.attribute_id,
+                            index_range: item.range.clone(),
+                            ..Default::default()
+                        });
+                        pre.targets.push((i, PreReadKind::OldValue));
+                    }
+                    want_name(&mut pre, i, &item.node, &mut item.display_name);
+                }
+            }
+            AuditPlan::Call(_, items) => {
+                for (i, item) in items.iter_mut().enumerate() {
+                    want_name(&mut pre, i, &item.method, &mut item.display_name);
+                }
+            }
+            AuditPlan::HistoryUpdate(..) | AuditPlan::NodeManagement(..) => {}
+        }
+        (!pre.nodes_to_read.is_empty()).then_some(pre)
+    }
+
+    /// Applies the results of [`AuditPlan::pre_read`]. Failed reads (e.g. no
+    /// read access for this user) simply leave the field empty.
+    pub fn apply_pre_read(&mut self, pre: PreRead, results: &[DataValue], names: &NameCache) {
+        let good = |d: &DataValue| d.status.is_none_or(|s| s.is_good());
+        for ((i, kind), result) in pre.targets.into_iter().zip(results) {
+            if !good(result) {
+                continue;
+            }
+            let Some(value) = &result.value else {
+                continue;
+            };
+            match (kind, &mut *self) {
+                (PreReadKind::OldValue, AuditPlan::Write(_, items)) => {
+                    items[i].old_value = Some(audit_value(value));
+                }
+                (PreReadKind::Name, plan) => {
+                    let Variant::LocalizedText(text) = value else {
+                        continue;
+                    };
+                    let name = text.text.as_ref().to_string();
+                    match plan {
+                        AuditPlan::Write(_, items) => {
+                            let item = &mut items[i];
+                            names.insert(item.node.clone(), name.clone());
+                            item.display_name = Some(name);
+                        }
+                        AuditPlan::Call(_, items) => {
+                            let item = &mut items[i];
+                            names.insert(item.method.clone(), name.clone());
+                            item.display_name = Some(name);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn service(&self) -> &'static str {
         match self {
             AuditPlan::Write(..) => "Write",
@@ -183,10 +319,10 @@ impl AuditPlan {
                     .map(|(i, w)| AuditEvent::Write {
                         request_handle,
                         node_id: w.node_id,
-                        display_name: None,
+                        display_name: w.display_name,
                         attribute: w.attribute,
                         index_range: w.index_range,
-                        old_value: None,
+                        old_value: w.old_value,
                         new_value: w.new_value,
                         status: item_status(results.clone(), i),
                     })
@@ -207,7 +343,7 @@ impl AuditPlan {
                         request_handle,
                         object_id: c.object_id,
                         method_id: c.method_id,
-                        display_name: None,
+                        display_name: c.display_name,
                         input_arguments: c.input_arguments,
                         status: item_status(results.clone(), i),
                     })
@@ -453,6 +589,51 @@ mod tests {
             };
             assert_eq!(status, "BadSessionIdInvalid");
         }
+    }
+
+    #[test]
+    fn pre_read_fills_old_values_and_names() {
+        let names = NameCache::default();
+        let mut plan = plan(&write_request()).unwrap();
+        let pre = plan.pre_read(true, &names).unwrap();
+        // Old value + display name for each of the two nodes.
+        assert_eq!(pre.nodes_to_read.len(), 4);
+        let results = vec![
+            DataValue::new_now(10.0f64),
+            DataValue::new_now(opcua::types::LocalizedText::from("Setpoint")),
+            DataValue {
+                status: Some(StatusCode::BadUserAccessDenied),
+                ..Default::default()
+            },
+            DataValue::new_now(opcua::types::LocalizedText::from("Mode")),
+        ];
+        plan.apply_pre_read(pre, &results, &names);
+        let response: ResponseMessage = WriteResponse {
+            response_header: ResponseHeader::new_good(42),
+            results: Some(vec![StatusCode::Good, StatusCode::Good]),
+            diagnostic_infos: None,
+        }
+        .into();
+        let events = plan.events(&response);
+        let AuditEvent::Write {
+            old_value,
+            display_name,
+            ..
+        } = &events[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(old_value.as_ref().unwrap().value, json!(10.0));
+        assert_eq!(display_name.as_deref(), Some("Setpoint"));
+        let AuditEvent::Write { old_value, .. } = &events[1] else {
+            unreachable!()
+        };
+        assert!(old_value.is_none(), "unreadable old value stays empty");
+
+        // Names come from the cache the second time.
+        let mut plan = super::plan(&write_request()).unwrap();
+        let pre = plan.pre_read(false, &names);
+        assert!(pre.is_none());
     }
 
     #[test]

@@ -26,9 +26,13 @@ use serde::Serialize;
 
 use crate::audit::event::ClientContext;
 use crate::audit::AuditHandle;
-use crate::config::{Config, FailMode, TargetConfig};
+use crate::config::{AuditConfig, Config, FailMode, TargetConfig};
 use crate::discovery::{self, TargetStatuses};
 use transport::Limits;
+
+/// Request handles the gateway uses in client sessions start here, far away
+/// from the small numbers clients count up from.
+const GATEWAY_REQUEST_HANDLES: u32 = 0xF000_0000;
 
 /// The gateway's own application identity, shared by all targets.
 pub struct GatewayIdentity {
@@ -142,12 +146,15 @@ pub struct RelayTarget {
     pub discovery: Arc<Client>,
     pub audit: AuditHandle,
     pub fail_mode: FailMode,
+    pub record_old_value: bool,
+    pub names: audit_map::NameCache,
     pub sessions: SessionRegistry,
     pub clients: RwLock<BTreeMap<u64, ClientInfo>>,
     pub limits: Limits,
     pub decoding: DecodingOptions,
     channel_ids: AtomicU32,
     connection_ids: AtomicU64,
+    request_handles: AtomicU32,
 }
 
 impl RelayTarget {
@@ -157,7 +164,7 @@ impl RelayTarget {
         statuses: TargetStatuses,
         discovery: Arc<Client>,
         audit: AuditHandle,
-        fail_mode: FailMode,
+        audit_config: &AuditConfig,
     ) -> Self {
         let limits = Limits::default();
         Self {
@@ -168,12 +175,21 @@ impl RelayTarget {
             statuses,
             discovery,
             audit,
-            fail_mode,
+            fail_mode: audit_config.fail_mode,
+            record_old_value: audit_config.record_old_value,
+            names: audit_map::NameCache::default(),
             sessions: SessionRegistry::default(),
             clients: RwLock::new(BTreeMap::new()),
             channel_ids: AtomicU32::new(1),
             connection_ids: AtomicU64::new(1),
+            request_handles: AtomicU32::new(GATEWAY_REQUEST_HANDLES),
         }
+    }
+
+    /// Request handle for requests the gateway itself sends in a client's
+    /// session (the reads for old values and names).
+    fn next_request_handle(&self) -> u32 {
+        self.request_handles.fetch_add(1, Ordering::Relaxed)
     }
 
     fn next_channel_id(&self) -> u32 {

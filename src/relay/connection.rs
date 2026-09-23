@@ -26,8 +26,9 @@ use opcua::types::{
     ChannelSecurityToken, CreateSessionRequest, CreateSessionResponse, DateTime,
     EndpointDescription, ExtensionObject, FindServersResponse, GetEndpointsResponse,
     IssuedIdentityToken, MessageSecurityMode, OpenSecureChannelRequest, OpenSecureChannelResponse,
-    ResponseHeader, SecurityTokenRequestType, ServiceFault, SignatureData, StatusCode,
-    UserNameIdentityToken, UserTokenType, X509IdentityToken,
+    ReadRequest, RequestHeader, ResponseHeader, SecurityTokenRequestType, ServiceFault,
+    SignatureData, StatusCode, TimestampsToReturn, UserNameIdentityToken, UserTokenType,
+    X509IdentityToken,
 };
 use tokio::net::TcpStream;
 
@@ -43,6 +44,7 @@ use crate::config::FailMode;
 const MAX_TOKEN_LIFETIME_MS: u32 = 3_600_000;
 const MIN_TOKEN_LIFETIME_MS: u32 = 10_000;
 const NONCE_LENGTH: usize = 32;
+const PRE_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Pending = BoxFuture<'static, (u32, ResponseMessage)>;
 
@@ -1015,7 +1017,10 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
         })
         .unwrap_or_else(|| ctx.client.clone());
 
-    let plan = audit_map::plan(&request);
+    let mut plan = audit_map::plan(&request);
+    let pre_read = plan
+        .as_mut()
+        .and_then(|p| p.pre_read(ctx.target.record_old_value, &ctx.target.names));
     let fail_closed = ctx.target.fail_mode == FailMode::Closed;
     if let (Some(plan), true) = (&plan, fail_closed) {
         let entry = AuditEntry::new(plan.intent())
@@ -1030,10 +1035,41 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
         }
     }
 
-    let response = match ctx.upstream.send(request, timeout).await {
-        Ok(r) => r,
-        Err(e) => fault(handle, e.status()),
+    let response = match pre_read {
+        None => ctx.upstream.send(request, timeout).await,
+        Some(pre) => {
+            // Queue the read right before the change, in the client's own
+            // session, without waiting: both reach the server in order and the
+            // change is not delayed by an extra round trip.
+            let read = ReadRequest {
+                request_header: RequestHeader {
+                    authentication_token: header.authentication_token.clone(),
+                    timestamp: DateTime::now(),
+                    request_handle: ctx.target.next_request_handle(),
+                    timeout_hint: PRE_READ_TIMEOUT.as_millis() as u32,
+                    ..Default::default()
+                },
+                max_age: 0.0,
+                timestamps_to_return: TimestampsToReturn::Neither,
+                nodes_to_read: Some(pre.nodes_to_read.clone()),
+            };
+            // `biased`: poll (and so queue) the read first.
+            let (read, response) = tokio::join!(
+                biased;
+                ctx.upstream.send(read.into(), PRE_READ_TIMEOUT),
+                ctx.upstream.send(request, timeout)
+            );
+            if let (Some(plan), Ok(ResponseMessage::Read(read))) = (plan.as_mut(), read) {
+                plan.apply_pre_read(
+                    pre,
+                    read.results.as_deref().unwrap_or_default(),
+                    &ctx.target.names,
+                );
+            }
+            response
+        }
     };
+    let response = response.unwrap_or_else(|e| fault(handle, e.status()));
 
     if let Some(plan) = plan {
         for event in plan.events(&response) {

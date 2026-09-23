@@ -8,11 +8,12 @@ audit trail of every write, method call and client session. It is a single Rust
 binary that runs standalone (Linux, Windows, macOS, ARM PLCs such as PLCnext) or
 in Docker.
 
-> **Status: milestones 1–3 of 7.** The relay works for security `None`, `Sign`
+> **Status: milestones 1–4 of 7.** The relay works for security `None`, `Sign`
 > and `SignAndEncrypt` (all RSA policies), anonymous and user name logins, and
 > every service (reads, writes, subscriptions, method calls, …). Writes, method
 > calls, history updates, node management, sessions and connections are
-> audited. Next: old values and display names in the trail, then the web UI.
+> audited, with old value → new value and the node's display name.
+> Next: the web UI.
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap.
 
 ## Quick start (binary)

@@ -150,7 +150,7 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
             statuses.clone(),
             client.clone(),
             audit.clone(),
-            config.audit.fail_mode,
+            &config.audit,
         ));
         tokio::spawn(relay::serve(relay.clone()));
         relays.push(relay);

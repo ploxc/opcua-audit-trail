@@ -182,7 +182,7 @@ async fn harness(fail_mode: FailMode) -> Harness {
         statuses,
         client,
         audit.clone(),
-        fail_mode,
+        &config.audit,
     ));
     tokio::spawn(serve(relay));
 
@@ -359,6 +359,8 @@ async fn anonymous_write_through_insecure_channel_is_audited() {
     assert_eq!(client.user, Some(UserIdentity::Anonymous));
     let AuditEvent::Write {
         node_id,
+        display_name,
+        old_value,
         new_value,
         status,
         ..
@@ -367,6 +369,8 @@ async fn anonymous_write_through_insecure_channel_is_audited() {
         panic!("not a write: {:?}", record.entry.event);
     };
     assert_eq!(node_id, &h.setpoint.to_string());
+    assert_eq!(display_name.as_deref(), Some("Setpoint"));
+    assert_eq!(old_value.as_ref().unwrap().value, serde_json::json!(0.0));
     assert_eq!(new_value.value, serde_json::json!(12.5));
     assert_eq!(status, "Good");
 
@@ -513,6 +517,7 @@ async fn method_call_is_audited() {
     assert_eq!(calls.len(), 1);
     let AuditEvent::Call {
         method_id,
+        display_name,
         input_arguments,
         status,
         ..
@@ -521,6 +526,7 @@ async fn method_call_is_audited() {
         unreachable!()
     };
     assert_eq!(method_id, &h.method.to_string());
+    assert_eq!(display_name.as_deref(), Some("Reset"));
     assert_eq!(input_arguments[0].value, serde_json::json!(3));
     assert_eq!(status, "Good");
 }
@@ -668,5 +674,17 @@ async fn secure_channel_token_renewal_keeps_the_connection() {
     // the channel was renewed, not re-established.
     assert_eq!(h.records("client_connected").await.len(), 2);
     assert_eq!(h.records("session_created").await.len(), 1);
-    assert_eq!(h.records("write").await.len(), 3);
+    let olds: Vec<_> = h
+        .records("write")
+        .await
+        .into_iter()
+        .map(|r| match r.entry.event {
+            AuditEvent::Write { old_value, .. } => old_value.map(|v| v.value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        olds,
+        [0.0, 1.0, 2.0].map(|v| Some(serde_json::json!(v))).to_vec()
+    );
 }
