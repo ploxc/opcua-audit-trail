@@ -8,9 +8,11 @@ audit trail of every write, method call and client session. It is a single Rust
 binary that runs standalone (Linux, Windows, macOS, ARM PLCs such as PLCnext) or
 in Docker.
 
-> **Status: milestone 1 of 7.** Configuration, certificates, the audit store,
-> target discovery/monitoring and the REST API work. The OPC UA relay itself is
-> the next milestone, so clients cannot connect through the gateway yet.
+> **Status: milestones 1–3 of 7.** The relay works for security `None`, `Sign`
+> and `SignAndEncrypt` (all RSA policies), anonymous and user name logins, and
+> every service (reads, writes, subscriptions, method calls, …). Writes, method
+> calls, history updates, node management, sessions and connections are
+> audited. Next: old values and display names in the trail, then the web UI.
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap.
 
 ## Quick start (binary)
@@ -24,6 +26,9 @@ cargo build --release
 ./target/release/opcua-audit-gateway verify      # check the audit trail's hash chain
 ```
 
+Clients now connect to the gateway (`opc.tcp://<gateway>:<listen port>`)
+instead of the PLC.
+
 `discover` lists the server's security policies, modes and login methods (example output):
 
 ```
@@ -32,6 +37,21 @@ security policy          mode             level  user tokens
 Basic256Sha256           SignAndEncrypt       3  Anonymous, UserName
 None                     None                 0  Anonymous, UserName
 ```
+
+## Certificates
+
+The gateway follows standard OPC UA trust handling, in its `pki/` directory:
+
+* **PLC → gateway.** The PLC must trust the gateway certificate,
+  `pki/own/cert.der`. Import it into the PLC's trust list. The PLC should
+  trust *only* the gateway, so no client can bypass it.
+* **Gateway → PLC.** On the first secure connection the PLC certificate lands
+  in `pki/rejected/`. Move it to `pki/trusted/`.
+* **Client → gateway.** Unknown client certificates land in `pki/rejected/`,
+  and each one is recorded as `certificate_rejected` in the audit trail. Move a
+  certificate to `pki/trusted/` to allow that client.
+
+The web UI will turn these moves into buttons.
 
 ## Quick start (Docker)
 
@@ -48,6 +68,7 @@ Data (certificates and the audit database) lives in the `gateway-data` volume.
 |---|---|---|
 | GET | `/api/status` | Version, certificate, targets with upstream state and endpoints |
 | GET | `/api/targets` | Target status only |
+| GET | `/api/targets/{name}/clients` | Clients connected through the gateway |
 | POST | `/api/targets/{name}/discover` | Discover a configured target now |
 | POST | `/api/discover` | `{"endpoint_url": "opc.tcp://…"}`: discover any server |
 | GET | `/api/certificates` | Own, trusted and rejected certificates |

@@ -68,6 +68,25 @@ only changes what is bound to certificates or to the channel:
 | `CloseSession`, `CloseSecureChannel` | Mirrored to the other side |
 | everything else | Forwarded unchanged; request and response are correlated by `requestHandle` |
 
+### Implementation notes
+
+* **Upstream channel.** The upstream side uses async-opcua's client secure
+  channel (`AsyncSecureChannel`), which handles Hello, OpenSecureChannel,
+  token renewal, chunking and request matching. The downstream side is the
+  gateway's own server transport (`src/relay/transport.rs`) on top of
+  async-opcua's `SecureChannel`.
+* **Byte-exact pass-through.** Structures the gateway does not know (vendor
+  UDTs, custom types) are kept as opaque bytes and re-encoded unchanged.
+* **Ordering.** Requests are forwarded in the order the client sends them.
+  Responses return as soon as they arrive, so a pending `Publish` never blocks
+  other requests.
+* **Sessions outlive connections.** Sessions are tracked by authentication
+  token, so a client that reconnects can re-activate its session on a new
+  connection. The upstream server sees the same gateway certificate and accepts
+  it.
+* **Timeouts.** The upstream timeout is the client's `timeoutHint` plus 5 s,
+  so the client always sees its own timeout first.
+
 ### What is audited
 
 | Service | Audit record |
@@ -223,9 +242,9 @@ compose file only publishes it on the host's loopback.
 | Milestone | Content | Status |
 |---|---|---|
 | 1. Foundation | Config, PKI, audit store with hash chain and retention, discovery and target monitor, REST API, status page, CI, Docker | ✅ done |
-| 2. Relay, security `None` | Binary protocol relay, session handling, request/response correlation, `write`/`call` audit, connection events | next |
-| 3. Relay, `Sign` / `SignAndEncrypt` | Certificate and signature rewriting, user token re-encryption, trust lists; interop against the four PLC families | |
-| 4. Old values & display names | Read-before-write, node name cache | |
+| 2. Relay, security `None` | Binary protocol relay, session handling, request/response correlation, `write`/`call` audit, connection events | ✅ done |
+| 3. Relay, `Sign` / `SignAndEncrypt` | Certificate and signature rewriting, user token re-encryption, trust lists | ✅ done (interop with real PLCs pending) |
+| 4. Old values & display names | Read-before-write, node name cache | next |
 | 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard | |
 | 6. Browser & export | Address space browser, QuestDB export, chain-head publishing | |
 | 7. Packaging | Windows service, systemd unit, multi-arch images, releases | |
@@ -243,4 +262,6 @@ compose file only publishes it on the host's loopback.
 | Targets per instance | Several, one listen port each |
 | Integrity | Hash chain + retention |
 | Blocking writes | Not in v1; the relay has a hook for it |
+| X509 / issued user tokens | Rejected with `BadIdentityTokenRejected` and audited, and not offered in the endpoint list; a per-target service account is a later option |
+| Fail-closed guarantee | A `change_intent` record is committed before a change request is forwarded; the outcome follows as a normal record |
 | Web UI login | Local users with roles |

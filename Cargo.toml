@@ -12,17 +12,21 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+arc-swap = "1"
 async-opcua = { version = "0.19", features = ["client"] }
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
 hex = "0.4"
+parking_lot = "0.12"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -32,6 +36,11 @@ async-opcua = { version = "0.19", features = ["client", "server"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+# Optimise dependencies in dev/test builds: RSA key generation and
+# encryption are unbearably slow unoptimised.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 lto = "thin"

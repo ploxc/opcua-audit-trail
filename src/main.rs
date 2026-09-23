@@ -2,6 +2,7 @@ mod audit;
 mod config;
 mod discovery;
 mod pki;
+mod relay;
 mod web;
 
 use std::path::{Path, PathBuf};
@@ -135,6 +136,7 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
 
     let client = Arc::new(discovery::discovery_client(&config)?);
     let statuses = discovery::initial_statuses(&config);
+    let mut relays = Vec::new();
     for target in &config.targets {
         tokio::spawn(discovery::monitor_target(
             client.clone(),
@@ -142,11 +144,16 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
             statuses.clone(),
             audit.clone(),
         ));
-    }
-    if !config.targets.is_empty() {
-        tracing::warn!(
-            "client listeners are not active yet: this build monitors targets and records the audit trail, the relay follows in the next milestone"
-        );
+        let relay = Arc::new(relay::RelayTarget::new(
+            target.clone(),
+            Arc::new(relay::GatewayIdentity::load(&config, target)?),
+            statuses.clone(),
+            client.clone(),
+            audit.clone(),
+            config.audit.fail_mode,
+        ));
+        tokio::spawn(relay::serve(relay.clone()));
+        relays.push(relay);
     }
 
     let state = web::AppState {
@@ -156,6 +163,7 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
         reader: AuditReader::new(&db),
         client,
         pki: Arc::new(pki),
+        relays,
     };
     let listener = tokio::net::TcpListener::bind(config.web.listen)
         .await

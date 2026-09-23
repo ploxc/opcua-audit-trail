@@ -144,6 +144,14 @@ pub enum AuditEvent {
     },
 
     // Changes to the server
+    /// Fail-closed mode: committed before a change request is forwarded, so
+    /// nothing reaches the server without a record. The outcome follows as
+    /// `write`/`call`/... records with the same `request_handle`.
+    ChangeIntent {
+        request_handle: u32,
+        service: String,
+        node_ids: Vec<String>,
+    },
     Write {
         request_handle: u32,
         node_id: String,
@@ -199,6 +207,7 @@ impl AuditEvent {
             AuditEvent::SessionClosed => "session_closed",
             AuditEvent::AuthenticationFailed { .. } => "authentication_failed",
             AuditEvent::CertificateRejected { .. } => "certificate_rejected",
+            AuditEvent::ChangeIntent { .. } => "change_intent",
             AuditEvent::Write { .. } => "write",
             AuditEvent::Call { .. } => "call",
             AuditEvent::HistoryUpdate { .. } => "history_update",

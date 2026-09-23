@@ -15,6 +15,7 @@ use crate::audit::{AuditHandle, AuditReader};
 use crate::config::Config;
 use crate::discovery::{self, EndpointInfo, TargetStatus, TargetStatuses};
 use crate::pki::{CertificateInfo, Pki};
+use crate::relay::{ClientInfo, RelayTarget};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +25,7 @@ pub struct AppState {
     pub reader: AuditReader,
     pub client: Arc<Client>,
     pub pki: Arc<Pki>,
+    pub relays: Vec<Arc<RelayTarget>>,
 }
 
 pub struct ApiError(StatusCode, String);
@@ -60,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/status", get(status))
         .route("/api/targets", get(targets))
         .route("/api/targets/{name}/discover", post(discover_target))
+        .route("/api/targets/{name}/clients", get(target_clients))
         .route("/api/discover", post(discover_url))
         .route("/api/certificates", get(certificates))
         .route("/api/audit", get(audit_query))
@@ -116,6 +119,17 @@ async fn discover_target(
         .await
         .map(Json)
         .map_err(ApiError::upstream)
+}
+
+async fn target_clients(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Vec<ClientInfo>> {
+    s.relays
+        .iter()
+        .find(|r| r.config.name == name)
+        .map(|r| Json(r.clients()))
+        .ok_or_else(|| ApiError::not_found(format!("unknown target '{name}'")))
 }
 
 #[derive(Deserialize)]
@@ -199,6 +213,7 @@ mod tests {
             audit,
             reader: AuditReader::new(&db),
             pki: Arc::new(pki),
+            relays: Vec::new(),
         }
     }
 

@@ -102,14 +102,21 @@ pub fn discovery_client(config: &Config) -> anyhow::Result<Client> {
 
 /// Calls GetEndpoints on the server. Needs no security and no trust: it is the
 /// unauthenticated first step every OPC UA client does.
-pub async fn discover(client: &Client, endpoint_url: &str) -> anyhow::Result<Vec<EndpointInfo>> {
-    let endpoints = client
+pub async fn discover_raw(
+    client: &Client,
+    endpoint_url: &str,
+) -> anyhow::Result<Vec<EndpointDescription>> {
+    let mut endpoints = client
         .get_server_endpoints_from_url(endpoint_url)
         .await
         .map_err(|e| anyhow!("GetEndpoints on {endpoint_url} failed: {e}"))?;
-    let mut infos: Vec<EndpointInfo> = endpoints.iter().map(EndpointInfo::from).collect();
-    infos.sort_by_key(|e| std::cmp::Reverse(e.security_level));
-    Ok(infos)
+    endpoints.sort_by_key(|e| std::cmp::Reverse(e.security_level));
+    Ok(endpoints)
+}
+
+pub async fn discover(client: &Client, endpoint_url: &str) -> anyhow::Result<Vec<EndpointInfo>> {
+    let endpoints = discover_raw(client, endpoint_url).await?;
+    Ok(endpoints.iter().map(EndpointInfo::from).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -129,6 +136,9 @@ pub struct TargetStatus {
     pub last_check: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
     pub endpoints: Vec<EndpointInfo>,
+    /// Full endpoint descriptions (with certificate), used by the relay.
+    #[serde(skip)]
+    pub raw_endpoints: Vec<EndpointDescription>,
 }
 
 impl TargetStatus {
@@ -141,6 +151,7 @@ impl TargetStatus {
             last_check: None,
             last_error: None,
             endpoints: Vec::new(),
+            raw_endpoints: Vec::new(),
         }
     }
 }
@@ -169,7 +180,7 @@ pub async fn monitor_target(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let result = discover(&client, &target.endpoint_url).await;
+        let result = discover_raw(&client, &target.endpoint_url).await;
 
         let mut map = statuses.write().await;
         let Some(status) = map.get_mut(&target.name) else {
@@ -186,7 +197,8 @@ pub async fn monitor_target(
                     });
                 status.state = UpstreamState::Available;
                 status.last_error = None;
-                status.endpoints = endpoints;
+                status.endpoints = endpoints.iter().map(EndpointInfo::from).collect();
+                status.raw_endpoints = endpoints;
                 event
             }
             Err(e) => {
