@@ -108,7 +108,7 @@ pub async fn discover(client: &Client, endpoint_url: &str) -> anyhow::Result<Vec
         .await
         .map_err(|e| anyhow!("GetEndpoints on {endpoint_url} failed: {e}"))?;
     let mut infos: Vec<EndpointInfo> = endpoints.iter().map(EndpointInfo::from).collect();
-    infos.sort_by(|a, b| b.security_level.cmp(&a.security_level));
+    infos.sort_by_key(|e| std::cmp::Reverse(e.security_level));
     Ok(infos)
 }
 
