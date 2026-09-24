@@ -875,8 +875,7 @@ function browserView() {
       <div>
         <div class="card"><div class="card-head"><h2>${b.selected ? "Attributes" : "Select a node"}</h2>
           ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), html`<button class="small" data-action="watch" data-node="${b.selected}">Watch value</button>`)}</div>
-          ${when(b.selected, html`<div class="table-wrap"><table><tbody>${b.attributes.map((a) => html`<tr><th>${a.attribute}</th>
-            <td class="mono">${attributeText(a)} <span class="muted">${a.value.data_type}</span></td></tr>`)}</tbody></table></div>`)}
+          ${when(b.selected, html`<div class="table-wrap"><table class="attributes"><tbody>${b.attributes.map(attributeRow)}</tbody></table></div>`)}
           ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), () => ignoreControls({ target: b.target, node_id: b.selected, name: browserNodeName() }))}
         </div>
         <div class="card"><div class="card-head"><h2>Watch list</h2><span class="muted small">refreshes every second</span></div>
@@ -896,11 +895,29 @@ const ACCESS_BITS = ["CurrentRead", "CurrentWrite", "HistoryRead", "HistoryWrite
 // The selected node's display name, as the watch list shows it.
 function browserNodeName() {
   const name = state.browser.attributes.find((a) => a.attribute === "DisplayName");
-  return name ? valueText(name.value) : "";
+  return name?.value ? valueText(name.value) : "";
 }
+
+// One attribute: its value, or the status the server gave instead (e.g. a
+// value it has not received from its data source yet), and for the value
+// its timestamps.
+function attributeRow(a) {
+  const value = a.value ? html`<span class="mono">${attributeText(a)}</span>
+      ${when(a.note, html` <span class="badge plain neutral">${a.note}</span>`)}
+      <span class="muted small">${a.value.data_type}</span>` : "";
+  const status = when(a.status, html`<div><span class="badge plain ${a.status.startsWith("Uncertain") ? "warn" : "bad"} mono">${a.status}</span></div>
+      <div class="muted small">${a.status_description}</div>`);
+  const stamps = when(a.source_timestamp || a.server_timestamp, html`<div class="muted small">
+      ${when(a.source_timestamp, html`Source ${time(a.source_timestamp)}`)}${when(a.source_timestamp && a.server_timestamp, " · ")}${when(a.server_timestamp, html`Server ${time(a.server_timestamp)}`)}</div>`);
+  return html`<tr><th>${a.attribute}</th><td>${value}${status}${stamps}</td></tr>`;
+}
+
+const VALUE_RANKS = { "-3": "scalar or one dimension", "-2": "any", "-1": "scalar", 0: "one or more dimensions", 1: "one dimension" };
 
 function attributeText(a) {
   const v = a.value.value;
+  if (a.attribute === "ValueRank") return `${v} (${VALUE_RANKS[v] || `${v} dimensions`})`;
+  if (a.attribute === "MinimumSamplingInterval") return v === 0 ? "0 (as fast as possible)" : v < 0 ? `${v} (not known)` : `${v} ms`;
   if (a.attribute === "NodeClass") return NODE_CLASSES[v] || v;
   if (a.attribute === "AccessLevel" || a.attribute === "UserAccessLevel") {
     const names = ACCESS_BITS.filter((_, i) => v & (1 << i));
@@ -1266,7 +1283,7 @@ const actions = {
     const id = el.dataset.node;
     if (!b.watch.some((w) => w.node_id === id)) {
       const name = b.attributes.find((a) => a.attribute === "DisplayName");
-      b.watch.push({ node_id: id, name: name ? valueText(name.value) : id });
+      b.watch.push({ node_id: id, name: name?.value ? valueText(name.value) : id });
     }
     renderPage(); schedule("browser");
   },
