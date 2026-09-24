@@ -139,11 +139,17 @@ function toast(message, kind = "") {
     host.className = "toast-host";
     document.body.append(host);
   }
-  const t = document.createElement("div");
-  t.className = "toast " + kind;
-  t.textContent = message;
-  host.append(t);
-  setTimeout(() => t.remove(), kind === "bad" ? 7000 : 3500);
+  // The same message again (e.g. a failing refresh) keeps the one shown
+  // and restarts its timer instead of stacking another.
+  let t = [...host.children].find((x) => x.textContent === message && x.className === "toast " + kind);
+  if (!t) {
+    t = document.createElement("div");
+    t.className = "toast " + kind;
+    t.textContent = message;
+    host.append(t);
+  }
+  clearTimeout(t.timer);
+  t.timer = setTimeout(() => t.remove(), kind === "bad" ? 7000 : 3500);
 }
 const fail = (e) => {
   // 409 from the browser API: its session on the target is gone.
