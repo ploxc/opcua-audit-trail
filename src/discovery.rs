@@ -100,16 +100,31 @@ pub fn discovery_client(config: &Config) -> anyhow::Result<Client> {
         .map_err(|errors| anyhow!("invalid discovery client config: {}", errors.join("; ")))
 }
 
+/// How long discovery may take in all, connecting included.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Calls GetEndpoints on the server. Needs no security and no trust: it is the
 /// unauthenticated first step every OPC UA client does.
 pub async fn discover_raw(
     client: &Client,
     endpoint_url: &str,
 ) -> anyhow::Result<Vec<EndpointDescription>> {
-    let mut endpoints = client
-        .get_server_endpoints_from_url(endpoint_url)
-        .await
-        .map_err(|e| anyhow!("GetEndpoints on {endpoint_url} failed: {e}"))?;
+    discover_within(client, endpoint_url, DISCOVERY_TIMEOUT).await
+}
+
+/// The request timeout does not cover connecting: a server that accepts the
+/// TCP connection but never answers (e.g. a PLC still starting up) would keep
+/// discovery, and so the target's status, waiting forever.
+async fn discover_within(
+    client: &Client,
+    endpoint_url: &str,
+    limit: Duration,
+) -> anyhow::Result<Vec<EndpointDescription>> {
+    let mut endpoints =
+        tokio::time::timeout(limit, client.get_server_endpoints_from_url(endpoint_url))
+            .await
+            .map_err(|_| anyhow!("{endpoint_url} did not answer within {} s", limit.as_secs()))?
+            .map_err(|e| anyhow!("GetEndpoints on {endpoint_url} failed: {e}"))?;
     endpoints.sort_by_key(|e| std::cmp::Reverse(e.security_level));
     Ok(endpoints)
 }
@@ -272,6 +287,39 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    /// A server that accepts the connection and then says nothing, like a
+    /// PLC that is still starting: discovery must give up, not hang (the
+    /// target stayed "Checking…" until the gateway restarted).
+    #[tokio::test]
+    async fn a_silent_server_does_not_hang_discovery() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.gateway.pki_dir = dir.path().join("pki");
+        crate::pki::Pki::open(&config.gateway.pki_dir)
+            .unwrap()
+            .ensure_own_certificate(&config.gateway)
+            .unwrap();
+        let client = discovery_client(&config).unwrap();
+        let started = std::time::Instant::now();
+        let result = discover_within(
+            &client,
+            &format!("opc.tcp://127.0.0.1:{port}/"),
+            Duration::from_secs(2),
+        )
+        .await;
+        let err = result.expect_err("no answer is an error");
+        assert!(format!("{err:#}").contains("did not answer"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     /// In-process OPC UA server standing in for a PLC.
