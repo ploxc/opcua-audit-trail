@@ -244,7 +244,8 @@ th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--lin
 th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
 td.nowrap, th.nowrap, span.nowrap { white-space: nowrap; }
 /* Who did it: wide enough for a user, an application and an address. */
-td.client { min-width: 220px; }
+td.client { min-width: 176px; }
+td.target { min-width: 150px; }
 td.num { font-variant-numeric: tabular-nums; }
 tbody tr.clickable { cursor: pointer; }
 tbody tr.clickable:hover { background: var(--hover); }

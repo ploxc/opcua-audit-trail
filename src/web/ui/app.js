@@ -508,7 +508,7 @@ function auditTable(rows, { compact = false, selectable = false } = {}) {
     <tbody>${rows.map((r) => html`<tr class="${selectable ? "clickable" : ""} ${state.audit.selected === r.seq ? "selected" : ""}" ${new Html(selectable ? `data-action="select-record" data-seq="${r.seq}"` : "")}>
       ${when(!compact, html`<td class="num muted">${r.seq}</td>`)}
       <td class="nowrap">${time(r.ts)}</td>
-      <td>${r.target || ""}</td>
+      <td class="target">${r.target || ""}</td>
       <td>${eventBadge(r.event.type)}</td>
       <td class="client">${r.client ? html`<div>${userLabel(r.client)}</div><div class="muted small" title="${r.client.application_uri || ""}">${r.client.application_name || ""} <span class="nowrap">${r.client.remote_addr}</span></div>` : ""}</td>
       <td>${eventSummary(r.event, r.target)}</td>
@@ -591,6 +591,21 @@ function endpointsTable(endpoints, minSecurity) {
     })}</tbody></table></div>`;
 }
 
+// Whether the target accepts the gateway's certificate (checked by the
+// gateway with a secure channel, before any client needs it).
+function gatewayTrust(g) {
+  switch (g?.state) {
+    case "trusted": return html`<div class="alert ok small">The target accepts the gateway (checked with ${g.policy}).</div>`;
+    case "refused": return html`<div class="alert bad small"><b>The target refuses the gateway.</b> It does not trust this certificate yet, so no client can connect securely.
+      Download it below and trust it on the target: on a PLC, add it to its OPC UA trust list; on OPC PLC, move it from <span class="mono">pki/rejected/certs</span> to <span class="mono">pki/trusted/certs</span>.
+      Then press Discover to check again.</div>`;
+    case "target_not_trusted": return html`<div class="alert warn small">Not checked yet: trust the target's certificate first (above).</div>`;
+    case "no_secure_endpoint": return html`<div class="muted small">The target offers no secure endpoint, so it needs no certificate from the gateway.</div>`;
+    case "failed": return html`<div class="alert warn small">Could not check: ${g.detail}</div>`;
+    default: return html`<div class="muted small">Checking whether the target accepts the gateway…</div>`;
+  }
+}
+
 // Everything about security for one target: endpoints, logins, certificates.
 // `editing` puts the minimum security choice in place.
 function securitySection(t, endpoints, { editing = false } = {}) {
@@ -620,6 +635,7 @@ function securitySection(t, endpoints, { editing = false } = {}) {
             ${when(!trusted.has(cert.thumbprint), html`<div class="muted">The gateway only makes encrypted connections to a target it trusts.</div>`)}`
           : html`<span class="muted">Unknown: discover the target first.</span>`}</dd>
         <dt>Gateway's certificate</dt><dd>${own ? html`${own.subject}<div class="mono muted">${own.thumbprint}</div>` : ""}
+          ${gatewayTrust(t.status?.gateway_trust)}
           <div class="muted">The target must trust this one (import it on the PLC), and should trust only this one, so no client can bypass the gateway.
             The same certificate for all targets: see <a href="#/certificates">Certificates</a>.</div>
           <a class="button small mt-xs" href="/api/certificates/own/cert.der">Download</a></dd>
@@ -639,7 +655,7 @@ function targetsView() {
       The gateway keeps no session of its own on the target: for every client, it opens a connection to the target with the gateway's certificate and passes that client's requests and login on, recording every change.</p>
     ${when(editing?.original === null, () => targetForm(editing))}
     ${s.targets.map((t) => editing?.original === t.name ? targetForm(editing, t) : html`<div class="card">
-      <div class="card-head"><div class="inline"><h2>${t.name}</h2>${stateBadge(t.status?.state)}</div>
+      <div class="card-head"><div class="inline"><h2>${t.name}</h2>${stateBadge(t.status?.state)}${when(t.status?.gateway_trust?.state === "refused", html`<span class="badge bad">refuses the gateway</span>`)}</div>
         <div class="inline">
           ${when(can("operator"), html`<button class="small" data-action="discover-target" data-name="${t.name}">Discover</button>`)}
           ${when(can("admin") && !editing, html`<button class="small" data-action="edit-target" data-name="${t.name}">Edit</button>

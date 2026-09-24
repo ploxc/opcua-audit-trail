@@ -504,10 +504,14 @@ async fn discover_target(
 ) -> ApiResult<Vec<EndpointInfo>> {
     user.require(Role::Operator)?;
     let url = target_url(&s, &name).await?;
-    discovery::discover(&s.client, &url)
+    let endpoints = discovery::discover(&s.client, &url)
         .await
-        .map(Json)
-        .map_err(ApiError::upstream)
+        .map_err(ApiError::upstream)?;
+    // And whether the target accepts the gateway, so the page shows it now.
+    if let Some(relay) = s.targets.relay(&name).await {
+        relay.check_gateway_trust().await;
+    }
+    Ok(Json(endpoints))
 }
 
 #[derive(Deserialize)]
@@ -552,6 +556,10 @@ async fn trust_server(
         ),
     )
     .await;
+    // Now the gateway can check whether the target accepts it.
+    if let Some(relay) = s.targets.relay(&name).await {
+        relay.check_gateway_trust().await;
+    }
     Ok(Json(info))
 }
 

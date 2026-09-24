@@ -154,6 +154,27 @@ pub struct TargetStatus {
     /// Full endpoint descriptions (with certificate), used by the relay.
     #[serde(skip)]
     pub raw_endpoints: Vec<EndpointDescription>,
+    /// Whether the target accepts the gateway on a secure channel.
+    pub gateway_trust: GatewayTrust,
+}
+
+/// The result of opening a secure channel to the target with the gateway's
+/// certificate, as the relay does for every client.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GatewayTrust {
+    #[default]
+    Unknown,
+    /// The target offers no secure endpoint (none above the minimum).
+    NoSecureEndpoint,
+    /// Not tried: the gateway does not trust the target's certificate yet.
+    TargetNotTrusted,
+    /// The target refused the gateway's certificate.
+    Refused { detail: String },
+    /// The target accepted the gateway.
+    Trusted { policy: String },
+    /// Something else went wrong (e.g. the target is unreachable).
+    Failed { detail: String },
 }
 
 impl TargetStatus {
@@ -167,6 +188,7 @@ impl TargetStatus {
             last_error: None,
             endpoints: Vec::new(),
             raw_endpoints: Vec::new(),
+            gateway_trust: GatewayTrust::Unknown,
         }
     }
 }
