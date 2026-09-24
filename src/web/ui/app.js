@@ -185,9 +185,9 @@ const EVENT_LABELS = {
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
   connections_refused: "Connections refused", trail_truncated: "Trail cut off", clock_jumped: "Clock jumped",
-  export_gap: "Export gap",
+  export_gap: "Export gap", ignored_writes: "Ignored writes",
 };
-const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred"]);
+const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred", "ignored_writes"]);
 const eventBadge = (type) => {
   const kind = CHANGE_EVENTS.has(type) ? "accent"
     : /failed|rejected|unavailable|lost|changed$|truncated|gap|jumped|refused/.test(type) && type !== "config_changed" ? "bad"
@@ -199,6 +199,10 @@ function eventSummary(e) {
     case "write":
       return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)}${when(e.attribute !== "Value", html` <span class="muted">(${e.attribute})</span>`)}</div>
         <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span>${when(e.written_status, html` <span class="muted">status ${e.written_status}</span>`)}${when(e.source_timestamp, html` <span class="muted">source time ${e.source_timestamp}</span>`)}</div>`;
+    case "ignored_writes":
+      return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)}</div>
+        <div class="change">${e.count} writes${when(e.failed, html`, <b>${e.failed} failed</b>`)}, ${time(e.first)} – ${time(e.last)}, last ${valueText(e.last_value)}</div>
+        <div class="small muted">${e.clients.join("; ")}</div>`;
     case "call":
       return html`<div>${e.display_name || e.method_id} <span class="muted mono">${e.object_id}</span></div>
         <div class="change">(${e.input_arguments.map(valueText).join(", ")})</div>`;
@@ -417,6 +421,50 @@ async function refreshDashboard() {
   state.changesToday = n >= 1000 ? "1000+" : n;
 }
 
+// ---------- ignored nodes ----------
+
+const targetOf = (name) => (state.status?.targets || []).find((t) => t.name === name);
+const ignoreRules = (target, nodeId) => (targetOf(target)?.ignore || []).filter((r) => r.node_id === nodeId);
+// What an ignore rule for one client names: its application URI, else its address.
+const clientKey = (client) => client?.application_uri || (client?.remote_addr || "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+function summaryEvery() {
+  const s = state.status?.ignored_summary_secs || 3600;
+  return s % 3600 === 0 ? `${s / 3600} h` : s % 60 === 0 ? `${s / 60} min` : `${s} s`;
+}
+
+// Whether writes to a node are summarised, and buttons to change that.
+function ignoreControls(target, nodeId, client, { compact = false } = {}) {
+  if (!target || !nodeId || !targetOf(target)) return "";
+  const rules = ignoreRules(target, nodeId);
+  const button = (action, label, c) => html`<button class="small" data-action="${action}" data-target="${target}" data-node="${nodeId}" data-client="${c || ""}">${label}</button>`;
+  if (rules.length) {
+    const recordAgain = when(can("admin"), () => rules.map((r) => button("unignore", r.client ? `Record from ${r.client} again` : "Record again", r.client)));
+    if (compact) return html`<span class="badge plain neutral">summarised</span> ${recordAgain}`;
+    const who = rules.map((r) => r.client ? `from ${r.client}` : "from every client").join(", ");
+    return html`<div class="alert info small">Writes to this node ${who} are summarised every ${summaryEvery()} instead of recorded one by one.<div class="button-row">${recordAgain}</div></div>`;
+  }
+  if (!can("admin")) return "";
+  const key = clientKey(client);
+  const buttons = html`${button("ignore", compact ? "Summarise" : "Summarise writes to this node", "")}${when(key, () => button("ignore", `Only from ${key}`, key))}`;
+  if (compact) return html`<div class="inline">${buttons}</div>`;
+  return html`<div class="ignore-box"><p class="small muted">Written too often, like a life bit? Record its writes as one summary every ${summaryEvery()} instead of one record each.</p><div class="button-row">${buttons}</div></div>`;
+}
+
+function mostWrittenCard() {
+  const top = state.audit.top;
+  const body = !top ? html`<p class="muted">Loading…</p>`
+    : !top.length ? html`<p class="empty">No writes recorded in the last 24 hours.</p>`
+    : html`<div class="table-wrap"><table><thead><tr><th>Target</th><th>Node</th><th class="num">Writes</th><th>Last written by</th><th></th></tr></thead>
+      <tbody>${top.map((n) => html`<tr>
+        <td>${n.target || ""}</td>
+        <td><a href="#" data-action="filter-node" data-node="${n.node_id}">${n.display_name || n.node_id}</a>${when(n.display_name, html`<div class="muted mono small">${n.node_id}</div>`)}</td>
+        <td class="num">${n.count}</td>
+        <td>${n.last.client ? html`<div>${userLabel(n.last.client)}</div><div class="muted small">${n.last.client.application_name || ""} ${n.last.client.remote_addr}</div>` : ""}</td>
+        <td>${ignoreControls(n.target, n.node_id, n.last.client, { compact: true })}</td></tr>`)}</tbody></table></div>`;
+  return html`<div class="card"><div class="card-head"><h2>Most written nodes, last 24 hours</h2><button class="small" data-action="toggle-top">Close</button></div>
+    <p class="section-note">Nodes that fill the trail, such as a life bit or a seconds counter, can be summarised instead of recorded write by write.</p>${body}</div>`;
+}
+
 // ---------- audit ----------
 
 function auditTable(rows, { compact = false, selectable = false } = {}) {
@@ -453,12 +501,14 @@ function auditView() {
     <div class="page-head"><div class="inline">${menuButton}<h1>Audit trail</h1></div>
       <div class="actions">
         <label class="inline small"><input type="checkbox" name="live" data-action="live" ${new Html(a.live ? "checked" : "")}> Live</label>
+        <button data-action="toggle-top">Most written</button>
         <button data-action="verify">Verify integrity</button>
         <a class="button" href="/api/audit.csv?${auditQuery({ limit: "" })}">Export CSV</a>
       </div></div>
     ${when(a.verify, () => a.verify.error
       ? html`<div class="alert bad"><b>Integrity check failed.</b> ${a.verify.error}</div>`
       : html`<div class="alert ok">All ${a.verify.records} records (#${a.verify.first_seq}–#${a.verify.last_seq}) are intact. Chain head <span class="mono">${a.verify.head_hash.slice(0, 16)}…</span></div>`)}
+    ${when(a.showTop, mostWrittenCard)}
     <form class="card filters" data-form="audit-filter">
       <div><label>Target</label><select name="target"><option value="">All</option>${targets.map((t) => html`<option ${new Html(f.target === t.name ? "selected" : "")}>${t.name}</option>`)}</select></div>
       <div><label>Event</label><select name="kind"><option value="">All</option>${Object.entries(EVENT_LABELS).map(([k, v]) => html`<option value="${k}" ${new Html(f.kind === k ? "selected" : "")}>${v}</option>`)}</select></div>
@@ -473,6 +523,8 @@ function auditView() {
         ${when(a.olderAvailable, html`<div class="inline"><button data-action="older">Older records</button></div>`)}</div>
       ${when(selected, () => html`<div class="card detail"><div class="card-head"><h2>Record #${selected.seq}</h2><button class="small" data-action="close-record">Close</button></div>
         <dl class="kv"><dt>Time</dt><dd>${time(selected.ts)}</dd><dt>Hash</dt><dd class="mono small">${selected.hash}</dd></dl>
+        ${when((selected.event.type === "write" && selected.event.attribute === "Value") || selected.event.type === "ignored_writes",
+          () => ignoreControls(selected.target, selected.event.node_id, selected.client))}
         <h3 class="mt">Record</h3><pre class="json">${JSON.stringify({ target: selected.target, client: selected.client, event: selected.event }, null, 2)}</pre></div>`)}
     </div>`;
 }
@@ -521,6 +573,9 @@ function targetsView() {
         <dt>Target server</dt><dd class="mono">${t.endpoint_url}</dd>
         <dt>Discovery every</dt><dd>${t.discovery_interval_secs} s</dd>
         <dt>Minimum security</dt><dd>${MIN_SECURITY[t.min_security || "none"]}</dd>
+        ${when(t.ignore?.length, () => html`<dt>Summarised nodes</dt><dd>${t.ignore.map((r) => html`<div class="inline"><span class="mono">${r.node_id}</span>${when(r.client, html` <span class="muted">only from ${r.client}</span>`)}
+          ${when(can("admin"), html`<button class="small" data-action="unignore" data-target="${t.name}" data-node="${r.node_id}" data-client="${r.client || ""}">Record again</button>`)}</div>`)}
+          <div class="small muted">Writes to these nodes are recorded as one summary every ${summaryEvery()}.</div></dd>`)}
         ${when(t.status?.last_error, html`<dt>Error</dt><dd class="small">${t.status?.last_error}</dd>`)}</dl>
       <h3 class="mt">Endpoints offered to clients</h3>
       ${endpointsTable(state.targets.discovery[t.name] || t.status?.endpoints, trusted)}
@@ -628,6 +683,7 @@ function browserView() {
           ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), html`<button class="small" data-action="watch" data-node="${b.selected}">Watch value</button>`)}</div>
           ${when(b.selected, html`<div class="table-wrap"><table><tbody>${b.attributes.map((a) => html`<tr><th>${a.attribute}</th>
             <td class="mono">${attributeText(a)} <span class="muted">${a.value.data_type}</span></td></tr>`)}</tbody></table></div>`)}
+          ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), () => ignoreControls(b.target, b.selected, null))}
         </div>
         <div class="card"><div class="card-head"><h2>Watch list</h2><span class="muted small">refreshes every second</span></div>
           ${when(b.watchError, html`<div class="alert warn">Values cannot be read right now: ${b.watchError}</div>`)}
@@ -702,6 +758,8 @@ function accountView() {
 // ---------- data loading per page ----------
 
 async function load() {
+  // Nothing loads until a forced password change is done.
+  if (!state.user || state.user.must_change_password) return;
   const page = currentPage();
   try {
     switch (page.id) {
@@ -768,6 +826,34 @@ const actions = {
   // audit
   "select-record"(el) { const seq = Number(el.dataset.seq); state.audit.selected = state.audit.selected === seq ? null : seq; renderPage(); },
   "close-record"() { state.audit.selected = null; renderPage(); },
+  async "toggle-top"() {
+    const a = state.audit;
+    a.showTop = !a.showTop;
+    a.top = null;
+    renderPage();
+    if (a.showTop) { a.top = await get("/audit/most-written?hours=24"); renderPage(); }
+  },
+  async "filter-node"(el) {
+    state.audit.filters = { ...state.audit.filters, node_id: el.dataset.node };
+    state.audit.selected = null;
+    await loadAudit(); renderPage();
+  },
+  async ignore(el) {
+    const { target, node, client } = el.dataset;
+    const who = client ? ` from ${client}` : "";
+    if (!confirm(`Stop recording each write to ${node}${who} on ${target}?\n\nThey are recorded as one summary every ${summaryEvery()} instead (count, clients, last value).${client ? " Writes by other clients stay recorded one by one." : ""}`)) return;
+    await post(`/targets/${encodeURIComponent(target)}/ignore`, { node_id: node, client: client || null });
+    state.status = await get("/status");
+    toast("Writes to this node are now summarised");
+    renderPage();
+  },
+  async unignore(el) {
+    const { target, node, client } = el.dataset;
+    await post(`/targets/${encodeURIComponent(target)}/ignore/remove`, { node_id: node, client: client || null });
+    state.status = await get("/status");
+    toast("Writes to this node are recorded one by one again");
+    renderPage();
+  },
   async older() { await loadAudit(true); renderPage(); },
   async verify() { state.audit.verify = await get("/audit/verify"); renderPage(); },
   async "clear-filter"() { state.audit.filters = {}; await loadAudit(); renderPage(); },

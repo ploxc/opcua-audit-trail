@@ -262,6 +262,22 @@ pub enum AuditEvent {
         subscription_ids: Vec<u32>,
         status: String,
     },
+    /// Value writes to an ignored node between `first` and `last`, recorded
+    /// as one summary instead of one record each.
+    IgnoredWrites {
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        count: u64,
+        /// Writes the server did not accept.
+        failed: u64,
+        first: DateTime<Utc>,
+        last: DateTime<Utc>,
+        last_value: AuditValue,
+        last_status: String,
+        /// Address, application and user of each client (at most 20).
+        clients: Vec<String>,
+    },
 }
 
 impl AuditEvent {
@@ -297,6 +313,7 @@ impl AuditEvent {
             AuditEvent::HistoryUpdate { .. } => "history_update",
             AuditEvent::NodeManagement { .. } => "node_management",
             AuditEvent::SubscriptionsTransferred { .. } => "subscriptions_transferred",
+            AuditEvent::IgnoredWrites { .. } => "ignored_writes",
         }
     }
 
@@ -304,6 +321,7 @@ impl AuditEvent {
     pub fn node_id(&self) -> Option<&str> {
         match self {
             AuditEvent::Write { node_id, .. }
+            | AuditEvent::IgnoredWrites { node_id, .. }
             | AuditEvent::HistoryUpdate { node_id, .. }
             | AuditEvent::NodeManagement { node_id, .. } => Some(node_id),
             AuditEvent::Call { method_id, .. } => Some(method_id),

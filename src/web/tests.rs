@@ -438,3 +438,88 @@ async fn user_management() {
     let (_, users) = w.get("/api/users", &admin).await;
     assert_eq!(users.as_array().unwrap().len(), 4);
 }
+
+#[tokio::test]
+async fn ignore_list_is_admin_only_audited_and_kept_on_edit() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let operator = w.login("operator").await;
+    assert_eq!(w.add_target(&admin).await, StatusCode::CREATED);
+    let life = json!({ "node_id": " ns=3;s=\"DB1\".\"Life\" ", "client": "" });
+
+    let (status, _) = w
+        .post("/api/targets/plc1/ignore", &operator, life.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = w
+        .post("/api/targets/plc1/ignore", &admin, life.clone())
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Adding it again changes nothing; an invalid node id is refused.
+    let (status, _) = w
+        .post("/api/targets/plc1/ignore", &admin, life.clone())
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = w
+        .post(
+            "/api/targets/plc1/ignore",
+            &admin,
+            json!({ "node_id": "nonsense" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Trimmed, the empty client dropped; saved in the config file.
+    let (_, targets) = w.get("/api/targets", &operator).await;
+    assert_eq!(
+        targets[0]["ignore"],
+        json!([{ "node_id": "ns=3;s=\"DB1\".\"Life\"" }])
+    );
+    assert_eq!(
+        Config::load(&w.config_path).unwrap().targets[0]
+            .ignore
+            .len(),
+        1
+    );
+
+    // Editing the target in the form keeps the ignored nodes.
+    let mut edited = targets[0].clone();
+    for key in ["ignore", "status", "clients"] {
+        edited.as_object_mut().unwrap().remove(key);
+    }
+    edited["discovery_interval_secs"] = json!(30);
+    let (status, _, _) = w
+        .send(Method::PUT, "/api/targets/plc1", Some(&admin), Some(edited))
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, targets) = w.get("/api/targets", &operator).await;
+    assert_eq!(targets[0]["ignore"].as_array().unwrap().len(), 1);
+
+    let rule = json!({ "node_id": "ns=3;s=\"DB1\".\"Life\"" });
+    let (status, _) = w
+        .post("/api/targets/plc1/ignore/remove", &admin, rule.clone())
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = w
+        .post("/api/targets/plc1/ignore/remove", &admin, rule)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, targets) = w.get("/api/targets", &operator).await;
+    assert!(targets[0].get("ignore").is_none());
+
+    let (_, changes) = w.get("/api/audit?kind=config_changed", &admin).await;
+    let summaries: Vec<&str> = changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["event"]["summary"].as_str().unwrap())
+        .collect();
+    assert!(summaries[0].contains("recorded again"), "{summaries:?}");
+    assert!(summaries
+        .iter()
+        .any(|s| s.contains("summarised instead of recorded")));
+
+    let (status, top) = w.get("/api/audit/most-written?hours=1", &operator).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(top.as_array().unwrap().is_empty());
+}

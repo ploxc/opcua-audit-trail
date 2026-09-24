@@ -4,6 +4,7 @@
 //! the config file, so the gateway behaves the same whether it runs from a shell,
 //! as a Windows service (whose working directory is `System32`) or in a container.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -179,6 +180,9 @@ pub struct AuditConfig {
     /// Read the current value right before forwarding a write, so the audit
     /// trail shows `old -> new`. Costs one extra round trip per write.
     pub record_old_value: bool,
+    /// How often writes to ignored nodes (see `ignore` per target) are
+    /// recorded as one `ignored_writes` summary per node.
+    pub ignored_summary_secs: u64,
 }
 
 impl Default for AuditConfig {
@@ -188,6 +192,7 @@ impl Default for AuditConfig {
             retention_days: 365,
             fail_mode: FailMode::Open,
             record_old_value: true,
+            ignored_summary_secs: 3600,
         }
     }
 }
@@ -215,6 +220,36 @@ pub struct TargetConfig {
     pub max_connections: usize,
     #[serde(default = "default_max_connections_per_address")]
     pub max_connections_per_address: usize,
+    /// Nodes whose value writes are summarised instead of recorded one by
+    /// one, e.g. a life bit an HMI writes every second.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<IgnoreRule>,
+}
+
+/// Most ignore rules per target.
+pub const MAX_IGNORE_RULES: usize = 1000;
+
+/// A node whose value writes are not recorded one by one. They are counted
+/// and recorded periodically as an `ignored_writes` summary (how many, from
+/// which clients, the last value), so they never go unnoticed entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IgnoreRule {
+    /// The node as shown in the audit trail, e.g. `ns=3;s="DB1"."Life"`.
+    pub node_id: String,
+    /// Only writes from this client (its IP address or application URI);
+    /// the same node written by any other client is recorded as usual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+}
+
+impl IgnoreRule {
+    pub fn node(&self) -> anyhow::Result<opcua::types::NodeId> {
+        self.node_id
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("'{}' is not a node id", self.node_id.escape_debug()))
+    }
 }
 
 fn default_max_connections() -> usize {
@@ -294,6 +329,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.audit.ignored_summary_secs == 0 {
+            bail!("audit.ignored_summary_secs must be > 0");
+        }
         if self.web.tls_certificate.is_some() != self.web.tls_private_key.is_some() {
             bail!("web: set both tls_certificate and tls_private_key, or neither");
         }
@@ -364,6 +402,31 @@ impl Config {
             if t.max_connections == 0 || t.max_connections_per_address == 0 {
                 bail!("target '{}': connection limits must be > 0", t.name);
             }
+            if t.ignore.len() > MAX_IGNORE_RULES {
+                bail!(
+                    "target '{}': at most {MAX_IGNORE_RULES} ignored nodes",
+                    t.name
+                );
+            }
+            let mut rules = HashSet::new();
+            for rule in &t.ignore {
+                let node = rule
+                    .node()
+                    .with_context(|| format!("target '{}': ignore", t.name))?;
+                if rule
+                    .client
+                    .as_ref()
+                    .is_some_and(|c| c.trim().is_empty() || c.len() > 256)
+                {
+                    bail!(
+                        "target '{}': ignore client must be an address or application URI",
+                        t.name
+                    );
+                }
+                if !rules.insert((node, rule.client.clone())) {
+                    bail!("target '{}': {} is ignored twice", t.name, rule.node_id);
+                }
+            }
         }
         Ok(())
     }
@@ -402,6 +465,9 @@ retention_days = 365
 # "closed": a write is rejected unless its audit record was committed.
 fail_mode = "open"
 record_old_value = true
+# Writes to ignored nodes (see [[targets.ignore]]) are recorded as one
+# summary per node this often.
+ignored_summary_secs = 3600
 
 # Optional copies of the audit trail outside the gateway. Records carry their
 # hash, so an external copy also proves the local trail was not rewritten.
@@ -423,6 +489,12 @@ record_old_value = true
 # min_security = "sign_and_encrypt"   # "none" (default), "sign", "sign_and_encrypt"
 # max_connections = 50                # clients at once
 # max_connections_per_address = 10
+#
+# A node written so often it floods the trail (a life bit): its value writes
+# are summarised every ignored_summary_secs instead of recorded one by one.
+# [[targets.ignore]]
+# node_id = 'ns=3;s="DB1"."Life"'
+# client = "10.0.0.5"               # optional: only from this address or application URI
 "#;
 
 #[cfg(test)]

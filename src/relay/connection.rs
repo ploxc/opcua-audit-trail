@@ -171,6 +171,10 @@ pub async fn run(target: Arc<RelayTarget>, stream: TcpStream, peer: SocketAddr, 
         }
     };
     connection.finish_audited().await;
+    // Writes that finished after the target stopped are summarised here.
+    if target.shutdown.is_cancelled() {
+        target.record_ignored().await;
+    }
     if let Some(upstream) = connection.upstream.take() {
         upstream.close().await;
     }
@@ -1251,6 +1255,16 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
         .unwrap_or_else(|| ctx.client.clone());
 
     let mut plan = audit_map::plan(&request);
+    // Writes to ignored nodes are summarised, not recorded (nor read) one by one.
+    let ignored = match plan.as_mut() {
+        Some(p) if !ctx.target.ignore.is_empty() => {
+            p.take_ignored(|node| ctx.target.ignore.matches(node, &client))
+        }
+        _ => None,
+    };
+    if plan.as_ref().is_some_and(|p| p.is_empty()) {
+        plan = None;
+    }
     let pre_read = plan
         .as_mut()
         .and_then(|p| p.pre_read(ctx.target.record_old_value, &ctx.target.names));
@@ -1306,6 +1320,35 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
         Ok(response) => (response, None),
         Err(e) => (fault(handle, e.status()), e.maybe_sent.then(|| e.status())),
     };
+
+    if let Some(ignored) = ignored {
+        for write in ignored.outcomes(&response, unknown, &ctx.target.names) {
+            let added = ctx.target.ignored.add(
+                &write.node_id,
+                write.display_name.clone(),
+                write.value.clone(),
+                &write.status,
+                &client,
+            );
+            if !added {
+                // Too many ignored nodes pending: record this one as usual.
+                let event = AuditEvent::Write {
+                    request_handle: handle,
+                    node_id: write.node_id,
+                    display_name: write.display_name,
+                    attribute: "Value".into(),
+                    index_range: None,
+                    old_value: None,
+                    new_value: write.value,
+                    written_status: None,
+                    source_timestamp: None,
+                    server_timestamp: None,
+                    status: write.status,
+                };
+                ctx.audit(&client, event).await;
+            }
+        }
+    }
 
     if let Some(plan) = plan {
         let events = match unknown {

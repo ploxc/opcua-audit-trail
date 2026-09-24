@@ -116,6 +116,15 @@ only changes what is bound to certificates or to the channel:
 The status comes from the upstream response, so **rejected writes are audited
 too** (`BadUserAccessDenied` is valuable information).
 
+**Summarised nodes.** Value writes to nodes on a target's ignore list (a life
+bit, a seconds counter), optionally only from one client, are taken out of
+the write before it is audited: they skip the old-value read and are counted
+per node instead. Every `ignored_summary_secs` (and when the target stops)
+one `ignored_writes` record per node gives the count, the failures, the
+clients, the time span and the last value. The list can change while clients
+are connected; changes are audited. Everything else in the same request is
+recorded as usual, with its own result.
+
 **Old value and display name.** With `record_old_value = true`, the relay
 sends one `Read` in the client's own session right before a `Write`. It asks
 for the current value of every written node and, for nodes not yet in the
@@ -347,4 +356,5 @@ only).
 | Frontend technology | Vanilla JS without a build step, instead of Svelte: a single `cargo build`, no Node toolchain in CI or cross builds |
 | UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |
+| Noisy nodes | Summarised per node and interval, never dropped silently; admin-only, audited, optionally per client |
 | Security review | Audit in `docs/audit/AUDIT.md`, independently verified in `VERIFICATION.md`; all findings fixed except those listed there as accepted |

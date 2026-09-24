@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::audit::event::AuditEvent;
 use crate::audit::store::{AuditQuery, StoredRecord, VerifyReport};
 use crate::audit::{AuditEntry, AuditHandle, AuditReader};
-use crate::config::{Config, TargetConfig};
+use crate::config::{Config, IgnoreRule, TargetConfig};
 use crate::discovery::{self, EndpointInfo, TargetStatus, TargetStatuses};
 use crate::pki::{CertificateInfo, Pki};
 use crate::relay::ClientInfo;
@@ -106,6 +106,8 @@ pub fn router(state: AppState) -> Router {
         .route("/targets/{name}/clients", get(target_clients))
         .route("/targets/{name}/discover", post(discover_target))
         .route("/targets/{name}/trust-server", post(trust_server))
+        .route("/targets/{name}/ignore", post(ignore_node))
+        .route("/targets/{name}/ignore/remove", post(unignore_node))
         .route("/discover", post(discover_url))
         .route("/certificates", get(certificates))
         .route("/certificates/own/cert.der", get(own_certificate_der))
@@ -123,6 +125,7 @@ pub fn router(state: AppState) -> Router {
         .route("/audit", get(audit_query))
         .route("/audit.csv", get(audit_csv))
         .route("/audit/verify", get(audit_verify))
+        .route("/audit/most-written", get(audit_most_written))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{name}", put(update_user).delete(delete_user))
         .route("/browser/{target}/connect", post(browser::connect))
@@ -265,6 +268,7 @@ struct StatusResponse {
     fail_mode: crate::config::FailMode,
     record_old_value: bool,
     retention_days: u32,
+    ignored_summary_secs: u64,
     rejected_certificates: usize,
     exports: Vec<crate::export::ExportStatus>,
     targets: Vec<TargetView>,
@@ -312,6 +316,7 @@ async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusRe
         fail_mode: s.config.audit.fail_mode,
         record_old_value: s.config.audit.record_old_value,
         retention_days: s.config.audit.retention_days,
+        ignored_summary_secs: s.config.audit.ignored_summary_secs,
         rejected_certificates: s.pki.rejected_count(),
         exports,
         targets: target_views(&s).await,
@@ -345,9 +350,11 @@ async fn update_target(
     State(s): State<AppState>,
     user: AuthUser,
     Path(name): Path<String>,
-    Json(target): Json<TargetConfig>,
+    Json(mut target): Json<TargetConfig>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
+    // Ignored nodes have their own routes; editing a target keeps them.
+    target.ignore = target_config(&s, &name).await?.ignore;
     let summary = format!(
         "changed target '{name}' to '{}' ({} -> {})",
         target.name, target.listen, target.endpoint_url
@@ -374,6 +381,83 @@ async fn delete_target(
     s.browser.close_target(&s, &name).await;
     s.config_changed(&user, format!("removed target '{name}'"))
         .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn target_config(s: &AppState, name: &str) -> Result<TargetConfig, ApiError> {
+    s.targets
+        .targets()
+        .await
+        .into_iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| ApiError::not_found(format!("unknown target '{name}'")))
+}
+
+fn describe_rule(rule: &IgnoreRule) -> String {
+    match &rule.client {
+        Some(client) => format!("{} (only from {client})", rule.node_id),
+        None => rule.node_id.clone(),
+    }
+}
+
+/// Summarises a node's value writes instead of recording each one.
+async fn ignore_node(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+    Json(mut rule): Json<IgnoreRule>,
+) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    rule.node_id = rule.node_id.trim().to_string();
+    rule.client = rule
+        .client
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    let mut rules = target_config(&s, &name).await?.ignore;
+    if rules.contains(&rule) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let summary = format!(
+        "target '{name}': writes to {} are summarised instead of recorded",
+        describe_rule(&rule)
+    );
+    rules.push(rule);
+    s.targets
+        .set_ignore(&name, rules)
+        .await
+        .map_err(ApiError::bad_request)?;
+    s.config_changed(&user, summary).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unignore_node(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+    Json(rule): Json<IgnoreRule>,
+) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    let mut rules = target_config(&s, &name).await?.ignore;
+    let before = rules.len();
+    rules.retain(|r| r != &rule);
+    if rules.len() == before {
+        return Err(ApiError::not_found(format!(
+            "{} is not ignored on '{name}'",
+            describe_rule(&rule)
+        )));
+    }
+    s.targets
+        .set_ignore(&name, rules)
+        .await
+        .map_err(ApiError::bad_request)?;
+    s.config_changed(
+        &user,
+        format!(
+            "target '{name}': writes to {} are recorded again",
+            describe_rule(&rule)
+        ),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -652,6 +736,24 @@ async fn audit_query(
 ) -> ApiResult<Vec<StoredRecord>> {
     user.require(Role::Auditor)?;
     Ok(Json(s.reader.query(q).await?))
+}
+
+#[derive(Deserialize)]
+struct MostWrittenQuery {
+    /// Look back this many hours (default 24, at most a year).
+    hours: Option<u32>,
+}
+
+/// The nodes written most often recently: what floods the audit trail.
+async fn audit_most_written(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<MostWrittenQuery>,
+) -> ApiResult<Vec<crate::audit::store::WrittenNode>> {
+    user.require(Role::Auditor)?;
+    let hours = q.hours.unwrap_or(24).clamp(1, 24 * 366);
+    let since = chrono::Utc::now() - chrono::Duration::hours(hours.into());
+    Ok(Json(s.reader.most_written(since, 10).await?))
 }
 
 /// The filtered audit trail as CSV, newest first (up to 100 000 records).

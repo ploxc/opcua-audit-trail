@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::AuditHandle;
-use crate::config::{Config, TargetConfig};
+use crate::config::{Config, IgnoreRule, TargetConfig};
 use crate::discovery::{self, TargetStatus, TargetStatuses};
 use crate::relay::{self, GatewayIdentity, RelayTarget};
 
@@ -166,6 +166,24 @@ impl TargetManager {
         result
     }
 
+    /// Replaces a target's ignored nodes. Applied to the running target
+    /// directly: connected clients stay connected.
+    pub async fn set_ignore(&self, name: &str, rules: Vec<IgnoreRule>) -> anyhow::Result<()> {
+        let mut config = self.config.lock().await;
+        let mut new_config = config.clone();
+        let Some(target) = new_config.targets.iter_mut().find(|t| t.name == name) else {
+            bail!("unknown target '{name}'");
+        };
+        target.ignore = rules.clone();
+        new_config.validate()?;
+        write_targets(&self.config_path, &new_config.targets)?;
+        if let Some(running) = self.running.lock().await.get(name) {
+            running.relay.ignore.set(&rules);
+        }
+        *config = new_config;
+        Ok(())
+    }
+
     pub async fn remove(&self, name: &str) -> anyhow::Result<()> {
         let mut config = self.config.lock().await;
         if !config.targets.iter().any(|t| t.name == name) {
@@ -235,6 +253,18 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
             table["max_connections_per_address"] =
                 toml_edit::value(t.max_connections_per_address as i64);
         }
+        if !t.ignore.is_empty() {
+            let mut rules = toml_edit::ArrayOfTables::new();
+            for rule in &t.ignore {
+                let mut r = toml_edit::Table::new();
+                r["node_id"] = toml_edit::value(rule.node_id.as_str());
+                if let Some(client) = &rule.client {
+                    r["client"] = toml_edit::value(client.as_str());
+                }
+                rules.push(r);
+            }
+            table["ignore"] = toml_edit::Item::ArrayOfTables(rules);
+        }
         array.push(table);
     }
     if targets.is_empty() {
@@ -262,6 +292,7 @@ mod tests {
             min_security: Default::default(),
             max_connections: 50,
             max_connections_per_address: 10,
+            ignore: Vec::new(),
         }
     }
 
@@ -323,6 +354,47 @@ mod tests {
         m.remove("plc1").await.unwrap();
         assert!(Config::load(&path).unwrap().targets.is_empty());
         assert!(m.relay("plc1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ignored_nodes_are_saved_and_applied_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(dir.path()).await;
+        let path = dir.path().join("config.toml");
+        m.upsert(target("plc1", free_port()), None).await.unwrap();
+        let relay = m.relay("plc1").await.unwrap();
+
+        let rules = vec![
+            IgnoreRule {
+                node_id: "ns=3;s=\"DB1\".\"Life\"".into(),
+                client: None,
+            },
+            IgnoreRule {
+                node_id: "ns=3;i=7".into(),
+                client: Some("10.0.0.5".into()),
+            },
+        ];
+        m.set_ignore("plc1", rules.clone()).await.unwrap();
+        // The same relay (no restart), with the new rules.
+        let same = m.relay("plc1").await.unwrap();
+        assert!(Arc::ptr_eq(&relay, &same));
+        let life = "ns=3;s=\"DB1\".\"Life\"".parse().unwrap();
+        assert!(same.ignore.matches(&life, &Default::default()));
+        // Saved, and read back identically.
+        assert_eq!(Config::load(&path).unwrap().targets[0].ignore, rules);
+
+        // Invalid rules change nothing.
+        let bad = vec![IgnoreRule {
+            node_id: "not a node".into(),
+            client: None,
+        }];
+        assert!(m.set_ignore("plc1", bad).await.is_err());
+        assert_eq!(Config::load(&path).unwrap().targets[0].ignore, rules);
+        assert!(m.set_ignore("nope", Vec::new()).await.is_err());
+
+        m.set_ignore("plc1", Vec::new()).await.unwrap();
+        assert!(Config::load(&path).unwrap().targets[0].ignore.is_empty());
+        assert!(same.ignore.is_empty());
     }
 
     #[tokio::test]

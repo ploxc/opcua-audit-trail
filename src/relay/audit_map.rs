@@ -32,6 +32,8 @@ const MAX_FAILED_ITEMS: usize = 100;
 const NAME_CACHE_SIZE: usize = 100_000;
 
 pub struct WriteItem {
+    /// Position in the request, and so in the response's results.
+    index: usize,
     node: NodeId,
     attribute_id: u32,
     range: NumericRange,
@@ -123,7 +125,9 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
             r.nodes_to_write
                 .iter()
                 .flatten()
-                .map(|w| WriteItem {
+                .enumerate()
+                .map(|(index, w)| WriteItem {
+                    index,
                     node: w.node_id.clone(),
                     attribute_id: w.attribute_id,
                     range: w.index_range.clone(),
@@ -230,7 +234,90 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
     }
 }
 
+/// The status of item `i`: the item's own result, or the service result if
+/// the whole request failed, or `unknown` if no response arrived.
+fn item_status(
+    results: Option<&[StatusCode]>,
+    i: usize,
+    service_result: StatusCode,
+    unknown: Option<&str>,
+) -> String {
+    if let Some(unknown) = unknown {
+        return unknown.to_string();
+    }
+    if service_result.is_bad() {
+        return service_result.to_string();
+    }
+    results
+        .and_then(|r| r.get(i).copied())
+        .unwrap_or(StatusCode::BadUnexpectedError)
+        .to_string()
+}
+
+/// Writes to ignored nodes, taken out of a write plan: they are summarised
+/// instead of recorded one by one.
+pub struct IgnoredItems(Vec<WriteItem>);
+
+/// One ignored write and its outcome.
+pub struct IgnoredWrite {
+    pub node_id: String,
+    pub display_name: Option<String>,
+    pub value: AuditValue,
+    pub status: String,
+}
+
+impl IgnoredItems {
+    /// The outcome of each ignored write. `names` supplies display names
+    /// already known (ignored nodes are not read before the write).
+    pub fn outcomes(
+        self,
+        response: &ResponseMessage,
+        unknown: Option<StatusCode>,
+        names: &NameCache,
+    ) -> Vec<IgnoredWrite> {
+        let service_result = response.response_header().service_result;
+        let results = match response {
+            ResponseMessage::Write(r) => r.results.clone(),
+            _ => None,
+        };
+        let unknown = unknown.map(|s| format!("Uncertain: no response ({s})"));
+        self.0
+            .into_iter()
+            .map(|w| IgnoredWrite {
+                status: item_status(
+                    results.as_deref(),
+                    w.index,
+                    service_result,
+                    unknown.as_deref(),
+                ),
+                display_name: names.get(&w.node),
+                node_id: w.node_id,
+                value: w.new_value,
+            })
+            .collect()
+    }
+}
+
 impl AuditPlan {
+    /// Takes the value writes for which `ignored` is true out of a write
+    /// plan. Writes to other attributes (e.g. access rights) and other
+    /// services are never ignored. Returns `None` if nothing was taken.
+    pub fn take_ignored(&mut self, ignored: impl Fn(&NodeId) -> bool) -> Option<IgnoredItems> {
+        let AuditPlan::Write(_, items) = self else {
+            return None;
+        };
+        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(items)
+            .into_iter()
+            .partition(|w| w.attribute_id == AttributeId::Value as u32 && ignored(&w.node));
+        *items = kept;
+        (!taken.is_empty()).then_some(IgnoredItems(taken))
+    }
+
+    /// A plan with nothing left to record (all its writes were ignored).
+    pub fn is_empty(&self) -> bool {
+        matches!(self, AuditPlan::Write(_, items) if items.is_empty())
+    }
+
     /// Fills in cached names and returns the reads still needed: the current
     /// value of written nodes (when `old_values`) and uncached display names.
     pub fn pre_read(&mut self, old_values: bool, names: &NameCache) -> Option<PreRead> {
@@ -404,16 +491,7 @@ impl AuditPlan {
         unknown: Option<String>,
     ) -> Vec<AuditEvent> {
         let item_status = |results: Option<Vec<StatusCode>>, i: usize| -> String {
-            if let Some(unknown) = &unknown {
-                return unknown.clone();
-            }
-            if service_result.is_bad() {
-                return service_result.to_string();
-            }
-            results
-                .and_then(|r| r.get(i).copied())
-                .unwrap_or(StatusCode::BadUnexpectedError)
-                .to_string()
+            item_status(results.as_deref(), i, service_result, unknown.as_deref())
         };
 
         match self {
@@ -424,8 +502,8 @@ impl AuditPlan {
                 };
                 items
                     .into_iter()
-                    .enumerate()
-                    .map(|(i, w)| AuditEvent::Write {
+                    .map(|w| AuditEvent::Write {
+                        status: item_status(results.clone(), w.index),
                         request_handle,
                         node_id: w.node_id,
                         display_name: w.display_name,
@@ -436,7 +514,6 @@ impl AuditPlan {
                         written_status: w.written_status,
                         source_timestamp: w.source_timestamp,
                         server_timestamp: w.server_timestamp,
-                        status: item_status(results.clone(), i),
                     })
                     .collect()
             }

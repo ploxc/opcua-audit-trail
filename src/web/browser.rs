@@ -256,17 +256,36 @@ pub async fn connect(
         .user_identity_token(identity)
         .build(Arc::new(opcua::core::sync::RwLock::new(store)))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let handle = event_loop.spawn();
-    let connected = tokio::time::timeout(CONNECT_TIMEOUT, session.wait_for_connection())
-        .await
-        .unwrap_or(false);
+    let mut handle = event_loop.spawn();
+    // A refused connection (e.g. an untrusted certificate) ends the event
+    // loop at once; don't wait for the timeout then.
+    let (connected, ended) = tokio::select! {
+        c = tokio::time::timeout(CONNECT_TIMEOUT, session.wait_for_connection()) => {
+            (c.unwrap_or(false), None)
+        }
+        status = &mut handle => (false, Some(status)),
+    };
     if !connected {
-        handle.abort();
-        let status = handle.await.ok();
+        let status = match ended {
+            Some(status) => status.ok(),
+            None => {
+                handle.abort();
+                handle.await.ok()
+            }
+        };
+        let hint = match status {
+            Some(s)
+                if format!("{s}").contains("Certificate")
+                    || format!("{s}").contains("Security") =>
+            {
+                "Trust the target's server certificate first (Targets page)."
+            }
+            _ => "Is the target's certificate trusted, and the login right?",
+        };
         return Err(ApiError(
             StatusCode::BAD_GATEWAY,
             format!(
-                "could not open a session on the target{}. Is the target's certificate trusted, and the login right?",
+                "could not open a session on the target{}. {hint}",
                 status.map(|s| format!(" ({s})")).unwrap_or_default()
             ),
         ));
