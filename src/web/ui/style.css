@@ -1256,9 +1256,13 @@ tr.dimmed td {
 .alarm-counts .count {
   margin-left: 0;
 }
+/* As wide as a one-digit count, so the dot lines up with the Audit trail
+   badge above it. */
 .targets-dot {
   margin-left: auto;
   display: inline-flex;
+  justify-content: center;
+  min-width: 21px;
 }
 .nav-dot {
   width: 8px;
