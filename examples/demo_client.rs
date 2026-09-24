@@ -26,6 +26,12 @@ use opcua::types::{
 async fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
     let secure = all.iter().any(|a| a == "--secure");
+    // With --secure: --policy=aes256 for Aes256-Sha256-RsaPss.
+    let policy = if all.iter().any(|a| a == "--policy=aes256") {
+        SecurityPolicy::Aes256Sha256RsaPss
+    } else {
+        SecurityPolicy::Basic256Sha256
+    };
     // The namespace of the `Line1.*` nodes.
     let namespace = all
         .iter()
@@ -55,7 +61,7 @@ async fn main() {
             if secure {
                 (
                     url.as_str(),
-                    SecurityPolicy::Basic256Sha256.to_uri(),
+                    policy.to_uri(),
                     MessageSecurityMode::SignAndEncrypt,
                 )
             } else {

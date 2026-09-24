@@ -482,7 +482,19 @@ impl Connection {
                 Err(StatusCode::BadServerNotConnected)
             }
             Err(UpstreamError::Other(e)) => {
-                tracing::warn!(target = %target.config.name, "upstream connect failed: {e}");
+                let text = e.to_string();
+                // The target closes the channel when it does not trust the
+                // gateway's certificate: say so, the status alone does not.
+                let hint = if text.contains("BadSecurityChecksFailed")
+                    || text.contains("BadCertificateUntrusted")
+                {
+                    "; the target refused the gateway: it probably does not trust the \
+                     gateway's certificate yet (trust it on the target, e.g. move it from \
+                     its rejected to its trusted certificates)"
+                } else {
+                    ""
+                };
+                tracing::warn!(target = %target.config.name, "upstream connect failed: {text}{hint}");
                 Err(StatusCode::BadServerNotConnected)
             }
         }
