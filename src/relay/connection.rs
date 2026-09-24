@@ -495,6 +495,17 @@ impl Connection {
                     ""
                 };
                 tracing::warn!(target = %target.config.name, "upstream connect failed: {text}{hint}");
+                // Also in the trail, with the client that tried: the log
+                // alone does not show who is refused.
+                record(
+                    target,
+                    &self.client,
+                    AuditEvent::UpstreamUnavailable {
+                        endpoint_url: target.config.endpoint_url.clone(),
+                        reason: format!("{text}{hint}"),
+                    },
+                )
+                .await;
                 Err(StatusCode::BadServerNotConnected)
             }
         }
