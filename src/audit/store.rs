@@ -294,6 +294,10 @@ pub struct AuditQuery {
     pub until: Option<DateTime<Utc>>,
     /// Only records with a sequence number below this one (for paging backwards).
     pub before_seq: Option<i64>,
+    /// Only records with a sequence number above this one.
+    pub after_seq: Option<i64>,
+    /// Several kinds, comma separated (e.g. the kinds of a severity).
+    pub kinds: Option<String>,
     pub limit: Option<u32>,
 }
 
@@ -377,6 +381,60 @@ pub fn most_written(
     Ok(out)
 }
 
+/// Unacknowledged records of one severity.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlarmCount {
+    pub severity: crate::audit::event::Severity,
+    /// Acknowledged up to and including this record (0: never).
+    pub acknowledged_up_to: i64,
+    pub unacknowledged: i64,
+    /// The event kinds of this severity, for filtering.
+    pub kinds: Vec<&'static str>,
+}
+
+/// For each severity, how many records came after the last acknowledgement.
+pub fn alarms(conn: &Connection) -> anyhow::Result<Vec<AlarmCount>> {
+    use crate::audit::event::{AuditEvent, Severity};
+    let mut marks = std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT body FROM audit WHERE kind = 'alarms_acknowledged' ORDER BY seq DESC LIMIT 100",
+    )?;
+    for body in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        if let Ok(entry) = serde_json::from_str::<AuditEntry>(&body?) {
+            if let AuditEvent::AlarmsAcknowledged {
+                severity,
+                up_to_seq,
+                ..
+            } = entry.event
+            {
+                marks.entry(severity).or_insert(up_to_seq);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for severity in Severity::ALL {
+        let mark = marks.get(&severity).copied().unwrap_or(0);
+        let kinds = severity.kinds();
+        let list = kinds
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM audit WHERE seq > ?1 AND kind IN ({list})"),
+            [mark],
+            |r| r.get(0),
+        )?;
+        out.push(AlarmCount {
+            severity,
+            acknowledged_up_to: mark,
+            unacknowledged: count,
+            kinds: kinds.to_vec(),
+        });
+    }
+    Ok(out)
+}
+
 /// Newest records first.
 pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredRecord>> {
     let mut sql = String::from("SELECT seq, hash, body, prev_hash FROM audit WHERE 1=1");
@@ -405,6 +463,24 @@ pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredReco
     }
     if let Some(v) = q.before_seq {
         add("seq <", Box::new(v));
+    }
+    if let Some(v) = q.after_seq {
+        add("seq >", Box::new(v));
+    }
+    if let Some(kinds) = &q.kinds {
+        let kinds: Vec<&str> = kinds
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !kinds.is_empty() {
+            let mut marks = Vec::new();
+            for k in kinds {
+                args.push(Box::new(k.to_string()));
+                marks.push(format!("?{}", args.len()));
+            }
+            sql.push_str(&format!(" AND kind IN ({})", marks.join(", ")));
+        }
     }
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     sql.push_str(&format!(" ORDER BY seq DESC LIMIT {limit}"));

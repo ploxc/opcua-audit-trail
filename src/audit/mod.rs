@@ -325,6 +325,10 @@ impl AuditReader {
             .await
     }
 
+    pub async fn alarms(&self) -> anyhow::Result<Vec<store::AlarmCount>> {
+        self.with_conn(store::alarms).await
+    }
+
     pub async fn head_seq(&self) -> anyhow::Result<i64> {
         self.with_conn(store::head_seq).await
     }

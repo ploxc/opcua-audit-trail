@@ -127,6 +127,8 @@ pub fn router(state: AppState) -> Router {
         .route("/audit.csv", get(audit_csv))
         .route("/audit/verify", get(audit_verify))
         .route("/audit/most-written", get(audit_most_written))
+        .route("/alarms", get(alarms))
+        .route("/alarms/acknowledge", post(acknowledge_alarms))
         .route("/settings", get(settings::get))
         .route("/settings/audit", put(settings::put_audit))
         .route("/settings/export", put(settings::put_export))
@@ -757,6 +759,49 @@ async fn audit_query(
 ) -> ApiResult<Vec<StoredRecord>> {
     user.require(Role::Auditor)?;
     Ok(Json(s.reader.query(q).await?))
+}
+
+/// Warnings and errors that nobody has acknowledged yet, per severity.
+async fn alarms(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Vec<crate::audit::store::AlarmCount>> {
+    user.require(Role::Auditor)?;
+    Ok(Json(s.reader.alarms().await?))
+}
+
+#[derive(Deserialize)]
+struct AcknowledgeRequest {
+    severity: crate::audit::event::Severity,
+}
+
+/// Acknowledges every record of a severity up to now. The acknowledgement
+/// is itself a record in the trail: who, which severity, up to where.
+async fn acknowledge_alarms(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<AcknowledgeRequest>,
+) -> ApiResult<Vec<crate::audit::store::AlarmCount>> {
+    user.require(Role::Operator)?;
+    s.audit.flush().await;
+    let current = s.reader.alarms().await?;
+    let count = current
+        .iter()
+        .find(|a| a.severity == req.severity)
+        .map_or(0, |a| a.unacknowledged);
+    if count > 0 {
+        let up_to_seq = s.reader.head_seq().await?;
+        s.audit
+            .record_committed(AuditEntry::new(AuditEvent::AlarmsAcknowledged {
+                by: user.username.clone(),
+                severity: req.severity,
+                up_to_seq,
+                count: count as u64,
+            }))
+            .await
+            .map_err(|e| ApiError::from(anyhow::anyhow!("{e}")))?;
+    }
+    Ok(Json(s.reader.alarms().await?))
 }
 
 #[derive(Deserialize)]

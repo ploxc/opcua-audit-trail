@@ -700,3 +700,92 @@ async fn settings_are_saved_applied_and_keep_secrets() {
     assert!(text.contains("certificate host names: gw.local, 10.0.0.2"));
     assert!(!text.contains("s3cret"));
 }
+
+#[tokio::test]
+async fn warnings_and_errors_until_acknowledged() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let auditor = w.login("auditor").await;
+    let operator = w.login("operator").await;
+    // Two failed logins: warnings.
+    for _ in 0..2 {
+        w.send(
+            Method::POST,
+            "/api/login",
+            None,
+            Some(json!({ "username": "admin", "password": "wrong" })),
+        )
+        .await;
+    }
+    let count = |alarms: &Value, severity: &str| {
+        alarms
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["severity"] == severity)
+            .unwrap()["unacknowledged"]
+            .as_i64()
+            .unwrap()
+    };
+    let (_, alarms) = w.get("/api/alarms", &auditor).await;
+    assert_eq!(count(&alarms, "warning"), 2);
+    assert_eq!(count(&alarms, "error"), 0);
+
+    // "Show": the unacknowledged warnings, by their kinds and position.
+    let warning = alarms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["severity"] == "warning")
+        .unwrap();
+    let kinds: Vec<&str> = warning["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    let (_, rows) = w
+        .get(
+            &format!(
+                "/api/audit?kinds={}&after_seq={}",
+                kinds.join(","),
+                warning["acknowledged_up_to"]
+            ),
+            &auditor,
+        )
+        .await;
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+
+    // Auditors only look; operators acknowledge, and that is recorded.
+    let (status, _) = w
+        .post(
+            "/api/alarms/acknowledge",
+            &auditor,
+            json!({ "severity": "warning" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, alarms) = w
+        .post(
+            "/api/alarms/acknowledge",
+            &operator,
+            json!({ "severity": "warning" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count(&alarms, "warning"), 0);
+    let (_, acks) = w.get("/api/audit?kind=alarms_acknowledged", &admin).await;
+    assert_eq!(acks[0]["event"]["by"], "operator");
+    assert_eq!(acks[0]["event"]["count"], 2);
+
+    // A new warning after that counts again.
+    w.send(
+        Method::POST,
+        "/api/login",
+        None,
+        Some(json!({ "username": "admin", "password": "wrong" })),
+    )
+    .await;
+    let (_, alarms) = w.get("/api/alarms", &auditor).await;
+    assert_eq!(count(&alarms, "warning"), 1);
+}

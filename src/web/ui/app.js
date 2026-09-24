@@ -210,13 +210,15 @@ const EVENT_LABELS = {
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
   connections_refused: "Connections refused", trail_truncated: "Trail cut off", clock_jumped: "Clock jumped",
-  export_gap: "Export gap", ignored_writes: "Summarised writes",
+  export_gap: "Export gap", ignored_writes: "Summarised writes", alarms_acknowledged: "Acknowledged",
 };
 const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred", "ignored_writes"]);
+// The same as the gateway's severities (src/audit/event.rs).
+const ERROR_EVENTS = new Set(["events_lost", "trail_truncated", "export_gap", "upstream_endpoints_changed"]);
+const WARNING_EVENTS = new Set(["upstream_unavailable", "certificate_rejected", "authentication_failed", "ui_login_failed", "connections_refused", "clock_jumped"]);
 const eventBadge = (type) => {
-  const kind = CHANGE_EVENTS.has(type) ? "accent"
-    : /failed|rejected|unavailable|lost|changed$|truncated|gap|jumped|refused/.test(type) && type !== "config_changed" ? "bad"
-    : type === "change_intent" ? "warn" : "neutral";
+  const kind = ERROR_EVENTS.has(type) ? "bad" : WARNING_EVENTS.has(type) ? "warn"
+    : CHANGE_EVENTS.has(type) ? "accent" : "neutral";
   return html`<span class="badge plain ${kind}">${EVENT_LABELS[type] || type}</span>`;
 };
 function eventSummary(e, target) {
@@ -300,6 +302,7 @@ function render() {
         ${PAGES.filter((p) => !p.hidden && can(p.role)).map((p) => html`<a href="#/${p.id}" class="${p.id === page.id ? "active" : ""}">
           ${icon(p.icon)}${p.label}
           ${when(p.id === "certificates" && rejected, html`<span class="count" title="Certificates waiting for a decision">${rejected}</span>`)}
+          ${when(p.id === "audit", () => html`<span class="alarm-counts">${alarmCounts()}</span>`)}
         </a>`)}
       </nav>
       <div class="sidebar-foot">
@@ -499,6 +502,41 @@ function mostWrittenCard() {
     <p class="section-note">Nodes that fill the trail, such as a life bit or a clock, can be summarised: one record per interval instead of one per write.</p>${body}</div>`;
 }
 
+// ---------- warnings and errors ----------
+
+const alarm = (severity) => (state.alarms || []).find((a) => a.severity === severity);
+const unacked = (severity) => alarm(severity)?.unacknowledged || 0;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+function alarmCounts() {
+  const e = unacked("error"), w = unacked("warning");
+  return html`${when(e, html`<span class="count bad" title="${plural(e, "error")} not acknowledged">${e}</span>`)}${when(w, html`<span class="count warn" title="${plural(w, "warning")} not acknowledged">${w}</span>`)}`;
+}
+
+// Keeps the badges in the sidebar current on every page.
+async function refreshAlarms() {
+  if (!state.user || state.user.must_change_password) return;
+  try { state.alarms = await get("/alarms"); } catch { return; }
+  const el = document.querySelector(".alarm-counts");
+  if (el) el.innerHTML = alarmCounts().s;
+}
+setInterval(refreshAlarms, 10000);
+
+function alarmBar() {
+  const e = unacked("error"), w = unacked("warning");
+  const f = state.audit.filters;
+  const showing = f.kinds ? (f.kinds === alarm("error")?.kinds.join(",") ? "error" : "warning") : null;
+  if (!e && !w && !showing) return "";
+  const block = (severity, n, word) => when(n, html`<div class="alarm-line"><b>${plural(n, word)}</b> not acknowledged
+    <button class="small" data-action="show-alarms" data-severity="${severity}">Show</button>
+    ${when(can("operator"), html`<button class="small" data-action="ack-alarms" data-severity="${severity}">Acknowledge ${word}s</button>`)}</div>`);
+  return html`<div class="alert ${e ? "bad" : "warn"} alarm-bar">
+    ${block("error", e, "error")}${block("warning", w, "warning")}
+    ${when(!e && !w, html`<div class="alarm-line">Everything is acknowledged.</div>`)}
+    ${when(showing, html`<div class="alarm-line small">Showing only unacknowledged ${showing}s. <button class="small" data-action="clear-filter">Show everything</button></div>`)}
+  </div>`;
+}
+
 // ---------- audit ----------
 
 function auditTable(rows, { compact = false, selectable = false } = {}) {
@@ -542,6 +580,7 @@ function auditView() {
     ${when(a.verify, () => a.verify.error
       ? html`<div class="alert bad"><b>Integrity check failed.</b> ${a.verify.error}</div>`
       : html`<div class="alert ok">All ${a.verify.records} records (#${a.verify.first_seq}–#${a.verify.last_seq}) are intact. Chain head <span class="mono">${a.verify.head_hash.slice(0, 16)}…</span></div>`)}
+    ${alarmBar()}
     ${when(a.showTop, mostWrittenCard)}
     <form class="card filters" data-form="audit-filter">
       <div><label>Target</label><select name="target"><option value="">All</option>${targets.map((t) => html`<option ${new Html(f.target === t.name ? "selected" : "")}>${t.name}</option>`)}</select></div>
@@ -591,6 +630,15 @@ function endpointsTable(endpoints, minSecurity) {
     })}</tbody></table></div>`;
 }
 
+// A section of a card that opens on click; closed unless opened (the
+// state survives the periodic refresh).
+function fold(key, title, summary, body) {
+  const open = state.open?.has(key);
+  return html`<div class="fold"><button type="button" class="fold-head" data-action="fold" data-key="${key}">
+      <span class="chevron">${open ? "▾" : "▸"}</span><h3>${title}</h3><span class="fold-summary">${summary}</span></button>
+    ${when(open, body)}</div>`;
+}
+
 // Whether the target accepts the gateway's certificate (checked by the
 // gateway with a secure channel, before any client needs it).
 function gatewayTrust(g) {
@@ -613,8 +661,12 @@ function securitySection(t, endpoints, { editing = false } = {}) {
   const cert = endpoints?.find((e) => e.server_certificate)?.server_certificate;
   const own = state.status?.certificate;
   const min = t.min_security || "none";
-  return html`<h3 class="mt">Security</h3>
-    <div class="security-block">
+  const offered = (endpoints || []).filter((e) => (MODE_RANK[e.security_mode] ?? 0) >= MIN_RANK[min]).length;
+  const g = t.status?.gateway_trust?.state;
+  const summary = html`${endpoints?.length ? `${offered} of ${endpoints.length} endpoints offered` : "not discovered yet"} ·
+    ${cert ? (trusted.has(cert.thumbprint) ? html`<span class="badge plain ok">target trusted</span>` : html`<span class="badge plain warn">target not trusted</span>`) : ""}
+    ${g === "trusted" ? html`<span class="badge plain ok">accepts the gateway</span>` : g === "refused" ? html`<span class="badge plain bad">refuses the gateway</span>` : ""}`;
+  const body = () => html`<div class="security-block">
       <h4>Endpoints</h4>
       <p class="help">Clients choose one of the offered endpoints themselves; the gateway offers what the target offers, from the minimum security up.</p>
       ${editing ? html`<div class="inline-input mb"><label for="min_security">Minimum security</label>
@@ -642,6 +694,8 @@ function securitySection(t, endpoints, { editing = false } = {}) {
         <dt>Client certificates</dt><dd class="muted">Clients connecting securely are accepted on the <a href="#/certificates">Certificates</a> page${state.status?.rejected_certificates ? html` (<b>${state.status.rejected_certificates} waiting</b>)` : ""}.</dd>
       </dl>
     </div>`;
+  // Open while editing: the minimum security is chosen there.
+  return editing ? html`<h3 class="mt">Security</h3>${body()}` : fold(`${t.name}:security`, "Security", summary, body);
 }
 
 function targetsView() {
@@ -672,14 +726,14 @@ function targetsView() {
 
 function summarisedNodes(t) {
   const rules = t.ignore || [];
-  return html`<h3 class="mt">Summarised nodes</h3>
+  return fold(`${t.name}:summarised`, "Summarised nodes", rules.length ? plural(rules.length, "node") : "none", () => html`
     <p class="section-note">Writes to these nodes are not recorded one by one: every ${summaryEvery()} one record per node says how many there were, from whom, and the last value.
       Add nodes from <a href="#/audit">Audit trail → Most written</a>, a write's details, or the <a href="#/browser">Browser</a>.</p>
     ${rules.length ? html`<div class="table-wrap"><table><thead><tr><th>Node</th><th>Writes from</th><th></th></tr></thead><tbody>
       ${rules.map((r) => html`<tr><td>${r.name || r.node_id}${when(r.name, html`<div class="muted mono small">${r.node_id}</div>`)}</td>
         <td>${r.client ? html`only <span class="mono">${r.client}</span><div class="muted small">other clients are recorded one by one</div>` : "every client"}</td>
         <td>${when(can("admin"), html`<button class="small" data-action="unignore" data-target="${t.name}" data-node="${r.node_id}" data-client="${r.client || ""}">Record every write again</button>`)}</td></tr>`)}
-    </tbody></table></div>` : html`<p class="muted small">None: every write is recorded.</p>`}`;
+    </tbody></table></div>` : html`<p class="muted small">None: every write is recorded.</p>`}`);
 }
 
 const MIN_SECURITY = { none: "Follow the target (incl. None)", sign: "Sign or better", sign_and_encrypt: "Sign & encrypt only" };
@@ -960,6 +1014,7 @@ function accountView() {
 async function load() {
   // Nothing loads until a forced password change is done.
   if (!state.user || state.user.must_change_password) return;
+  refreshAlarms();
   const page = currentPage();
   try {
     switch (page.id) {
@@ -1033,6 +1088,28 @@ const actions = {
   // audit
   "select-record"(el) { const seq = Number(el.dataset.seq); state.audit.selected = state.audit.selected === seq ? null : seq; renderPage(); },
   "close-record"() { state.audit.selected = null; renderPage(); },
+  fold(el) {
+    state.open ||= new Set();
+    const key = el.dataset.key;
+    if (state.open.has(key)) state.open.delete(key); else state.open.add(key);
+    renderPage();
+  },
+  async "show-alarms"(el) {
+    const a = alarm(el.dataset.severity);
+    if (!a) return;
+    state.audit.filters = { kinds: a.kinds.join(","), after_seq: String(a.acknowledged_up_to) };
+    state.audit.selected = null;
+    await loadAudit(); renderPage();
+  },
+  async "ack-alarms"(el) {
+    const severity = el.dataset.severity;
+    const n = unacked(severity);
+    if (!await dialog({ title: `Acknowledge ${plural(n, severity)}?`, confirm: "Acknowledge",
+      body: html`<p>They stay in the audit trail, and the acknowledgement is recorded there too, under your name.</p><p class="muted small">New ${severity}s after this moment count again.</p>` })) return;
+    state.alarms = await post("/alarms/acknowledge", { severity });
+    if (state.audit.filters.kinds) state.audit.filters = {};
+    await loadAudit(); render(); load();
+  },
   async "toggle-top"() {
     const a = state.audit;
     a.showTop = !a.showTop;
