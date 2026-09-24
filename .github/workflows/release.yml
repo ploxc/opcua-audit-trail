@@ -1,10 +1,15 @@
 name: Release
 
 # Push a tag like v0.2.0 to publish binaries and container images.
-# Run manually to build the artifacts without publishing.
+# Changes to the release files themselves trigger a dry run (build only).
 on:
   push:
     tags: ["v*"]
+    branches: ["**"]
+    paths:
+      - .github/workflows/release.yml
+      - Dockerfile.release
+      - packaging/**
   workflow_dispatch:
 
 permissions:
