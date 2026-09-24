@@ -149,6 +149,7 @@ p { margin: 0 0 8px; }
 .logo { flex: none; }
 .logo .dot { fill: var(--logo-dot); }
 .logo .mark { fill: var(--primary); }
+.logo .mark-line { stroke: var(--primary); }
 
 /* Layout */
 .shell { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
@@ -341,6 +342,7 @@ button:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
 .login { position: relative; min-height: 100vh; display: grid; place-items: center; padding: 16px 16px 56px; overflow: hidden; }
 .login-backdrop { position: absolute; width: min(70vh, 90vw); height: min(70vh, 90vw); top: 50%; left: 50%; transform: translate(-50%, -50%); opacity: 0.06; pointer-events: none; }
 .login-backdrop .dot { fill: var(--fg); }
+.login-backdrop .mark-line { stroke: var(--primary); }
 .login .card { position: relative; width: min(380px, 100%); padding: 28px; box-shadow: var(--shadow); }
 .login .brand { padding: 0 0 22px; }
 .login .brand .logo { width: 32px; height: 32px; }

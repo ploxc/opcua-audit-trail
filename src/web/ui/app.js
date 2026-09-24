@@ -47,6 +47,10 @@ const icon = (name, cls = "") =>
 const LOGO_PATH = "m 107.60293,0.64220653 c -35.769829,0 -65.039135,29.45982647 -65.039135,65.27483247 V 94.927484 L 30.45287,82.757639 7.3579379,105.74314 32.676186,131.18345 7.3579379,156.5017 30.214018,179.35778 55.477552,154.09425 80.619032,179.35778 103.71607,156.37227 75.147546,127.66697 V 65.917039 c 0,-18.289883 14.380372,-32.691083 32.455384,-32.691083 18.07499,0 32.45538,14.4012 32.45538,32.691083 0,18.275197 -14.35769,32.665875 -32.41224,32.68897 l -16.215592,-0.09996 -0.124161,32.583751 16.296613,0.1 v 0.002 c 35.7698,0 65.03913,-29.45983 65.03913,-65.274832 0,-35.815005 -29.26933,-65.27483198 -65.03913,-65.27483198 z";
 const logo = (cls = "") =>
   new Html(`<svg class="logo ${cls}" viewBox="0 0 180 180" aria-hidden="true"><circle class="dot" cx="107.599" cy="65.927" r="16.292"/><path class="mark" d="${LOGO_PATH}"/></svg>`);
+// The gateway's own mark: traffic enters on the left and leaves through the
+// gateway (the ring) towards the target and the audit trail.
+const gatewayLogo = (cls = "") =>
+  new Html(`<svg class="logo gateway-logo ${cls}" viewBox="0 0 512 512" aria-hidden="true"><g class="mark-line" fill="none" stroke-width="75.1" stroke-linecap="round"><line x1="143.3" y1="256" x2="37.6" y2="256"/><line x1="342.3" y1="183.6" x2="423.3" y2="115.6"/><line x1="342.3" y1="328.4" x2="423.3" y2="396.4"/><circle cx="256" cy="256" r="112.7"/></g><circle class="dot" cx="256" cy="256" r="37.6"/></svg>`);
 
 const menuButton = new Html(`<button class="icon-button menu-button" data-action="menu" aria-label="Menu">${icon("menu").s}</button>`);
 const THEME_KEY = "ploxc-color-mode";
@@ -291,7 +295,7 @@ function render() {
   const rejected = state.status?.rejected_certificates || 0;
   app.innerHTML = html`<div class="shell">
     <aside class="sidebar">
-      <div class="brand">${logo()}<div>Audit Gateway<small>OPC UA</small></div></div>
+      <div class="brand">${gatewayLogo()}<div>Audit Gateway<small>OPC UA</small></div></div>
       <nav class="nav">
         ${PAGES.filter((p) => !p.hidden && can(p.role)).map((p) => html`<a href="#/${p.id}" class="${p.id === page.id ? "active" : ""}">
           ${icon(p.icon)}${p.label}
@@ -359,8 +363,8 @@ function pageView(page) {
 // ---------- login ----------
 
 function loginView() {
-  return html`<div class="login">${logo("login-backdrop")}<form class="card" data-form="login">
-    <div class="brand">${logo()}<div>Audit Gateway<small>OPC UA</small></div></div>
+  return html`<div class="login">${gatewayLogo("login-backdrop")}<form class="card" data-form="login">
+    <div class="brand">${gatewayLogo()}<div>Audit Gateway<small>OPC UA</small></div></div>
     <div class="field"><label for="u">User name</label><input id="u" name="username" autocomplete="username" required></div>
     <div class="field"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
     <div id="login-error" class="alert bad hidden"></div>
@@ -917,8 +921,8 @@ function usersView() {
 /// A password someone else chose (first start, reset by an admin) is
 /// replaced before anything else.
 function mustChangeView() {
-  return html`<div class="login">${logo("login-backdrop")}<form class="card" data-form="password">
-    <div class="brand">${logo()}<div>Choose a new password<small>${state.user.username}</small></div></div>
+  return html`<div class="login">${gatewayLogo("login-backdrop")}<form class="card" data-form="password">
+    <div class="brand">${gatewayLogo()}<div>Choose a new password<small>${state.user.username}</small></div></div>
     <p class="section-note">Your password was set by someone else. Choose your own to continue.</p>
     <div class="field"><label for="c">Current password</label><input id="c" name="current" type="password" required autocomplete="current-password"></div>
     <div class="field"><label for="n">New password (min. 8)</label><input id="n" name="new" type="password" minlength="8" required autocomplete="new-password"></div>
