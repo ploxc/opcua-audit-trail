@@ -289,7 +289,10 @@ start, and a wrong value could lock you out, so they are changed in the file.
 
 Roles are cumulative: auditor < operator < admin. Manage users from the
 command line with `opcua-audit-gateway user add|passwd|role|delete|list`
-(also to reset a lost admin password: `user passwd admin`). Changing a
+(also to reset a lost admin password: `user passwd admin`, which also creates
+the admin if the gateway has not run yet). A user that does not exist is
+reported before any password is asked, with the path of the user database, so
+a command run against the wrong config is noticed at once. Changing a
 password, a role or removing a user ends that user's sessions; sessions also
 expire after 8 hours idle and 24 hours in total. Failed logins are rate
 limited per address and per user.
