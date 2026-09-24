@@ -6,6 +6,7 @@
 pub(crate) mod audit_map;
 mod connection;
 pub mod endpoints;
+pub mod ignore;
 pub mod transport;
 pub mod upstream;
 
@@ -184,6 +185,11 @@ pub struct RelayTarget {
     /// Bumped when certificates are untrusted: every connection re-checks
     /// its client and server certificate and closes if one is revoked.
     pub trust_changed: tokio::sync::watch::Sender<u64>,
+    /// Nodes whose value writes are summarised; changeable while running.
+    pub ignore: ignore::IgnoreList,
+    /// Ignored writes since the last summary.
+    pub ignored: ignore::IgnoredWrites,
+    ignored_summary: Duration,
 }
 
 impl RelayTarget {
@@ -199,7 +205,6 @@ impl RelayTarget {
         Self {
             decoding: transport::decoding_options(&limits),
             limits,
-            config,
             gateway,
             statuses,
             discovery,
@@ -214,6 +219,18 @@ impl RelayTarget {
             request_handles: AtomicU32::new(GATEWAY_REQUEST_HANDLES),
             shutdown: CancellationToken::new(),
             trust_changed: tokio::sync::watch::Sender::new(0),
+            ignore: ignore::IgnoreList::new(&config.ignore),
+            ignored: ignore::IgnoredWrites::default(),
+            ignored_summary: Duration::from_secs(audit_config.ignored_summary_secs),
+            config,
+        }
+    }
+
+    /// Records the summaries of ignored writes since the last call.
+    pub async fn record_ignored(&self) {
+        for event in self.ignored.take() {
+            let entry = crate::audit::AuditEntry::new(event).target(self.config.name.clone());
+            let _ = self.audit.record(entry).await;
         }
     }
 
@@ -349,9 +366,12 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
     }));
     // Refused connections are recorded as one summary per address.
     let mut report = tokio::time::interval(Duration::from_secs(10));
+    let mut summarise = tokio::time::interval(target.ignored_summary);
+    summarise.tick().await;
     loop {
         tokio::select! {
             _ = target.shutdown.cancelled() => break,
+            _ = summarise.tick() => target.record_ignored().await,
             _ = report.tick() => {
                 let refused = admission.lock().take_refused();
                 for (ip, count, reason) in refused {
@@ -387,5 +407,6 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
             },
         }
     }
+    target.record_ignored().await;
     tracing::info!(target = %target.config.name, "stopped accepting clients");
 }

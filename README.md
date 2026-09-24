@@ -207,12 +207,50 @@ In QuestDB, make retries idempotent with
 
 The dashboard shows each destination's state and how many records are waiting.
 
+## Noisy nodes (life bits, counters)
+
+An HMI that writes a life bit every second adds 86 400 records a day and
+buries the writes that matter. Such nodes can be **summarised**: their value
+writes are no longer recorded one by one, but counted, and every hour one
+`ignored_writes` record per node says how many writes there were (and how many
+failed), from which clients, from when to when, and the last value. A write
+to such a node therefore never goes unnoticed entirely.
+
+In the web UI (admin): **Audit trail → Most written** lists the nodes written
+most in the last 24 hours, each with **Summarise** (every client) or **Only
+from …** (just that client; the same node written by anyone else stays
+recorded one by one). The same buttons are in a write record's details and on
+a variable in the Browser. **Record again** undoes it. Changes apply at once,
+without disconnecting clients, and are audited (`config_changed`).
+
+In `config.toml`:
+
+```toml
+[audit]
+ignored_summary_secs = 3600         # one summary per node per hour (default)
+
+[[targets]]
+name = "line1"
+# …
+[[targets.ignore]]
+node_id = 'ns=3;s="DB1"."Life"'     # as shown in the audit trail
+[[targets.ignore]]
+node_id = "ns=3;i=1234"
+client = "10.0.0.5"                 # only from this address or application URI
+```
+
+Only writes of a node's value are summarised; method calls, other attributes
+and other services are always recorded. Summarised writes skip the read of the
+old value, which also saves the PLC a request per write. In `fail_mode =
+"closed"` they are not held back for a committed record; a summary that has
+not been written yet is lost if the gateway crashes.
+
 ## Web UI
 
 | Page | Role | |
 |---|---|---|
 | Dashboard | auditor | Reachability of each target, connected clients, latest changes |
-| Audit trail | auditor | Filters, record details, live mode, CSV export, integrity check |
+| Audit trail | auditor | Filters, record details, live mode, CSV export, integrity check, most written nodes (admin summarises them) |
 | Targets | auditor (operator discovers, admin edits) | Add/edit/remove targets without a restart, discovery, trust the PLC certificate |
 | Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
@@ -241,6 +279,8 @@ requests also need the header `X-Requested-With: opcua-audit-gateway`.
 | GET | `/api/audit` | Audit records, newest first. Filters: `target`, `kind`, `user`, `node_id`, `since`, `until`, `before_seq`, `limit` |
 | GET | `/api/audit.csv` | The same filters, as CSV |
 | GET | `/api/audit/verify` | Verify the hash chain |
+| GET | `/api/audit/most-written` | Nodes with the most recorded writes (`hours`, default 24) |
+| POST | `/api/targets/{name}/ignore`, `…/ignore/remove` | `{"node_id": "…", "client": "…"}`: summarise a node's writes, or record them again (admin, audited) |
 | | `/api/targets`, `/api/certificates/…`, `/api/users`, `/api/browser/{target}/…` | Used by the UI; see `src/web/mod.rs` |
 
 By default the web UI serves plain HTTP on `127.0.0.1`. For remote access,

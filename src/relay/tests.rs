@@ -771,3 +771,98 @@ async fn secure_channel_token_renewal_keeps_the_connection() {
         [0.0, 1.0, 2.0].map(|v| Some(serde_json::json!(v))).to_vec()
     );
 }
+
+/// Writes to an ignored node are summarised, not recorded one by one; other
+/// items of the same request, and other clients (for a client-specific
+/// rule), are recorded as usual.
+#[tokio::test]
+async fn ignored_writes_are_summarised() {
+    let h = harness(FailMode::Open).await;
+    let session = h
+        .connect(
+            "a",
+            SecurityPolicy::None,
+            MessageSecurityMode::None,
+            IdentityToken::Anonymous,
+            false,
+        )
+        .await
+        .unwrap();
+    h.relay.ignore.set(&[crate::config::IgnoreRule {
+        node_id: h.setpoint.to_string(),
+        client: None,
+    }]);
+
+    for i in 0..3 {
+        let results = session
+            .write(&[write_value(&h.setpoint, i as f64)])
+            .await
+            .unwrap();
+        assert_eq!(results, vec![StatusCode::Good]);
+    }
+    // One request, an ignored and a recorded item: the recorded one keeps
+    // its own result.
+    let results = session
+        .write(&[
+            write_value(&h.setpoint, 7.0),
+            write_value(&h.read_only, 1.0),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(results[0], StatusCode::Good);
+    assert!(results[1].is_bad());
+    assert_eq!(
+        read_value(&session, &h.setpoint).await,
+        Variant::Double(7.0)
+    );
+
+    let writes = h.records("write").await;
+    assert_eq!(writes.len(), 1, "only the read-only node is recorded");
+    let AuditEvent::Write {
+        node_id, status, ..
+    } = &writes[0].entry.event
+    else {
+        panic!()
+    };
+    assert_eq!(node_id, &h.read_only.to_string());
+    assert_eq!(status, &results[1].to_string());
+    assert!(h.records("ignored_writes").await.is_empty());
+
+    h.relay.record_ignored().await;
+    let summaries = h.records("ignored_writes").await;
+    assert_eq!(summaries.len(), 1);
+    let AuditEvent::IgnoredWrites {
+        node_id,
+        count,
+        failed,
+        last_value,
+        clients,
+        ..
+    } = &summaries[0].entry.event
+    else {
+        panic!()
+    };
+    assert_eq!(node_id, &h.setpoint.to_string());
+    assert_eq!((*count, *failed), (4, 0));
+    assert_eq!(last_value.value, serde_json::json!(7.0));
+    assert_eq!(clients.len(), 1);
+    assert!(clients[0].starts_with("127.0.0.1 "), "{clients:?}");
+    // The summary is filed under the node, like its writes.
+    assert_eq!(
+        summaries[0].entry.event.node_id(),
+        Some(h.setpoint.to_string().as_str())
+    );
+
+    // A rule for another client ignores nothing from this one.
+    h.relay.ignore.set(&[crate::config::IgnoreRule {
+        node_id: h.setpoint.to_string(),
+        client: Some("urn:another-hmi".into()),
+    }]);
+    session
+        .write(&[write_value(&h.setpoint, 8.0)])
+        .await
+        .unwrap();
+    assert_eq!(h.records("write").await.len(), 2);
+    session.disconnect().await.unwrap();
+    h.verify_chain().await;
+}

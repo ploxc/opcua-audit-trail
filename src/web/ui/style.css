@@ -324,6 +324,10 @@ button:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
 .alert.warn { background: var(--warn-soft); color: var(--warn); }
 .alert.ok { background: var(--ok-soft); color: var(--ok); }
 .alert.info { background: var(--accent-soft); color: var(--accent-text); }
+.alert .button-row, .ignore-box .button-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.ignore-box { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.ignore-box p { margin: 0; }
+.alert.info { background: var(--accent-soft); color: var(--accent-text); }
 .alert a { color: inherit; text-decoration: underline; font-weight: 500; }
 
 .toast-host { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; max-width: min(420px, calc(100vw - 32px)); }

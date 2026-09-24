@@ -251,6 +251,15 @@ impl AuditReader {
             .await
     }
 
+    pub async fn most_written(
+        &self,
+        since: DateTime<Utc>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<store::WrittenNode>> {
+        self.with_conn(move |c| store::most_written(c, &since, limit))
+            .await
+    }
+
     pub async fn head_seq(&self) -> anyhow::Result<i64> {
         self.with_conn(store::head_seq).await
     }

@@ -1,15 +1,11 @@
 name: Release
 
-# Push a tag like v0.2.0 to publish binaries and container images.
-# Changes to the release files themselves trigger a dry run (build only).
+# Push a tag like v0.2.0 to publish binaries and container images. A manual
+# run on a branch is a dry run (build only). Nothing runs on ordinary pushes:
+# the account's Actions minutes are limited.
 on:
   push:
     tags: ["v*"]
-    branches: ["**"]
-    paths:
-      - .github/workflows/release.yml
-      - Dockerfile.release
-      - packaging/**
   workflow_dispatch:
 
 # Only the jobs that publish get write access.

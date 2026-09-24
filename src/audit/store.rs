@@ -316,6 +316,67 @@ pub fn open_reader(path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// A node that was written often: candidates for the ignore list.
+#[derive(Debug, Clone, Serialize)]
+pub struct WrittenNode {
+    pub target: Option<String>,
+    pub node_id: String,
+    pub display_name: Option<String>,
+    pub count: i64,
+    /// The most recent write to it.
+    pub last: StoredRecord,
+}
+
+/// The nodes with the most recorded writes since `since`, most first.
+pub fn most_written(
+    conn: &Connection,
+    since: &DateTime<Utc>,
+    limit: u32,
+) -> anyhow::Result<Vec<WrittenNode>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.target, a.node_id, c.n, a.seq, a.hash, a.body, a.prev_hash
+         FROM (SELECT target, node_id, COUNT(*) AS n, MAX(seq) AS last FROM audit
+               WHERE kind = 'write' AND ts >= ?1 GROUP BY target, node_id
+               ORDER BY n DESC LIMIT ?2) AS c
+         JOIN audit AS a ON a.seq = c.last
+         ORDER BY c.n DESC",
+    )?;
+    let rows = stmt.query_map(params![ts_column(since), limit], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (target, node_id, count, seq, hash, body, prev_hash) = row?;
+        let entry: AuditEntry = serde_json::from_str(&body)
+            .with_context(|| format!("audit record {seq} has an unreadable body"))?;
+        let display_name = match &entry.event {
+            crate::audit::event::AuditEvent::Write { display_name, .. } => display_name.clone(),
+            _ => None,
+        };
+        out.push(WrittenNode {
+            target,
+            node_id: node_id.unwrap_or_default(),
+            display_name,
+            count,
+            last: StoredRecord {
+                seq,
+                hash,
+                prev_hash,
+                entry,
+            },
+        });
+    }
+    Ok(out)
+}
+
 /// Newest records first.
 pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredRecord>> {
     let mut sql = String::from("SELECT seq, hash, body, prev_hash FROM audit WHERE 1=1");
@@ -630,6 +691,31 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].seq, 2);
+    }
+
+    #[test]
+    fn most_written_nodes_come_first() {
+        let (_dir, mut store, path) = store();
+        let mut entries = Vec::new();
+        for i in 0..5 {
+            entries.push(write_event("ns=2;s=Life", i as f64));
+        }
+        entries.push(write_event("ns=2;s=Set", 1.0));
+        entries.push(write_event("ns=2;s=Set", 2.0));
+        let mut old = write_event("ns=2;s=Old", 1.0);
+        old.ts = Utc::now() - chrono::Duration::days(2);
+        entries.push(old);
+        entries.push(AuditEntry::new(AuditEvent::GatewayStopped));
+        store.append(&entries).unwrap();
+
+        let reader = open_reader(&path).unwrap();
+        let since = Utc::now() - chrono::Duration::days(1);
+        let top = most_written(&reader, &since, 10).unwrap();
+        let summary: Vec<_> = top.iter().map(|n| (n.node_id.as_str(), n.count)).collect();
+        assert_eq!(summary, [("ns=2;s=Life", 5), ("ns=2;s=Set", 2)]);
+        assert_eq!(top[0].target.as_deref(), Some("plc1"));
+        assert_eq!(top[0].last.seq, 5, "the most recent write");
+        assert_eq!(most_written(&reader, &since, 1).unwrap().len(), 1);
     }
 
     #[test]
