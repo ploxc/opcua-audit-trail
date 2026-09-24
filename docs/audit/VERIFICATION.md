@@ -152,3 +152,63 @@ Numbered N1 and up. The source is B (blind agent) or V (verifier with context). 
 3. **Tamper evidence and export:** N1, A2 + N9, A4, E1, N10, A1 (anchoring), A3, A5, E2.
 4. **Web and operations:** W2, W3, N7, N3 (Windows service account and ACLs), P1 + N19, N11–N18, W4–W6, K1.
 5. The rest of the Low and Info findings.
+
+## 5. Fix status
+
+All findings were fixed on the branch after this verification, except R7
+(withdrawn) and the items under *Accepted*. Regression tests were added where
+a test could show the problem; the ones for R1 and P2 were checked to fail
+without their fix.
+
+| Commit | Area | Findings |
+|---|---|---|
+| `ead63fb` | Relay: audit gaps, channels, sessions | R1, R2, R6, R8, R9, P2, N2, N4, N5, N20, N21, N25, I2, I5 |
+| `2f7698e` | Relay: cost of unauthenticated clients | R3, R4, R5, N6, N24 |
+| `81812d2` | Audit trail and export | A1–A5, E1–E3, N1, N8, N9, N10, N23, I4; Info: `prev_hash` exported, stalled export shown |
+| `c186a74` | Web, users, PKI | W1–W6, P1, I1, I3, N7, N11–N17; Info: headers, HSTS, CSP, `__Host-` cookie, Host check, UI state after logout, URL credentials, empty user update |
+| `ec325e0` | Packaging and CI | N3, N18, N19, K1 |
+
+How the main ones were fixed:
+
+- **R1:** audited requests keep the upstream open until their responses
+  arrive (up to 30 s); a request that may have been sent but got no answer is
+  recorded as uncertain.
+- **R2, R8:** a renewal must keep the policy, mode and certificate, checked
+  before the library parses it; nothing is processed once a connection closes.
+- **R3, N5, N6, R4:** frame sizes are checked from the header, the channel
+  lifetime is computed in milliseconds, and connections are limited per
+  target, per address and by rate.
+- **R6:** `min_security` per target; the endpoints in CreateSession are
+  checked against discovery; endpoint changes are audited.
+- **N4, R9:** a session is bound to its connection and to the security it
+  was activated with.
+- **A1, N9, E1:** a stored high-water mark (seq, hash) detects truncation;
+  `verify` checks against the exporters' positions and `--expect SEQ:HASH`;
+  exporters record `export_gap`.
+- **A2, A4:** retention deletes only a prefix, in one transaction, and skips
+  when the clock jumped.
+- **W2, W6:** sessions are checked against a per-user epoch in the database;
+  the initial password goes to a 0600 file and must be changed.
+- **N3:** the Windows service runs as `NT SERVICE\OpcUaAuditGateway`, and
+  `service install` restricts its directories. Not tested on Windows; it
+  compiles and passes clippy for the Windows target.
+- **E3:** QuestDB over HTTPS and syslog over TLS (optional `ca_file`).
+  Tested against local TLS servers (including refusal of an untrusted or
+  misnamed certificate), not yet against a real QuestDB or SIEM.
+
+### Accepted
+
+- **N22:** the `user` label mixes identity kinds. Every record also carries
+  the identity kind and the client (address, application, certificate), so
+  records can be told apart; the label stays short for filtering.
+- **Error details in the UI:** they help the administrator diagnose
+  connections and certificates, and only logged-in users see them.
+- **Unreadable record body:** the exporter stops on it and shows the error.
+  A body that cannot be read means the database was damaged or changed, and
+  `verify` reports it; skipping it silently would hide that.
+- **Exported body:** records are exported with their hash and `prev_hash`,
+  but as fields, not as the exact JSON that was hashed. Checking an exported
+  copy on its own would need that JSON; the local `verify` against exported
+  heads covers the threat.
+- **Base images by digest:** the images use distroless tags that receive
+  security updates; `docker-compose.yml` says to pin QuestDB for production.

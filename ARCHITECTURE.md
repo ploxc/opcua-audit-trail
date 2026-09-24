@@ -86,6 +86,21 @@ only changes what is bound to certificates or to the channel:
   it.
 * **Timeouts.** The upstream timeout is the client's `timeoutHint` plus 5 s,
   so the client always sees its own timeout first.
+* **Disconnects.** When a client disconnects, the relay still waits (up to
+  30 s) for the responses to its audited requests, so a write that reached
+  the PLC is recorded with its result even if the client is gone. A request
+  that may or may not have reached the PLC is recorded as uncertain, with
+  the reason ("no response; the server may have applied it").
+* **Resource limits.** Frames are checked against the negotiated size from
+  their header, before they are buffered. Each target limits client
+  connections in total (`max_connections`, 50) and per address
+  (`max_connections_per_address`, 10), plus the rate of new ones; refused
+  connections are summarised as `connections_refused`. Client-supplied
+  strings in audit records are truncated.
+* **Channel renewal.** A renewal must keep the security policy, mode and
+  client certificate the channel was opened with; this is checked before the
+  message is parsed. A client certificate that is no longer trusted closes
+  its connections.
 
 ### What is audited
 
@@ -96,7 +111,7 @@ only changes what is bound to certificates or to the channel:
 | `HistoryUpdate` | Node, kind of update, result status |
 | `AddNodes`, `DeleteNodes`, `AddReferences`, `DeleteReferences` | Node, service, result status |
 | Connection & session | TCP connect/disconnect, secure channel (policy, mode), session create/activate/close, failed logins, rejected certificates |
-| Gateway | Start/stop, configuration changes (who, what), upstream availability, retention, lost events |
+| Gateway | Start/stop, configuration changes (who, what), discovery from the UI, upstream availability and endpoint changes, refused connections, retention, lost events, truncated trail, clock jumps, export gaps |
 
 The status comes from the upstream response, so **rejected writes are audited
 too** (`BadUserAccessDenied` is valuable information).
@@ -134,16 +149,26 @@ The same certificate is used downstream (clients must trust it) and upstream
 ### Trust lists
 
 Standard OPC UA layout: unknown client certificates land in `pki/rejected/` and
-are moved to `pki/trusted/` by an administrator. The web UI will offer this as a
-one-click action, like UaExpert or a PLC's web interface.
+are moved to `pki/trusted/` by an administrator, also with one click in the web
+UI. `pki/rejected/` is capped, so unknown clients cannot fill the disk. Trusting
+a PLC certificate from the web UI names the thumbprint the administrator saw;
+if the PLC now presents another certificate, nothing is trusted.
 
 ### Following the target
 
 By default the gateway follows the upstream server. It periodically runs
 `GetEndpoints` on the target and offers clients the same security policies,
-security modes and user token types. Each can be overridden per target, for
-example to disable `None` towards clients or to force `Basic256Sha256` +
-`SignAndEncrypt` upstream.
+security modes and user token types. Changes are audited
+(`upstream_endpoints_changed`).
+
+Discovery itself is not authenticated, so someone on the network could hand
+the gateway an endpoint list without security. `min_security` per target
+(`none`, `sign`, `sign_and_encrypt`) sets a floor: endpoints below it are
+neither offered to clients nor used upstream. When the gateway creates the
+upstream session, it also checks the endpoints the server returns (which are
+signed) against what discovery showed. A session is bound to the connection
+and to the security it was activated with; another connection can only take
+it over with at least the same security.
 
 ### User identity: passthrough
 
@@ -183,14 +208,24 @@ hash(n) = sha256( hash(n-1) "\n" seq(n) "\n" body(n) )      hash(0) = 000…0
 `opcua-audit-gateway verify` (and `GET /api/audit/verify`) detects modified,
 inserted or deleted records.
 
-**Retention** deletes the oldest records and then appends a `retention_pruned`
-record that names the last deleted sequence number and hash. The remaining
-chain therefore stays verifiable, and the gap is accounted for.
+**Retention** deletes the oldest records and appends a `retention_pruned`
+record that names the last deleted sequence number and hash, in one
+transaction. Only a prefix of the chain is ever deleted, so the remaining
+chain stays verifiable and the gap is accounted for. If the system clock
+jumped, retention is skipped and a `clock_jumped` record is written.
+
+A separate row keeps the highest sequence number and hash ever written, so
+cutting off the newest records is detected too (`trail_truncated`), and the
+database runs with `synchronous = FULL`.
 
 The chain proves integrity *within* the database. Someone with write access to
 the file could rebuild the entire chain. The export (QuestDB, syslog) is the
 answer: every exported record carries its hash, so once records are outside
-the device, a rebuilt local chain no longer matches the copy.
+the device, a rebuilt local chain no longer matches the copy. `verify` checks
+the chain against the last record each destination acknowledged, and against
+heads noted down earlier (`verify --expect SEQ:HASH`; every run prints the
+current head). An exporter that finds its last position gone or changed
+records `export_gap` and the dashboard shows it.
 
 ### Fail mode
 
@@ -227,14 +262,26 @@ embedded, so the UI needs no internet access.
   tail, CSV export, chain verification.
 * **Users**: local users with roles `admin` (configuration), `operator`
   (browser) and `auditor` (audit log only). LDAP/AD later. Sessions are
-  HttpOnly/SameSite=Strict cookies. Every state-changing request needs a
-  custom header (CSRF protection). UI logins and every change made through
-  the UI are audited. HTTPS with rustls (`ring` provider), using the gateway
-  certificate or PEM files.
+  HttpOnly/SameSite=Strict cookies, checked against the user store on every
+  request (changing a password, role or removing a user ends them), expire
+  after 8 hours idle and 24 hours in total. Every state-changing request needs a custom header
+  (CSRF protection). Logins are rate limited per address and per user. The
+  initial `admin` password is written to `initial-admin-password.txt` in the
+  data directory (not to the log) and must be changed at the first login.
+  UI logins and every change made through the UI are audited. HTTPS with
+  rustls (`ring` provider), using the gateway certificate or PEM files; with
+  TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.
+* **Discovery** of an arbitrary URL is admin-only and audited, so the UI
+  cannot be used to probe the plant network.
 
-The web UI binds to `127.0.0.1` by default. The compose file only publishes it
-on the host's loopback. Targets can be changed at runtime: they are written
-back to `config.toml` with the file's comments preserved.
+The web UI binds to `127.0.0.1` by default; on a loopback address it only
+accepts requests whose `Host` is a loopback name (against DNS rebinding). The
+compose file only publishes it on the host's loopback. Security headers (CSP,
+`X-Frame-Options`, `nosniff`, no referrer) are sent on every response.
+
+Targets can be changed at runtime: they are written back to `config.toml`
+with the file's comments preserved (atomically, readable by the service
+only).
 
 ## Build and deployment
 
@@ -242,8 +289,12 @@ back to `config.toml` with the file's comments preserved.
   for PLCnext AXC F 2152), Windows, macOS. Built by `.github/workflows/release.yml`
   for every `v*` tag, with SHA-256 checksums.
 * Linux: `packaging/linux/install.sh` installs a hardened systemd unit that runs
-  as a dedicated user. Windows: `service install` registers an auto-start
-  service that logs to daily files.
+  as a dedicated user (`UMask=0077`, syscall filter, no new privileges,
+  read-only system). Windows: `service install` registers an auto-start
+  service under its own virtual account, restricts its directories to that
+  account and administrators, and logs to daily files.
+* CI: the token is read-only except for the publishing jobs, and actions are
+  pinned to commits.
 * Container: distroless, non-root. The release image is built from the musl
   binaries for amd64, arm64 and arm/v7, and published to GHCR. Config, PKI,
   users and the audit trail live in `/data`; the config is created from a
@@ -258,6 +309,9 @@ back to `config.toml` with the file's comments preserved.
 * Integration tests start an in-process async-opcua server as a stand-in PLC.
   The relay milestone adds async-opcua clients on the other side, covering
   every security policy and mode.
+* Regression tests for the findings of the security audit
+  (`docs/audit/`), e.g. a write whose client disconnects before the response
+  is still recorded.
 * Interoperability matrix, tested manually per release: Phoenix Contact PLCnext,
   Siemens S7-1500, Beckhoff TwinCAT (TF6100), Codesys-based runtimes; clients
   UaExpert, plus the SCADA packages in use.
@@ -293,3 +347,4 @@ back to `config.toml` with the file's comments preserved.
 | Frontend technology | Vanilla JS without a build step, instead of Svelte: a single `cargo build`, no Node toolchain in CI or cross builds |
 | UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |
+| Security review | Audit in `docs/audit/AUDIT.md`, independently verified in `VERIFICATION.md`; all findings fixed except those listed there as accepted |

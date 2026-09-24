@@ -8,7 +8,7 @@ audit trail of every write, method call and client session. It is a single Rust
 binary that runs standalone (Linux, Windows, macOS, ARM PLCs such as PLCnext) or
 in Docker.
 
-> **Status: all 7 roadmap milestones done; not yet tested against real PLCs.** The relay works for security `None`, `Sign`
+> **Status: all 7 roadmap milestones done; tested against Siemens PLCSIM Advanced, not yet in production.** The relay works for security `None`, `Sign`
 > and `SignAndEncrypt` (all RSA policies), anonymous and user name logins, and
 > every service (reads, writes, subscriptions, method calls, …). Writes, method
 > calls, history updates, node management, sessions and connections are
@@ -16,7 +16,9 @@ in Docker.
 > covers status, the audit trail, targets, certificates, an OPC UA browser and
 > users. Audit records can be exported to QuestDB and syslog. It installs as
 > a systemd or Windows service or runs as a container, with optional HTTPS.
-> See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap.
+> See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap, and
+> [docs/audit](docs/audit/) for the security audit and its independent
+> verification.
 
 ## Try it without a PLC
 
@@ -28,11 +30,13 @@ cargo run -- init                                  # config.toml + certificate
 #   name = "line1"
 #   listen = "0.0.0.0:4841"
 #   endpoint_url = "opc.tcp://127.0.0.1:4840/"
-cargo run -- run                                   # prints the admin password once
+cargo run -- run                                   # admin password: data/initial-admin-password.txt
 cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/
 ```
 
-Open http://127.0.0.1:8080 and log in as `admin` to watch the writes arrive.
+Open http://127.0.0.1:8080 and log in as `admin` with the password from
+`data/initial-admin-password.txt`. You choose a new password at the first
+login (the file is removed then). Then watch the writes arrive.
 
 ## Quick start (binary)
 
@@ -42,7 +46,7 @@ cargo build --release
 ./target/release/opcua-audit-gateway discover opc.tcp://192.168.0.10:4840
 # add a [[targets]] block to config.toml, then:
 ./target/release/opcua-audit-gateway run         # web UI on http://127.0.0.1:8080
-                                                 # (first start prints the admin password)
+                                                 # (admin password: data/initial-admin-password.txt)
 ./target/release/opcua-audit-gateway verify      # check the audit trail's hash chain
 ```
 
@@ -74,6 +78,24 @@ The gateway follows standard OPC UA trust handling, in its `pki/` directory:
 The web UI's **Certificates** page does all of this with buttons. The
 **Targets** page can trust a PLC certificate directly from discovery.
 
+## Security per target
+
+```toml
+[[targets]]
+name = "line1"
+listen = "0.0.0.0:4841"
+endpoint_url = "opc.tcp://192.168.0.10:4840"
+min_security = "sign_and_encrypt"   # "none" (default), "sign", "sign_and_encrypt"
+max_connections = 50                # client connections at once (default)
+max_connections_per_address = 10    # per client address (default)
+```
+
+The gateway offers clients the endpoints the PLC advertises. Endpoint
+discovery is not authenticated, so set `min_security` as soon as the PLC
+supports security: endpoints below it are never offered or used, whatever
+the network says. The connection limits protect the PLC, which accepts only a
+few secure channels.
+
 ## Installation
 
 Release archives (Linux x86_64/ARM64/ARMv7 static, Windows, macOS) and
@@ -86,7 +108,7 @@ multi-arch images (`ghcr.io/harted/opcua-audit-trail`) are built for every
 tar xzf opcua-audit-gateway-*-linux-amd64.tar.gz && cd opcua-audit-gateway-*
 sudo ./install.sh ./opcua-audit-gateway
 sudo nano /etc/opcua-audit-gateway/config.toml    # or add targets in the web UI
-journalctl -u opcua-audit-gateway | grep password  # initial admin password
+sudo cat /var/lib/opcua-audit-gateway/initial-admin-password.txt  # first login
 ```
 
 The service runs as the unprivileged user `opcua-gw` with a hardened unit.
@@ -96,21 +118,31 @@ On a PLCnext controller use the `armv7` archive or the container image.
 
 ### Windows (service)
 
+Put the executable where only administrators can change it and the config in
+its own directory, e.g. (as administrator):
+
 ```powershell
-opcua-audit-gateway.exe --config C:\gateway\config.toml init
-opcua-audit-gateway.exe --config C:\gateway\config.toml service install   # as administrator
+$exe = "C:\Program Files\OPC UA Audit Gateway\opcua-audit-gateway.exe"
+& $exe --config "C:\ProgramData\OPC UA Audit Gateway\config.toml" init
+& $exe --config "C:\ProgramData\OPC UA Audit Gateway\config.toml" service install
 sc start OpcUaAuditGateway
 ```
 
-Logs go to `C:\gateway\logs` (daily files, kept 14 days), including the
-initial admin password. `service uninstall` removes the service. Any command
-accepts `--log-dir` to log to files instead of the console.
+The service runs under its own virtual account
+(`NT SERVICE\OpcUaAuditGateway`), not as LocalSystem. `service install`
+restricts the config, data, certificate and log directories to that account,
+SYSTEM and administrators; don't point them at shared directories. Logs go to
+`logs` next to the config (daily files, kept 14 days). The initial admin
+password is in `initial-admin-password.txt` in the data directory.
+`service uninstall` removes the service; install it again after an upgrade
+from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
+to files instead of the console.
 
 ### Docker
 
 ```sh
 docker compose up -d
-docker compose logs gateway | grep password
+docker compose cp gateway:/data/initial-admin-password.txt .   # first login
 ```
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
@@ -132,7 +164,10 @@ tls = true                          # uses the gateway certificate, or:
 
 With the gateway certificate, browsers ask once to accept it. To avoid that,
 import `pki/own/cert.der` as trusted, or use a certificate from your own CA.
-With TLS the session cookie is marked `Secure`.
+With TLS the session cookie is `Secure` and `__Host-` prefixed, and HSTS is
+sent. Without TLS, keep the UI on loopback: there it only answers requests for
+`localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
+rebinding.
 
 ## Audit export
 
@@ -143,19 +178,31 @@ least once.
 
 ```toml
 [export.questdb]              # long-term storage and SQL analysis
-url = "http://questdb:9000"   # ILP over HTTP; each batch is acknowledged
+url = "http://questdb:9000"   # ILP over HTTP(S); each batch is acknowledged
 table = "opcua_audit"         # created on first write
-# token = "…"  or  username = "…" / password = "…"
+# token = "…"  or  username = "…" / password = "…"  (use https off-host)
+# ca_file = "questdb-ca.pem"  # https with a private CA; default: public roots
 
 [export.syslog]               # SIEM: Graylog, Splunk, Wazuh, rsyslog, …
-address = "siem.local:514"
-protocol = "tcp"              # RFC 6587 framing; "udp" is fire-and-forget
+address = "siem.local:6514"
+protocol = "tls"              # RFC 5425; "tcp" is RFC 6587 framing; "udp" is fire-and-forget
+# ca_file = "siem-ca.pem"
 facility = 16                 # local0
 ```
 
-Every exported record carries its sequence number and hash. Once records are
-outside the gateway, rewriting the local database no longer goes unnoticed:
-compare the hashes. In QuestDB, make retries idempotent with
+Every exported record carries its sequence number, its hash and the previous
+record's hash. Once records are outside the gateway, rewriting the local
+database no longer goes unnoticed: `verify` checks the chain against the last
+record each destination acknowledged. Note the head that `verify` prints and
+check it later, for example from another machine's copy:
+
+```sh
+opcua-audit-gateway verify --expect 1234:<hash printed by the earlier run>
+```
+
+If an exporter's last position is no longer in the trail (a truncated or
+rebuilt database), it records an `export_gap` and the dashboard raises it.
+In QuestDB, make retries idempotent with
 `ALTER TABLE opcua_audit DEDUP ENABLE UPSERT KEYS(ts, seq)`.
 
 The dashboard shows each destination's state and how many records are waiting.
@@ -166,13 +213,17 @@ The dashboard shows each destination's state and how many records are waiting.
 |---|---|---|
 | Dashboard | auditor | Reachability of each target, connected clients, latest changes |
 | Audit trail | auditor | Filters, record details, live mode, CSV export, integrity check |
-| Targets | auditor (admin edits) | Add/edit/remove targets without a restart, discovery, trust the PLC certificate |
+| Targets | auditor (operator discovers, admin edits) | Add/edit/remove targets without a restart, discovery, trust the PLC certificate |
 | Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
 | Users | admin | Users and roles |
 
 Roles are cumulative: auditor < operator < admin. Manage users from the
-command line with `opcua-audit-gateway user add|passwd|role|delete|list`.
+command line with `opcua-audit-gateway user add|passwd|role|delete|list`
+(also to reset a lost admin password: `user passwd admin`). Changing a
+password, a role or removing a user ends that user's sessions; sessions also
+expire after 8 hours idle and 24 hours in total. Failed logins are rate
+limited per address and per user.
 
 ## REST API
 
@@ -185,7 +236,7 @@ requests also need the header `X-Requested-With: opcua-audit-gateway`.
 | GET | `/api/targets` | Target status only |
 | GET | `/api/targets/{name}/clients` | Clients connected through the gateway |
 | POST | `/api/targets/{name}/discover` | Discover a configured target now |
-| POST | `/api/discover` | `{"endpoint_url": "opc.tcp://…"}`: discover any server |
+| POST | `/api/discover` | `{"endpoint_url": "opc.tcp://…"}`: discover any server (admin, audited) |
 | GET | `/api/certificates` | Own, trusted and rejected certificates |
 | GET | `/api/audit` | Audit records, newest first. Filters: `target`, `kind`, `user`, `node_id`, `since`, `until`, `before_seq`, `limit` |
 | GET | `/api/audit.csv` | The same filters, as CSV |

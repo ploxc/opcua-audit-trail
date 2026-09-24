@@ -5,6 +5,9 @@
 > - About 30 further findings were added (N1–N25 plus Info items), three of them High.
 > - Two of the "found sound" statements below were corrected.
 >
+> - All findings except the withdrawn R7 and a few accepted items are fixed;
+>   see [VERIFICATION.md, section 5](VERIFICATION.md#5-fix-status).
+>
 > This file is kept as it was written.
 
 **Scope:** the whole repository at commit `bbfa4cf` (after PR #2): the relay, the audit trail, export, the web UI and API, certificates, configuration, and packaging.

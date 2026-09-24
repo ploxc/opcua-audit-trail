@@ -66,3 +66,74 @@ pub fn host_port(address: &str) -> anyhow::Result<(String, u16)> {
             .with_context(|| format!("invalid port in {address}"))?,
     ))
 }
+
+#[cfg(test)]
+pub mod tests {
+    use std::path::PathBuf;
+
+    use base64::Engine;
+
+    use super::*;
+    use crate::config::Config;
+
+    /// A TLS server configuration for `localhost` (the gateway's own
+    /// self-signed certificate) and a PEM file that trusts it.
+    pub fn localhost_server(dir: &Path) -> (Arc<rustls::ServerConfig>, PathBuf) {
+        let path = dir.join("config.toml");
+        std::fs::write(&path, crate::config::EXAMPLE_CONFIG).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.gateway.certificate_hostnames = vec!["localhost".into()];
+        let pki = crate::pki::Pki::open(&config.gateway.pki_dir).unwrap();
+        let (cert, _) = pki.ensure_own_certificate(&config.gateway).unwrap();
+        let base64 = base64::engine::general_purpose::STANDARD.encode(cert.to_der().unwrap());
+        let lines: Vec<&str> = base64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let ca_file = dir.join("ca.pem");
+        std::fs::write(
+            &ca_file,
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                lines.join("\n")
+            ),
+        )
+        .unwrap();
+        let server = crate::web::tls::server_config(&config).unwrap();
+        (Arc::new(server), ca_file)
+    }
+
+    #[tokio::test]
+    async fn verifies_the_server_against_the_ca_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, ca_file) = localhost_server(dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(server);
+            while let Ok((tcp, _)) = listener.accept().await {
+                let _ = acceptor.accept(tcp).await;
+            }
+        });
+        let trusted = client_config(Some(&ca_file)).unwrap();
+        connect(trusted, "localhost", port).await.unwrap();
+        // The public roots do not include a self-signed certificate.
+        let public = client_config(None).unwrap();
+        assert!(connect(public, "localhost", port).await.is_err());
+        // A trusted certificate for another name is refused too.
+        let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let other = ServerName::try_from("other.test").unwrap();
+        assert!(TlsConnector::from(client_config(Some(&ca_file)).unwrap())
+            .connect(other, tcp)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn splits_host_and_port() {
+        assert_eq!(host_port("siem:6514").unwrap(), ("siem".into(), 6514));
+        assert_eq!(host_port("[::1]:6514").unwrap(), ("[::1]".into(), 6514));
+        assert!(host_port("siem").is_err());
+    }
+}

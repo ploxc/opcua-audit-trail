@@ -119,8 +119,9 @@ impl QuestDbSink {
                     let (mut sender, connection) =
                         hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
                     tokio::spawn(connection);
+                    let authority = self.uri.authority().map_or(host, |a| a.as_str());
                     let request = request
-                        .header(HOST, host)
+                        .header(HOST, authority)
                         .body(Full::new(Bytes::from(body)))?;
                     sender
                         .send_request(request)
@@ -288,6 +289,7 @@ mod tests {
     async fn posts_batches_and_reports_errors() {
         type Seen = Arc<Mutex<Vec<(Option<String>, String)>>>;
         let seen: Seen = Default::default();
+        let seen_https: Seen = Default::default();
         async fn write(
             State(seen): State<Seen>,
             headers: axum::http::HeaderMap,
@@ -322,6 +324,40 @@ mod tests {
         let seen = seen.lock().await;
         assert_eq!(seen[0].0.as_deref(), Some("Bearer secret"));
         assert_eq!(seen[0].1.lines().count(), 2);
+
+        drop(seen);
+
+        // The same over HTTPS, verified against the configured CA file.
+        let dir = tempfile::tempdir().unwrap();
+        let (server, ca_file) = crate::export::tls::tests::localhost_server(dir.path());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new()
+            .route("/write", post(write))
+            .with_state(seen_https.clone());
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(server);
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, tls)
+                .unwrap()
+                .serve(app.into_make_service())
+                .await
+                .unwrap()
+        });
+        let mut https = QuestDbSink::new(&QuestDbConfig {
+            url: format!("https://localhost:{port}"),
+            ca_file: Some(ca_file),
+            table: "opcua_audit".into(),
+            token: None,
+            username: Some("audit".into()),
+            password: Some("pw".into()),
+            interval_secs: 1,
+        })
+        .unwrap();
+        https.send(&[write_record(3)]).await.unwrap();
+        let seen_https = seen_https.lock().await;
+        assert_eq!(seen_https[0].0.as_deref(), Some("Basic YXVkaXQ6cHc="));
+        assert!(seen_https[0].1.contains("seq=3i"));
 
         let mut down = QuestDbSink::new(&QuestDbConfig {
             url: "http://127.0.0.1:1".into(),

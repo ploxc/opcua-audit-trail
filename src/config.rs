@@ -406,12 +406,13 @@ record_old_value = true
 # Optional copies of the audit trail outside the gateway. Records carry their
 # hash, so an external copy also proves the local trail was not rewritten.
 # [export.questdb]
-# url = "http://questdb:9000"
+# url = "http://questdb:9000"   # or https://…
 # table = "opcua_audit"
+# ca_file = "questdb-ca.pem"    # for https with a private CA
 #
 # [export.syslog]
 # address = "siem.local:514"
-# protocol = "tcp"          # or "udp"
+# protocol = "tcp"              # or "tls" (with ca_file = …), or "udp"
 
 # One block per upstream OPC UA server.
 # [[targets]]
@@ -419,6 +420,9 @@ record_old_value = true
 # listen = "0.0.0.0:4841"
 # endpoint_url = "opc.tcp://192.168.0.10:4840"
 # discovery_interval_secs = 60
+# min_security = "sign_and_encrypt"   # "none" (default), "sign", "sign_and_encrypt"
+# max_connections = 50                # clients at once
+# max_connections_per_address = 10
 "#;
 
 #[cfg(test)]

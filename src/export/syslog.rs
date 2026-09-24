@@ -343,6 +343,43 @@ mod tests {
             .starts_with("<133>1 "));
     }
 
+    /// Audit finding E3: syslog over TLS (RFC 5425 framing), verified
+    /// against the configured CA file.
+    #[tokio::test]
+    async fn tls_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server, ca_file) = crate::export::tls::tests::localhost_server(dir.path());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_rustls::TlsAcceptor::from(server)
+                .accept(tcp)
+                .await
+                .unwrap();
+            let mut data = Vec::new();
+            let mut buf = [0u8; 4096];
+            while data.iter().filter(|&&b| b == b'<').count() < 2 || !data.ends_with(b"}") {
+                let n = stream.read(&mut buf).await.unwrap();
+                data.extend_from_slice(&buf[..n]);
+            }
+            String::from_utf8(data).unwrap()
+        });
+        let mut sink = SyslogSink::new(&SyslogConfig {
+            ca_file: Some(ca_file),
+            ..config(format!("localhost:{port}"), SyslogProtocol::Tls)
+        })
+        .unwrap();
+        sink.send(&[write_record(1), write_record(2)])
+            .await
+            .unwrap();
+        let data = accept.await.unwrap();
+        let (len, rest) = data.split_once(' ').unwrap();
+        let len: usize = len.parse().unwrap();
+        assert!(rest[..len].contains("seq=\"1\""));
+        assert!(rest[len..].contains("seq=\"2\""));
+    }
+
     /// Audit finding I4: a large record is shortened in its values, so the
     /// JSON stays valid and says which node was written.
     #[test]
