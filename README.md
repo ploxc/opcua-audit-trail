@@ -185,7 +185,7 @@ few secure channels.
 ## Installation
 
 Release archives (Linux x86_64/ARM64/ARMv7 static, Windows, macOS) and
-multi-arch images (`ghcr.io/harted/opcua-audit-trail`) are built for every
+multi-arch images (`ghcr.io/ploxc/opcua-audit-trail`) are built for every
 `v*` tag.
 
 ### Linux (systemd)
@@ -223,6 +223,20 @@ password is in `initial-admin-password.txt` in the data directory.
 `service uninstall` removes the service; install it again after an upgrade
 from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
 to files instead of the console.
+
+### macOS
+
+The binaries are not signed or notarized, so macOS quarantines them after a
+download. Remove that and make the file executable:
+
+```sh
+tar xzf opcua-audit-gateway-*-macos-arm64.tar.gz && cd opcua-audit-gateway-*
+xattr -d com.apple.quarantine opcua-audit-gateway   # "No such xattr" is fine
+chmod +x opcua-audit-gateway
+./opcua-audit-gateway init && ./opcua-audit-gateway run
+```
+
+Use the `x86_64` archive on an Intel Mac.
 
 ### Docker
 

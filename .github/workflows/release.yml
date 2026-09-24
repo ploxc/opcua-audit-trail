@@ -115,6 +115,20 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          # Above the generated notes. The macOS binaries are not signed.
+          body: |
+            ### macOS
+
+            The binaries are not signed or notarized: after unpacking, remove
+            the quarantine flag and make the file executable.
+
+            ```sh
+            tar xzf opcua-audit-gateway-*-macos-arm64.tar.gz && cd opcua-audit-gateway-*
+            xattr -d com.apple.quarantine opcua-audit-gateway   # "No such xattr" is fine
+            chmod +x opcua-audit-gateway
+            ```
+
+            Use the `x86_64` archive on an Intel Mac. Checksums are in `SHA256SUMS`.
 
   image:
     needs: [linux]
