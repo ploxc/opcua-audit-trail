@@ -278,6 +278,11 @@ impl RelayTarget {
                 }
             }
         };
+        self.set_gateway_trust(result).await;
+    }
+
+    /// Stores what the trust check, or a client's connection, found.
+    pub async fn set_gateway_trust(&self, result: crate::discovery::GatewayTrust) {
         let mut statuses = self.statuses.write().await;
         if let Some(status) = statuses.get_mut(&self.config.name) {
             if status.gateway_trust != result {
