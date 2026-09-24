@@ -97,7 +97,7 @@ const state = {
   audit: { rows: [], filters: {}, selected: null, olderAvailable: false, live: false },
   targets: { editing: null, discovery: {} },
   certificates: null,
-  browser: { target: "", connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {} },
+  browser: { target: "", connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {}, watchError: null },
   users: [],
   version: "",
 };
@@ -118,7 +118,22 @@ function toast(message, kind = "") {
   host.append(t);
   setTimeout(() => t.remove(), kind === "bad" ? 7000 : 3500);
 }
-const fail = (e) => { if (e.status !== 401) toast(e.message, "bad"); };
+const fail = (e) => {
+  // 409 from the browser API: its session on the target is gone.
+  if (e.status === 409 && state.browser.connection) return browserLost();
+  if (e.status !== 401) toast(e.message, "bad");
+};
+
+const BROWSER_EMPTY = () => ({ connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {}, watchError: null });
+
+/// The browser session ended (idle timeout, gateway restart, target down):
+/// back to the connect form, with one message instead of one per refresh.
+function browserLost() {
+  Object.assign(state.browser, BROWSER_EMPTY());
+  toast("The browser session on the target has ended. Connect again to continue.", "bad");
+  renderPage();
+  schedule(currentPage().id);
+}
 
 // OPC UA timestamps carry up to 9 fraction digits; Date parses 3.
 const time = (iso) => (iso ? new Date(String(iso).replace(/(\.\d{3})\d+/, "$1")).toLocaleString() : "");
@@ -274,7 +289,13 @@ function renderPage() {
   const form = typing ? active.closest("form[data-form]") : null;
   const kept = form ? [...form.elements].filter((e) => e.name && e.type !== "file").map((e) => [e.name, e.type === "checkbox" ? e.checked : e.value]) : [];
   const focusName = typing ? active.name : null;
+  // Scroll positions inside the page (e.g. the browser tree) survive too.
+  const scrolls = [...el.querySelectorAll("[data-keep-scroll]")].map((e) => [e.dataset.keepScroll, e.scrollTop, e.scrollLeft]);
   el.innerHTML = pageView(currentPage()).s;
+  for (const [key, top, left] of scrolls) {
+    const again = el.querySelector(`[data-keep-scroll="${key}"]`);
+    if (again) { again.scrollTop = top; again.scrollLeft = left; }
+  }
   if (form) {
     const again = el.querySelector(`form[data-form="${form.dataset.form}"]`);
     for (const [name, value] of kept) {
@@ -564,9 +585,9 @@ function treeView(nodeId) {
   if (!children) return html``;
   return html`<ul>${children.map((c) => {
     const open = state.browser.expanded.has(c.node_id);
-    const leafish = c.node_class === "Method";
+    const leaf = c.has_children === false || c.node_class === "Method" || state.browser.tree[c.node_id]?.length === 0;
     return html`<li><div class="node ${state.browser.selected === c.node_id ? "selected" : ""}" data-action="select-node" data-node="${c.node_id}">
-      <span class="toggle" data-action="toggle-node" data-node="${c.node_id}">${leafish ? "" : open ? "▾" : "▸"}</span>
+      ${leaf ? html`<span class="toggle"></span>` : html`<span class="toggle" data-action="toggle-node" data-node="${c.node_id}">${open ? "▾" : "▸"}</span>`}
       <span>${c.display_name || c.browse_name}</span><span class="kind">${c.node_class}</span></div>
       ${when(open, () => treeView(c.node_id))}</li>`;
   })}</ul>`;
@@ -591,7 +612,7 @@ function browserView() {
       <span class="badge ok">${b.target}</span><span class="muted small">${b.connection.security_policy} / ${b.connection.security_mode} as ${b.connection.user}</span></div>
       <div class="actions"><button data-action="browser-disconnect">Disconnect</button></div></div>
     <div class="browser">
-      <div class="card"><h2>Objects</h2><div class="tree">${treeView("root")}</div></div>
+      <div class="card"><h2>Objects</h2><div class="tree" data-keep-scroll="tree">${treeView("root")}</div></div>
       <div>
         <div class="card"><div class="card-head"><h2>${b.selected ? "Attributes" : "Select a node"}</h2>
           ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), html`<button class="small" data-action="watch" data-node="${b.selected}">Watch value</button>`)}</div>
@@ -599,6 +620,7 @@ function browserView() {
             <td class="mono">${attributeText(a)} <span class="muted">${a.value.data_type}</span></td></tr>`)}</tbody></table></div>`)}
         </div>
         <div class="card"><div class="card-head"><h2>Watch list</h2><span class="muted small">refreshes every second</span></div>
+          ${when(b.watchError, html`<div class="alert warn">Values cannot be read right now: ${b.watchError}</div>`)}
           ${watch.length ? html`<div class="table-wrap"><table><thead><tr><th>Node</th><th>Value</th><th>Status</th><th>Source time</th><th></th></tr></thead><tbody>
             ${watch.map((n) => { const v = b.values[n.node_id] || {}; return html`<tr><td>${n.name}<div class="mono muted small">${n.node_id}</div></td>
               <td class="mono">${valueText(v.value)}</td><td>${statusBadge(v.status)}</td><td class="nowrap small">${time(v.source_timestamp)}</td>
@@ -683,8 +705,16 @@ function schedule(pageId) {
 
 async function pollWatch() {
   const b = state.browser;
-  const values = await post(`/browser/${encodeURIComponent(b.target)}/values`, { nodes: b.watch.map((w) => w.node_id) });
-  for (const v of values) b.values[v.node_id] = v;
+  try {
+    const values = await post(`/browser/${encodeURIComponent(b.target)}/values`, { nodes: b.watch.map((w) => w.node_id) });
+    for (const v of values) b.values[v.node_id] = v;
+    b.watchError = null;
+  } catch (e) {
+    // A lost session ends the browser; anything else is shown in place,
+    // not as a new message every second.
+    if (e.status === 409 || e.status === 401) throw e;
+    b.watchError = e.message;
+  }
 }
 
 // ---------- events ----------
@@ -782,7 +812,7 @@ const actions = {
   async "browser-disconnect"() {
     const b = state.browser;
     await post(`/browser/${encodeURIComponent(b.target)}/disconnect`);
-    Object.assign(b, { connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {} });
+    Object.assign(b, BROWSER_EMPTY());
     renderPage(); schedule("browser");
   },
   // users

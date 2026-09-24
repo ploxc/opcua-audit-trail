@@ -36,6 +36,8 @@ const MAX_BROWSE_PAGES: usize = 20;
 
 struct Entry {
     session: Arc<Session>,
+    /// The session's event loop; once it ends, the session is dead.
+    event_loop: tokio::task::JoinHandle<opcua::types::StatusCode>,
     last_used: Instant,
     ui_user: String,
     target: String,
@@ -47,9 +49,16 @@ pub struct BrowserSessions {
 }
 
 impl BrowserSessions {
+    /// The user's live session on the target. A session whose connection
+    /// ended (PLC restart, network) is dropped, so the UI can reconnect.
     fn get(&self, user: &str, target: &str) -> Option<Arc<Session>> {
+        let key = (user.to_string(), target.to_string());
         let mut map = self.map.lock();
-        let entry = map.get_mut(&(user.to_string(), target.to_string()))?;
+        let entry = map.get_mut(&key)?;
+        if entry.event_loop.is_finished() {
+            map.remove(&key);
+            return None;
+        }
         entry.last_used = Instant::now();
         Some(entry.session.clone())
     }
@@ -226,6 +235,7 @@ pub async fn connect(
         (user.username.clone(), target_name.clone()),
         Entry {
             session,
+            event_loop: handle,
             last_used: Instant::now(),
             ui_user: user.username.clone(),
             target: target_name,
@@ -277,6 +287,44 @@ pub struct BrowseItem {
     browse_name: String,
     display_name: String,
     node_class: String,
+    /// Whether the node has children the tree can unfold.
+    has_children: bool,
+}
+
+/// Hierarchical references followed by the tree.
+fn children_of(node: NodeId) -> BrowseDescription {
+    BrowseDescription {
+        node_id: node,
+        browse_direction: BrowseDirection::Forward,
+        reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+        include_subtypes: true,
+        node_class_mask: NodeClassMask::empty().bits(),
+        result_mask: BrowseResultMask::None as u32,
+    }
+}
+
+/// Finds the nodes without children, with one browse (one reference per
+/// node) per batch of nodes. On error, every node keeps its arrow.
+async fn mark_leaves(session: &Session, items: &mut [(NodeId, BrowseItem)]) {
+    for batch in items.chunks_mut(100) {
+        let descriptions: Vec<_> = batch.iter().map(|(n, _)| children_of(n.clone())).collect();
+        let Ok(results) = session.browse(&descriptions, 1, None).await else {
+            return;
+        };
+        let mut continuation_points = Vec::new();
+        for ((_, item), result) in batch.iter_mut().zip(&results) {
+            if result.status_code.is_good() {
+                item.has_children = result.references.as_ref().is_some_and(|r| !r.is_empty());
+            }
+            if !result.continuation_point.is_null_or_empty() {
+                continuation_points.push(result.continuation_point.clone());
+            }
+        }
+        // Servers keep few continuation points: release them right away.
+        if !continuation_points.is_empty() {
+            let _ = session.browse_next(true, &continuation_points).await;
+        }
+    }
 }
 
 pub async fn browse(
@@ -291,12 +339,8 @@ pub async fn browse(
         None => opcua::types::ObjectId::ObjectsFolder.into(),
     };
     let description = BrowseDescription {
-        node_id: node,
-        browse_direction: BrowseDirection::Forward,
-        reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
-        include_subtypes: true,
-        node_class_mask: NodeClassMask::empty().bits(),
         result_mask: BrowseResultMask::All as u32,
+        ..children_of(node)
     };
     let upstream = |e: opcua::types::Error| ApiError(StatusCode::BAD_GATEWAY, e.to_string());
     let mut results = session
@@ -312,11 +356,17 @@ pub async fn browse(
                 result.status_code.to_string(),
             ));
         }
-        items.extend(result.references.iter().flatten().map(|r| BrowseItem {
-            node_id: r.node_id.node_id.to_string(),
-            browse_name: r.browse_name.to_string(),
-            display_name: r.display_name.text.as_ref().to_string(),
-            node_class: format!("{:?}", r.node_class),
+        items.extend(result.references.iter().flatten().map(|r| {
+            (
+                r.node_id.node_id.clone(),
+                BrowseItem {
+                    node_id: r.node_id.node_id.to_string(),
+                    browse_name: r.browse_name.to_string(),
+                    display_name: r.display_name.text.as_ref().to_string(),
+                    node_class: format!("{:?}", r.node_class),
+                    has_children: true,
+                },
+            )
         }));
         if result.continuation_point.is_null_or_empty() {
             break;
@@ -326,7 +376,8 @@ pub async fn browse(
             .await
             .map_err(upstream)?;
     }
-    Ok(Json(items))
+    mark_leaves(&session, &mut items).await;
+    Ok(Json(items.into_iter().map(|(_, item)| item).collect()))
 }
 
 #[derive(Serialize)]
