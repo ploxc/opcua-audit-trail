@@ -38,6 +38,7 @@ const ICON_PATHS = {
   dark: '<path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>',
   light: '<path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 0 0 0-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/>',
   menu: '<path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>',
+  settings: '<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>',
   logout: '<path d="m17 7-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/>',
 };
 const icon = (name, cls = "") =>
@@ -104,6 +105,26 @@ const state = {
 const can = (role) => state.user && ROLE_LEVEL[state.user.role] >= ROLE_LEVEL[role];
 
 // ---------- helpers ----------
+
+// A dialog in the page, instead of the browser's confirm() and prompt().
+// Resolves with the form's fields when confirmed, or null when cancelled.
+function dialog({ title, body = "", confirm = "OK", danger = false }) {
+  return new Promise((resolve) => {
+    const d = document.createElement("dialog");
+    d.className = "dialog";
+    d.innerHTML = html`<form method="dialog"><h2>${title}</h2><div class="dialog-body">${body}</div>
+      <div class="dialog-actions"><button type="submit" value="" formnovalidate>Cancel</button>
+      <button type="submit" value="ok" class="${danger ? "danger" : "primary"}">${confirm}</button></div></form>`.s;
+    document.body.append(d);
+    d.addEventListener("close", () => {
+      const data = d.returnValue === "ok" ? Object.fromEntries(new FormData(d.querySelector("form"))) : null;
+      d.remove();
+      resolve(data);
+    });
+    d.showModal();
+    d.querySelector(".dialog-body input:not([type=radio]), .dialog-actions button[value=ok]")?.focus();
+  });
+}
 
 function toast(message, kind = "") {
   let host = document.querySelector(".toast-host");
@@ -185,7 +206,7 @@ const EVENT_LABELS = {
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
   connections_refused: "Connections refused", trail_truncated: "Trail cut off", clock_jumped: "Clock jumped",
-  export_gap: "Export gap", ignored_writes: "Ignored writes",
+  export_gap: "Export gap", ignored_writes: "Summarised writes",
 };
 const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred", "ignored_writes"]);
 const eventBadge = (type) => {
@@ -194,11 +215,11 @@ const eventBadge = (type) => {
     : type === "change_intent" ? "warn" : "neutral";
   return html`<span class="badge plain ${kind}">${EVENT_LABELS[type] || type}</span>`;
 };
-function eventSummary(e) {
+function eventSummary(e, target) {
   switch (e.type) {
     case "write":
-      return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)}${when(e.attribute !== "Value", html` <span class="muted">(${e.attribute})</span>`)}</div>
-        <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span>${when(e.written_status, html` <span class="muted">status ${e.written_status}</span>`)}${when(e.source_timestamp, html` <span class="muted">source time ${e.source_timestamp}</span>`)}</div>`;
+      return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)} ${summarisedBadge(target, e.node_id)}${when(e.attribute !== "Value", html` <span class="muted">(${e.attribute})</span>`)}</div>
+        <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span>${when(e.written_status, html` <span class="muted">status ${e.written_status}</span>`)}${when(e.source_timestamp, () => html` <span class="muted" title="${e.source_timestamp}">source time ${time(e.source_timestamp)}</span>`)}</div>`;
     case "ignored_writes":
       return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)}</div>
         <div class="change">${e.count} writes${when(e.failed, html`, <b>${e.failed} failed</b>`)}, ${time(e.first)} – ${time(e.last)}, last ${valueText(e.last_value)}</div>
@@ -240,6 +261,7 @@ const PAGES = [
   { id: "certificates", label: "Certificates", role: "auditor", icon: "certificates" },
   { id: "browser", label: "Browser", role: "operator", icon: "browser" },
   { id: "users", label: "Users", role: "admin", icon: "users" },
+  { id: "settings", label: "Settings", role: "auditor", icon: "settings" },
   { id: "account", label: "Account", role: "auditor", icon: "account", hidden: true },
 ];
 const currentPage = () => {
@@ -329,6 +351,7 @@ function pageView(page) {
     case "browser": return browserView();
     case "users": return usersView();
     case "account": return accountView();
+    case "settings": return settingsView();
   }
   return html``;
 }
@@ -432,22 +455,29 @@ function summaryEvery() {
   return s % 3600 === 0 ? `${s / 3600} h` : s % 60 === 0 ? `${s / 60} min` : `${s} s`;
 }
 
-// Whether writes to a node are summarised, and buttons to change that.
-function ignoreControls(target, nodeId, client, { compact = false } = {}) {
+const isSummarised = (target, nodeId) => ignoreRules(target, nodeId).length > 0;
+const summarisedBadge = (target, nodeId) => when(isSummarised(target, nodeId), () =>
+  html`<span class="badge plain neutral" title="Writes to this node are recorded as one summary every ${summaryEvery()}">summarised</span>`);
+const clientLabel = (client) => client ? [client.application_name, clientKey(client) === client.application_uri ? (client.remote_addr || "").replace(/:\d+$/, "") : ""].filter(Boolean).join(" ") || clientKey(client) : "";
+
+// Whether writes to a node are summarised, and the button to change that.
+// `node` is { target, node_id, name, client }.
+function ignoreControls(node, { compact = false } = {}) {
+  const { target, node_id: nodeId } = node;
   if (!target || !nodeId || !targetOf(target)) return "";
   const rules = ignoreRules(target, nodeId);
-  const button = (action, label, c) => html`<button class="small" data-action="${action}" data-target="${target}" data-node="${nodeId}" data-client="${c || ""}">${label}</button>`;
+  const data = (r) => new Html(`data-target="${esc(target)}" data-node="${esc(nodeId)}" data-client="${esc(r?.client || "")}"`);
   if (rules.length) {
-    const recordAgain = when(can("admin"), () => rules.map((r) => button("unignore", r.client ? `Record from ${r.client} again` : "Record again", r.client)));
-    if (compact) return html`<span class="badge plain neutral">summarised</span> ${recordAgain}`;
+    const recordAgain = when(can("admin"), () => rules.map((r) => html`<button class="small" data-action="unignore" ${data(r)}>Record every write again</button>`));
     const who = rules.map((r) => r.client ? `from ${r.client}` : "from every client").join(", ");
-    return html`<div class="alert info small">Writes to this node ${who} are summarised every ${summaryEvery()} instead of recorded one by one.<div class="button-row">${recordAgain}</div></div>`;
+    if (compact) return html`<span class="badge plain neutral" title="Summarised ${who}">summarised</span>`;
+    return html`<div class="alert info small"><b>Summarised.</b> Writes to this node ${who} are not recorded one by one: every ${summaryEvery()} one record says how many there were, from whom, and the last value.<div class="button-row">${recordAgain}</div></div>`;
   }
   if (!can("admin")) return "";
-  const key = clientKey(client);
-  const buttons = html`${button("ignore", compact ? "Summarise" : "Summarise writes to this node", "")}${when(key, () => button("ignore", `Only from ${key}`, key))}`;
-  if (compact) return html`<div class="inline">${buttons}</div>`;
-  return html`<div class="ignore-box"><p class="small muted">Written too often, like a life bit? Record its writes as one summary every ${summaryEvery()} instead of one record each.</p><div class="button-row">${buttons}</div></div>`;
+  const button = html`<button class="small" data-action="ignore" ${data(null)} data-name="${node.name || ""}"
+    data-client-key="${clientKey(node.client)}" data-client-label="${clientLabel(node.client)}">${compact ? "Summarise…" : "Summarise writes…"}</button>`;
+  if (compact) return button;
+  return html`<div class="ignore-box"><p class="small muted">Is this node written constantly, like a life bit or a clock? Its writes can be summarised instead of recorded one by one.</p><div class="button-row">${button}</div></div>`;
 }
 
 function mostWrittenCard() {
@@ -460,9 +490,9 @@ function mostWrittenCard() {
         <td><a href="#" data-action="filter-node" data-node="${n.node_id}">${n.display_name || n.node_id}</a>${when(n.display_name, html`<div class="muted mono small">${n.node_id}</div>`)}</td>
         <td class="num">${n.count}</td>
         <td>${n.last.client ? html`<div>${userLabel(n.last.client)}</div><div class="muted small">${n.last.client.application_name || ""} ${n.last.client.remote_addr}</div>` : ""}</td>
-        <td>${ignoreControls(n.target, n.node_id, n.last.client, { compact: true })}</td></tr>`)}</tbody></table></div>`;
+        <td>${ignoreControls({ target: n.target, node_id: n.node_id, name: n.display_name, client: n.last.client }, { compact: true })}</td></tr>`)}</tbody></table></div>`;
   return html`<div class="card"><div class="card-head"><h2>Most written nodes, last 24 hours</h2><button class="small" data-action="toggle-top">Close</button></div>
-    <p class="section-note">Nodes that fill the trail, such as a life bit or a seconds counter, can be summarised instead of recorded write by write.</p>${body}</div>`;
+    <p class="section-note">Nodes that fill the trail, such as a life bit or a clock, can be summarised: one record per interval instead of one per write.</p>${body}</div>`;
 }
 
 // ---------- audit ----------
@@ -476,8 +506,8 @@ function auditTable(rows, { compact = false, selectable = false } = {}) {
       <td class="nowrap">${time(r.ts)}</td>
       <td>${r.target || ""}</td>
       <td>${eventBadge(r.event.type)}</td>
-      <td>${r.client ? html`<div>${userLabel(r.client)}</div><div class="muted small">${r.client.application_name || ""} ${r.client.remote_addr}</div>` : ""}</td>
-      <td>${eventSummary(r.event)}</td>
+      <td class="client">${r.client ? html`<div>${userLabel(r.client)}</div><div class="muted small" title="${r.client.application_uri || ""}">${r.client.application_name || ""} <span class="nowrap">${r.client.remote_addr}</span></div>` : ""}</td>
+      <td>${eventSummary(r.event, r.target)}</td>
       <td>${statusBadge(r.event.status)}</td>
     </tr>`)}</tbody></table></div>`;
 }
@@ -524,7 +554,7 @@ function auditView() {
       ${when(selected, () => html`<div class="card detail"><div class="card-head"><h2>Record #${selected.seq}</h2><button class="small" data-action="close-record">Close</button></div>
         <dl class="kv"><dt>Time</dt><dd>${time(selected.ts)}</dd><dt>Hash</dt><dd class="mono small">${selected.hash}</dd></dl>
         ${when((selected.event.type === "write" && selected.event.attribute === "Value") || selected.event.type === "ignored_writes",
-          () => ignoreControls(selected.target, selected.event.node_id, selected.client))}
+          () => ignoreControls({ target: selected.target, node_id: selected.event.node_id, name: selected.event.display_name, client: selected.client }))}
         <h3 class="mt">Record</h3><pre class="json">${JSON.stringify({ target: selected.target, client: selected.client, event: selected.event }, null, 2)}</pre></div>`)}
     </div>`;
 }
@@ -573,13 +603,24 @@ function targetsView() {
         <dt>Target server</dt><dd class="mono">${t.endpoint_url}</dd>
         <dt>Discovery every</dt><dd>${t.discovery_interval_secs} s</dd>
         <dt>Minimum security</dt><dd>${MIN_SECURITY[t.min_security || "none"]}</dd>
-        ${when(t.ignore?.length, () => html`<dt>Summarised nodes</dt><dd>${t.ignore.map((r) => html`<div class="inline"><span class="mono">${r.node_id}</span>${when(r.client, html` <span class="muted">only from ${r.client}</span>`)}
-          ${when(can("admin"), html`<button class="small" data-action="unignore" data-target="${t.name}" data-node="${r.node_id}" data-client="${r.client || ""}">Record again</button>`)}</div>`)}
-          <div class="small muted">Writes to these nodes are recorded as one summary every ${summaryEvery()}.</div></dd>`)}
+
         ${when(t.status?.last_error, html`<dt>Error</dt><dd class="small">${t.status?.last_error}</dd>`)}</dl>
       <h3 class="mt">Endpoints offered to clients</h3>
       ${endpointsTable(state.targets.discovery[t.name] || t.status?.endpoints, trusted)}
+      ${summarisedNodes(t)}
     </div>`)}`;
+}
+
+function summarisedNodes(t) {
+  const rules = t.ignore || [];
+  return html`<h3 class="mt">Summarised nodes</h3>
+    <p class="section-note">Writes to these nodes are not recorded one by one: every ${summaryEvery()} one record per node says how many there were, from whom, and the last value.
+      Add nodes from <a href="#/audit">Audit trail → Most written</a>, a write's details, or the <a href="#/browser">Browser</a>.</p>
+    ${rules.length ? html`<div class="table-wrap"><table><thead><tr><th>Node</th><th>Writes from</th><th></th></tr></thead><tbody>
+      ${rules.map((r) => html`<tr><td>${r.name || r.node_id}${when(r.name, html`<div class="muted mono small">${r.node_id}</div>`)}</td>
+        <td>${r.client ? html`only <span class="mono">${r.client}</span><div class="muted small">other clients are recorded one by one</div>` : "every client"}</td>
+        <td>${when(can("admin"), html`<button class="small" data-action="unignore" data-target="${t.name}" data-node="${r.node_id}" data-client="${r.client || ""}">Record every write again</button>`)}</td></tr>`)}
+    </tbody></table></div>` : html`<p class="muted small">None: every write is recorded.</p>`}`;
 }
 
 const MIN_SECURITY = { none: "Follow the target (incl. None)", sign: "Sign or better", sign_and_encrypt: "Sign & encrypt only" };
@@ -653,7 +694,7 @@ function treeView(nodeId) {
     const leaf = c.has_children === false || c.node_class === "Method" || state.browser.tree[c.node_id]?.length === 0;
     return html`<li><div class="node ${state.browser.selected === c.node_id ? "selected" : ""}" data-action="select-node" data-node="${c.node_id}">
       ${leaf ? html`<span class="toggle"></span>` : html`<span class="toggle" data-action="toggle-node" data-node="${c.node_id}">${open ? "▾" : "▸"}</span>`}
-      <span>${c.display_name || c.browse_name}</span><span class="kind">${c.node_class}</span></div>
+      <span>${c.display_name || c.browse_name}</span><span class="kind">${c.node_class}</span>${summarisedBadge(state.browser.target, c.node_id)}</div>
       ${when(open, () => treeView(c.node_id))}</li>`;
   })}</ul>`;
 }
@@ -683,7 +724,7 @@ function browserView() {
           ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), html`<button class="small" data-action="watch" data-node="${b.selected}">Watch value</button>`)}</div>
           ${when(b.selected, html`<div class="table-wrap"><table><tbody>${b.attributes.map((a) => html`<tr><th>${a.attribute}</th>
             <td class="mono">${attributeText(a)} <span class="muted">${a.value.data_type}</span></td></tr>`)}</tbody></table></div>`)}
-          ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), () => ignoreControls(b.target, b.selected, null))}
+          ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), () => ignoreControls({ target: b.target, node_id: b.selected, name: browserNodeName() }))}
         </div>
         <div class="card"><div class="card-head"><h2>Watch list</h2><span class="muted small">refreshes every second</span></div>
           ${when(b.watchError, html`<div class="alert warn">Values cannot be read right now: ${b.watchError}</div>`)}
@@ -699,6 +740,12 @@ function browserView() {
 
 const NODE_CLASSES = { 1: "Object", 2: "Variable", 4: "Method", 8: "ObjectType", 16: "VariableType", 32: "ReferenceType", 64: "DataType", 128: "View" };
 const ACCESS_BITS = ["CurrentRead", "CurrentWrite", "HistoryRead", "HistoryWrite", "SemanticChange", "StatusWrite", "TimestampWrite"];
+// The selected node's display name, as the watch list shows it.
+function browserNodeName() {
+  const name = state.browser.attributes.find((a) => a.attribute === "DisplayName");
+  return name ? valueText(name.value) : "";
+}
+
 function attributeText(a) {
   const v = a.value.value;
   if (a.attribute === "NodeClass") return NODE_CLASSES[v] || v;
@@ -713,6 +760,101 @@ async function browseInto(nodeId) {
   const b = state.browser;
   const query = nodeId === "root" ? "" : `?node=${encodeURIComponent(nodeId)}`;
   b.tree[nodeId] = await get(`/browser/${encodeURIComponent(b.target)}/browse${query}`);
+}
+
+// ---------- settings ----------
+
+const flag = (cond, name) => new Html(cond ? name : "");
+
+function exportState(name) {
+  const e = (state.status?.exports || []).find((x) => x.name === name);
+  if (!e) return "";
+  const kind = e.last_error || e.gap ? "bad" : e.pending > 0 ? "warn" : "ok";
+  const text = e.last_error ? `Failing: ${e.last_error}` : e.gap ? `Gap: ${e.gap}` : e.pending > 0 ? `${e.pending} records waiting` : "Up to date";
+  return html`<div class="alert ${kind} small">${text}</div>`;
+}
+
+function secretField(prefix, name, label, isSet, off) {
+  return html`<div><label>${label}</label><input name="${prefix}_${name}" type="password" autocomplete="new-password" placeholder="${isSet ? "•••••• (unchanged)" : ""}" ${off}>
+    ${when(isSet, html`<label class="inline small"><input type="checkbox" name="${prefix}_${name}_clear" ${off}> remove</label>`)}</div>`;
+}
+
+function settingsView() {
+  const st = state.settings;
+  const head = html`<div class="page-head"><div class="inline">${menuButton}<h1>Settings</h1></div></div>`;
+  if (!st) return html`${head}<p class="muted">Loading…</p>`;
+  const edit = can("admin");
+  const off = flag(!edit, "disabled");
+  const a = st.audit;
+  const q = st.export.questdb;
+  const sl = st.export.syslog;
+  const save = when(edit, html`<div class="actions mt"><button class="primary" type="submit">Save</button></div>`);
+  return html`${head}
+  <p class="section-note">Saved in <span class="mono">${st.config_file}</span> and applied at once, without disconnecting clients. ${edit ? "" : "Only administrators can change settings."}
+    Settings per target (security, summarised nodes) are on the <a href="#/targets">Targets</a> page.</p>
+  <div class="settings-grid">
+    <form class="card" data-form="settings-audit"><h2>Audit trail</h2>
+      <div class="setting"><label class="title" for="retention">Keep records for</label>
+        <div class="inline-input"><input id="retention" name="retention_days" type="number" min="0" max="36500" required value="${a.retention_days}" ${off}> days</div>
+        <p class="help">Older records are deleted for good; the rest of the chain stays verifiable. 0 keeps everything.</p></div>
+      <div class="setting"><span class="title">When the audit trail cannot be written</span>
+        <fieldset class="choice">
+          <label><input type="radio" name="fail_mode" value="open" ${flag(a.fail_mode === "open", "checked")} ${off}> Keep forwarding writes
+            <span class="muted small">Clients are never held up; records that could not be stored are counted and reported.</span></label>
+          <label><input type="radio" name="fail_mode" value="closed" ${flag(a.fail_mode === "closed", "checked")} ${off}> Reject writes
+            <span class="muted small">A write only reaches the PLC after its record is stored. Safer, but the audit trail must never fail.</span></label>
+        </fieldset></div>
+      <div class="setting"><label class="inline"><input type="checkbox" name="record_old_value" ${flag(a.record_old_value, "checked")} ${off}> Record the old value of each write</label>
+        <p class="help">The value is read just before the write, so the trail shows old → new. One extra read per write on the PLC.</p></div>
+      <div class="setting"><label class="title" for="summary">Summarised nodes: one record every</label>
+        <div class="inline-input"><input id="summary" name="summary_minutes" type="number" min="1" max="1440" required value="${Math.max(1, Math.round(a.ignored_summary_secs / 60))}" ${off}> minutes</div>
+        <p class="help">For nodes a target summarises (like a life bit): one record per node per interval instead of one per write.</p></div>
+      <dl class="kv small readonly-kv"><dt>Database</dt><dd class="mono">${a.database}</dd></dl>
+      ${save}
+    </form>
+
+    <form class="card" data-form="settings-export"><h2>Export</h2>
+      <p class="section-note">A copy of every record outside the gateway, for long-term storage and as proof that the local trail was not rewritten. A new destination receives the whole trail.</p>
+      <div class="setting"><label class="inline title"><input type="checkbox" name="questdb_on" ${flag(q, "checked")} ${off}> QuestDB</label>
+        ${exportState("questdb")}
+        <div class="form-grid">
+          <div><label>URL</label><input name="q_url" placeholder="http://questdb:9000" value="${q?.url || ""}" ${off}></div>
+          <div><label>Table</label><input name="q_table" value="${q?.table || "opcua_audit"}" ${off}></div>
+          <div><label>User name</label><input name="q_username" autocomplete="off" value="${q?.username || ""}" ${off}></div>
+          ${secretField("q", "password", "Password", q?.password_set, off)}
+          ${secretField("q", "token", "Or a token", q?.token_set, off)}
+          <div><label>CA file (https, private CA)</label><input name="q_ca_file" placeholder="public roots" value="${q?.ca_file || ""}" ${off}></div>
+          <div><label>Every (s)</label><input name="q_interval" type="number" min="1" value="${q?.interval_secs || 5}" ${off}></div>
+        </div></div>
+      <div class="setting subsection"><label class="inline title"><input type="checkbox" name="syslog_on" ${flag(sl, "checked")} ${off}> Syslog (SIEM)</label>
+        ${exportState("syslog")}
+        <div class="form-grid">
+          <div><label>Address</label><input name="s_address" placeholder="siem.local:6514" value="${sl?.address || ""}" ${off}></div>
+          <div><label>Protocol</label><select name="s_protocol" ${off}>${[["tls", "TLS (RFC 5425)"], ["tcp", "TCP"], ["udp", "UDP (no delivery guarantee)"]].map(([v, l]) => html`<option value="${v}" ${flag((sl?.protocol || "tls") === v, "selected")}>${l}</option>`)}</select></div>
+          <div><label>Facility</label><input name="s_facility" type="number" min="0" max="23" value="${sl?.facility ?? 16}" ${off}></div>
+          <div><label>CA file (TLS, private CA)</label><input name="s_ca_file" placeholder="public roots" value="${sl?.ca_file || ""}" ${off}></div>
+          <div><label>Every (s)</label><input name="s_interval" type="number" min="1" value="${sl?.interval_secs || 5}" ${off}></div>
+        </div></div>
+      ${save}
+    </form>
+
+    <form class="card" data-form="settings-gateway"><h2>Gateway certificate</h2>
+      <dl class="kv small readonly-kv"><dt>Application name</dt><dd>${st.gateway.application_name}</dd>
+        <dt>Application URI</dt><dd class="mono">${st.gateway.application_uri}</dd></dl>
+      <div class="setting"><label class="title" for="hostnames">Host names and IP addresses</label>
+        <input id="hostnames" name="certificate_hostnames" placeholder="gateway.local, 192.168.0.20" value="${st.gateway.certificate_hostnames.join(", ")}" ${off}>
+        <p class="help">How clients reach the gateway, put in its certificate. Used when the certificate is generated: after a change, generate a new one on the <a href="#/certificates">Certificates</a> page.</p></div>
+      ${save}
+    </form>
+
+    <div class="card"><h2>Web UI and files</h2>
+      <dl class="kv small readonly-kv"><dt>Listens on</dt><dd class="mono">${st.web.listen}</dd>
+        <dt>HTTPS</dt><dd>${st.web.tls ? (st.web.tls_certificate ? html`on, <span class="mono">${st.web.tls_certificate}</span>` : "on, with the gateway certificate") : "off"}</dd>
+        <dt>Certificates</dt><dd class="mono">${st.gateway.pki_dir}</dd>
+        <dt>Data</dt><dd class="mono">${st.gateway.data_dir}</dd></dl>
+      <p class="help small muted">These take effect only when the gateway starts, and a wrong value can lock you out: change them in the <span class="mono">[web]</span> and <span class="mono">[gateway]</span> sections of the config file, then restart the gateway.</p>
+    </div>
+  </div>`;
 }
 
 // ---------- users & account ----------
@@ -769,6 +911,7 @@ async function load() {
       case "certificates": state.certificates = await get("/certificates"); state.status = await get("/status"); break;
       case "browser": state.status ||= await get("/status"); break;
       case "users": state.users = await get("/users"); break;
+      case "settings": state.settings = await get("/settings"); state.status = await get("/status"); break;
     }
   } catch (e) { fail(e); }
   renderPage();
@@ -839,19 +982,32 @@ const actions = {
     await loadAudit(); renderPage();
   },
   async ignore(el) {
-    const { target, node, client } = el.dataset;
-    const who = client ? ` from ${client}` : "";
-    if (!confirm(`Stop recording each write to ${node}${who} on ${target}?\n\nThey are recorded as one summary every ${summaryEvery()} instead (count, clients, last value).${client ? " Writes by other clients stay recorded one by one." : ""}`)) return;
-    await post(`/targets/${encodeURIComponent(target)}/ignore`, { node_id: node, client: client || null });
+    const { target, node, name, clientKey: key, clientLabel: label } = el.dataset;
+    const title = name || node;
+    const choice = await dialog({
+      title: `Summarise writes to ${title}?`,
+      body: html`<p>Now every write to <b>${title}</b> <span class="mono muted">${node}</span> on target <b>${target}</b> becomes its own record.
+          A node that is written constantly, like a life bit or a clock, buries the writes that matter.</p>
+        <p>Summarised, its writes are counted instead: every ${summaryEvery()} one record says how many writes there were (and how many failed), from which clients, and the last value.</p>
+        <fieldset class="choice"><legend>Which writes?</legend>
+          <label><input type="radio" name="scope" value="" checked> From every client</label>
+          ${when(key, () => html`<label><input type="radio" name="scope" value="${key}"> Only from ${label || key}
+            <span class="muted small">Writes to this node by any other client stay recorded one by one.</span></label>`)}
+        </fieldset>
+        <p class="muted small">Method calls and writes to other nodes are always recorded. You can undo this at any time (on the target's page, or here).</p>`,
+      confirm: "Summarise writes",
+    });
+    if (!choice) return;
+    await post(`/targets/${encodeURIComponent(target)}/ignore`, { node_id: node, client: choice.scope || null, name: name || null });
     state.status = await get("/status");
-    toast("Writes to this node are now summarised");
+    toast(`Writes to ${title} are now summarised`);
     renderPage();
   },
   async unignore(el) {
     const { target, node, client } = el.dataset;
     await post(`/targets/${encodeURIComponent(target)}/ignore/remove`, { node_id: node, client: client || null });
     state.status = await get("/status");
-    toast("Writes to this node are recorded one by one again");
+    toast("Every write to this node is recorded again");
     renderPage();
   },
   async older() { await loadAudit(true); renderPage(); },
@@ -878,14 +1034,15 @@ const actions = {
     const endpoints = state.targets.discovery[el.dataset.name] || t?.status?.endpoints || [];
     const shown = endpoints.find((e) => e.server_certificate)?.server_certificate;
     if (!shown) { toast("No certificate known yet: discover the target first.", "bad"); return; }
-    if (!confirm(`Trust this server certificate?\n\n${shown.subject}\nThumbprint ${shown.thumbprint}\n\nCompare the thumbprint with the one shown on the PLC first.`)) return;
+    if (!await dialog({ title: "Trust this server certificate?", confirm: "Trust",
+      body: html`<p><b>${shown.subject}</b></p><p>Thumbprint <span class="mono">${shown.thumbprint}</span></p><p>Compare the thumbprint with the one shown on the PLC first.</p>` })) return;
     const cert = await post(`/targets/${encodeURIComponent(el.dataset.name)}/trust-server`, { thumbprint: shown.thumbprint });
     toast(`Trusted ${cert.subject}`);
     state.certificates = await get("/certificates");
     renderPage();
   },
   async "delete-target"(el) {
-    if (!confirm(`Delete target ${el.dataset.name}? Its clients are disconnected.`)) return;
+    if (!await dialog({ title: `Delete target ${el.dataset.name}?`, body: "Its clients are disconnected. The audit trail keeps its records.", confirm: "Delete", danger: true })) return;
     await del(`/targets/${encodeURIComponent(el.dataset.name)}`);
     toast("Target deleted");
     await load();
@@ -894,13 +1051,13 @@ const actions = {
   async "trust-cert"(el) { await post(`/certificates/rejected/${el.dataset.thumb}/trust`); toast("Certificate trusted"); await load(); },
   async "delete-cert"(el) { await del(`/certificates/rejected/${el.dataset.thumb}`); await load(); },
   async "untrust-cert"(el) {
-    if (!confirm("Revoke trust? Applications using this certificate can no longer connect securely.")) return;
+    if (!await dialog({ title: "Revoke trust?", body: "Applications using this certificate can no longer connect securely; their connections are closed.", confirm: "Revoke", danger: true })) return;
     await post(`/certificates/trusted/${el.dataset.thumb}/untrust`); await load();
   },
   "show-import"() { state.showImport = true; renderPage(); },
   "hide-import"() { state.showImport = false; renderPage(); },
   async regenerate() {
-    if (!confirm("Generate a new gateway certificate? Every PLC and client must trust the new one; all targets restart.")) return;
+    if (!await dialog({ title: "Generate a new gateway certificate?", body: "Every PLC and client must trust the new one. All targets restart, which disconnects their clients.", confirm: "Generate", danger: true })) return;
     await post("/certificates/own/regenerate"); toast("New certificate generated"); await load();
   },
   // browser
@@ -937,17 +1094,69 @@ const actions = {
   // users
   async "set-role"(el) { await put(`/users/${encodeURIComponent(el.dataset.user)}`, { role: el.value }); toast("Role changed"); await load(); },
   async "reset-password"(el) {
-    const password = prompt(`New password for ${el.dataset.user} (min. 8 characters)`);
-    if (!password) return;
-    await put(`/users/${encodeURIComponent(el.dataset.user)}`, { password }); toast("Password reset");
+    const input = await dialog({ title: `New password for ${el.dataset.user}`, confirm: "Set password",
+      body: html`<div class="field"><label for="new-password">Password (min. 8 characters)</label><input id="new-password" name="password" type="password" minlength="8" required autocomplete="new-password"></div>
+        <p class="muted small">The user's sessions end; they log in with the new password.</p>` });
+    if (!input) return;
+    await put(`/users/${encodeURIComponent(el.dataset.user)}`, { password: input.password }); toast("Password reset");
   },
   async "delete-user"(el) {
-    if (!confirm(`Delete user ${el.dataset.user}?`)) return;
+    if (!await dialog({ title: `Delete user ${el.dataset.user}?`, body: "Their sessions end at once. The audit trail keeps their records.", confirm: "Delete", danger: true })) return;
     await del(`/users/${encodeURIComponent(el.dataset.user)}`); await load();
   },
 };
 
 const forms = {
+  async "settings-audit"(form) {
+    const d = formData(form);
+    const body = {
+      retention_days: Number(d.retention_days),
+      fail_mode: d.fail_mode,
+      record_old_value: form.elements.record_old_value.checked,
+      ignored_summary_secs: Number(d.summary_minutes) * 60,
+    };
+    const old = state.settings.audit;
+    if (body.retention_days > 0 && (old.retention_days === 0 || body.retention_days < old.retention_days)) {
+      if (!await dialog({ title: `Keep records for ${body.retention_days} days?`, confirm: "Save", danger: true,
+        body: html`<p>Records older than ${body.retention_days} days are deleted for good, starting right away.</p>
+          <p class="muted small">Exported copies (QuestDB, syslog) are not affected.</p>` })) return;
+    }
+    if (body.fail_mode === "closed" && old.fail_mode !== "closed") {
+      if (!await dialog({ title: "Reject writes when the trail cannot be written?", confirm: "Save",
+        body: "From now on, a write only reaches the PLC after its record is stored. If the audit trail fails (e.g. a full disk), clients can no longer write." })) return;
+    }
+    await put("/settings/audit", body);
+    toast("Audit trail settings saved");
+    state.settings = await get("/settings"); state.status = await get("/status"); renderPage();
+  },
+  async "settings-export"(form) {
+    const d = formData(form);
+    const on = (name) => form.elements[name].checked;
+    const secret = (body, name, prefix) => {
+      if (d[`${prefix}_${name}`]) body[name] = d[`${prefix}_${name}`];
+      else if (form.elements[`${prefix}_${name}_clear`]?.checked) body[name] = "";
+    };
+    const body = {};
+    if (on("questdb_on")) {
+      body.questdb = { url: d.q_url, table: d.q_table || "opcua_audit", username: d.q_username || null,
+        ca_file: d.q_ca_file || null, interval_secs: Number(d.q_interval) || 5 };
+      secret(body.questdb, "password", "q");
+      secret(body.questdb, "token", "q");
+    }
+    if (on("syslog_on")) {
+      body.syslog = { address: d.s_address, protocol: d.s_protocol, facility: Number(d.s_facility),
+        ca_file: d.s_ca_file || null, interval_secs: Number(d.s_interval) || 5 };
+    }
+    await put("/settings/export", body);
+    toast("Export settings saved");
+    state.settings = await get("/settings"); state.status = await get("/status"); renderPage();
+  },
+  async "settings-gateway"(form) {
+    const names = formData(form).certificate_hostnames.split(/[\s,;]+/).filter(Boolean);
+    await put("/settings/gateway", { certificate_hostnames: names });
+    toast("Saved. Generate a new certificate to use it (Certificates page).");
+    state.settings = await get("/settings"); renderPage();
+  },
   async login(form) {
     const err = form.querySelector("#login-error");
     try {

@@ -71,6 +71,16 @@ pub enum SyslogProtocol {
     Tls,
 }
 
+impl SyslogProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyslogProtocol::Udp => "udp",
+            SyslogProtocol::Tcp => "tcp",
+            SyslogProtocol::Tls => "tls",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyslogConfig {
@@ -241,9 +251,17 @@ pub struct IgnoreRule {
     /// the same node written by any other client is recorded as usual.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// The node's display name, for people reading the list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl IgnoreRule {
+    /// Whether two rules are for the same node and client.
+    pub fn same(&self, other: &IgnoreRule) -> bool {
+        self.node_id == other.node_id && self.client == other.client
+    }
+
     pub fn node(&self) -> anyhow::Result<opcua::types::NodeId> {
         self.node_id
             .trim()

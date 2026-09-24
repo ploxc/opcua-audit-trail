@@ -282,6 +282,14 @@ embedded, so the UI needs no internet access.
   TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.
 * **Discovery** of an arbitrary URL is admin-only and audited, so the UI
   cannot be used to probe the plant network.
+* **Settings**: retention, fail mode, old values, the summary interval, export
+  destinations and certificate host names. Written back to `config.toml`
+  (only those keys; comments stay) and applied live: the relay, retention
+  and exporters read shared settings, and exporters restart with the new
+  destinations. Export positions are kept per destination, so a new one gets
+  the whole trail and the old one's last record stays a `verify` anchor.
+  Secrets are write-only. The web listener, TLS and paths stay file-only.
+* Confirmations use an in-page dialog that explains the consequence.
 
 The web UI binds to `127.0.0.1` by default; on a loopback address it only
 accepts requests whose `Host` is a loopback name (against DNS rebinding). The

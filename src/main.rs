@@ -348,10 +348,7 @@ async fn run(
         .await
         .context("writing the first audit record")?;
     tracing::info!("audit trail at {}", db.display());
-    tokio::spawn(audit::run_retention(
-        audit.clone(),
-        config.audit.retention_days,
-    ));
+    tokio::spawn(audit::run_retention(audit.clone()));
 
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
@@ -385,7 +382,7 @@ async fn run(
     ));
     targets.start_all().await;
 
-    let exports = export::start(
+    let exports = export::Exports::start(
         &config.export,
         AuditReader::new(&db),
         audit.clone(),

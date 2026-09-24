@@ -130,7 +130,6 @@ async fn harness_with_latency(fail_mode: FailMode, latency: Option<Duration>) ->
         statuses,
         client,
         audit.clone(),
-        &config.audit,
     ));
     let listener = bind(&relay).await.unwrap();
     tokio::spawn(serve(relay.clone(), listener));
@@ -791,6 +790,7 @@ async fn ignored_writes_are_summarised() {
     h.relay.ignore.set(&[crate::config::IgnoreRule {
         node_id: h.setpoint.to_string(),
         client: None,
+        name: None,
     }]);
 
     for i in 0..3 {
@@ -857,6 +857,7 @@ async fn ignored_writes_are_summarised() {
     h.relay.ignore.set(&[crate::config::IgnoreRule {
         node_id: h.setpoint.to_string(),
         client: Some("urn:another-hmi".into()),
+        name: None,
     }]);
     session
         .write(&[write_value(&h.setpoint, 8.0)])

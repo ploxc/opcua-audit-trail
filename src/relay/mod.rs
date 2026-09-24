@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::event::ClientContext;
 use crate::audit::AuditHandle;
-use crate::config::{AuditConfig, Config, FailMode, TargetConfig};
+use crate::config::{Config, TargetConfig};
 use crate::discovery::{self, TargetStatuses};
 use transport::Limits;
 
@@ -169,8 +169,6 @@ pub struct RelayTarget {
     pub statuses: TargetStatuses,
     pub discovery: Arc<Client>,
     pub audit: AuditHandle,
-    pub fail_mode: FailMode,
-    pub record_old_value: bool,
     pub names: audit_map::NameCache,
     pub sessions: SessionRegistry,
     pub clients: RwLock<BTreeMap<u64, ClientInfo>>,
@@ -189,7 +187,6 @@ pub struct RelayTarget {
     pub ignore: ignore::IgnoreList,
     /// Ignored writes since the last summary.
     pub ignored: ignore::IgnoredWrites,
-    ignored_summary: Duration,
 }
 
 impl RelayTarget {
@@ -199,7 +196,6 @@ impl RelayTarget {
         statuses: TargetStatuses,
         discovery: Arc<Client>,
         audit: AuditHandle,
-        audit_config: &AuditConfig,
     ) -> Self {
         let limits = Limits::default();
         Self {
@@ -209,8 +205,6 @@ impl RelayTarget {
             statuses,
             discovery,
             audit,
-            fail_mode: audit_config.fail_mode,
-            record_old_value: audit_config.record_old_value,
             names: audit_map::NameCache::default(),
             sessions: SessionRegistry::default(),
             clients: RwLock::new(BTreeMap::new()),
@@ -221,7 +215,6 @@ impl RelayTarget {
             trust_changed: tokio::sync::watch::Sender::new(0),
             ignore: ignore::IgnoreList::new(&config.ignore),
             ignored: ignore::IgnoredWrites::default(),
-            ignored_summary: Duration::from_secs(audit_config.ignored_summary_secs),
             config,
         }
     }
@@ -366,12 +359,15 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
     }));
     // Refused connections are recorded as one summary per address.
     let mut report = tokio::time::interval(Duration::from_secs(10));
-    let mut summarise = tokio::time::interval(target.ignored_summary);
-    summarise.tick().await;
+    // The summary interval is read each time: it can change while running.
+    let mut next_summary = Instant::now() + target.audit.settings().ignored_summary();
     loop {
         tokio::select! {
             _ = target.shutdown.cancelled() => break,
-            _ = summarise.tick() => target.record_ignored().await,
+            _ = tokio::time::sleep_until(next_summary.into()) => {
+                target.record_ignored().await;
+                next_summary = Instant::now() + target.audit.settings().ignored_summary();
+            }
             _ = report.tick() => {
                 let refused = admission.lock().take_refused();
                 for (ip, count, reason) in refused {

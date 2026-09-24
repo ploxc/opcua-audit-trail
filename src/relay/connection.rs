@@ -1265,10 +1265,13 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
     if plan.as_ref().is_some_and(|p| p.is_empty()) {
         plan = None;
     }
-    let pre_read = plan
-        .as_mut()
-        .and_then(|p| p.pre_read(ctx.target.record_old_value, &ctx.target.names));
-    let fail_closed = ctx.target.fail_mode == FailMode::Closed;
+    let pre_read = plan.as_mut().and_then(|p| {
+        p.pre_read(
+            ctx.target.audit.settings().record_old_value(),
+            &ctx.target.names,
+        )
+    });
+    let fail_closed = ctx.target.audit.settings().fail_mode() == FailMode::Closed;
     if let (Some(plan), true) = (&plan, fail_closed) {
         let entry = AuditEntry::new(plan.intent())
             .target(ctx.target.config.name.clone())

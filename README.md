@@ -217,23 +217,27 @@ failed), from which clients, from when to when, and the last value. A write
 to such a node therefore never goes unnoticed entirely.
 
 In the web UI (admin): **Audit trail → Most written** lists the nodes written
-most in the last 24 hours, each with **Summarise** (every client) or **Only
-from …** (just that client; the same node written by anyone else stays
-recorded one by one). The same buttons are in a write record's details and on
-a variable in the Browser. **Record again** undoes it. Changes apply at once,
-without disconnecting clients, and are audited (`config_changed`).
+most in the last 24 hours. **Summarise…** opens a dialog that explains what
+happens and asks whose writes to summarise: every client's, or only one
+client's (the same node written by anyone else stays recorded one by one).
+The same button is in a write record's details and on a variable in the
+Browser. Summarised nodes carry a *summarised* label in the audit trail and the
+Browser, and each target lists them under **Summarised nodes**, with **Record
+every write again** to undo it. Changes apply at once, without disconnecting
+clients, and are audited (`config_changed`).
 
 In `config.toml`:
 
 ```toml
 [audit]
-ignored_summary_secs = 3600         # one summary per node per hour (default)
+ignored_summary_secs = 3600         # one summary per node per hour (default; also in Settings)
 
 [[targets]]
 name = "line1"
 # …
 [[targets.ignore]]
 node_id = 'ns=3;s="DB1"."Life"'     # as shown in the audit trail
+name = "Life bit"                   # optional, shown in the web UI
 [[targets.ignore]]
 node_id = "ns=3;i=1234"
 client = "10.0.0.5"                 # only from this address or application URI
@@ -255,6 +259,13 @@ not been written yet is lost if the gateway crashes.
 | Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
 | Users | admin | Users and roles |
+| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB and syslog export, certificate host names; web server and paths shown read-only |
+
+Settings are saved in `config.toml` (comments are kept) and applied at once,
+without a restart or disconnecting clients. Passwords and tokens are never
+shown again once saved. Shortening the retention deletes older records right
+away. The web server's address, HTTPS and the data paths take effect only at
+start, and a wrong value could lock you out, so they are changed in the file.
 
 Roles are cumulative: auditor < operator < admin. Manage users from the
 command line with `opcua-audit-gateway user add|passwd|role|delete|list`
