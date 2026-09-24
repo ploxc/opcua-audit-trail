@@ -363,7 +363,7 @@ function pageView(page) {
 // ---------- login ----------
 
 function loginView() {
-  return html`<div class="login">${gatewayLogo("login-backdrop")}<form class="card" data-form="login">
+  return html`<div class="login"><form class="card" data-form="login">
     <div class="brand">${gatewayLogo()}<div>Audit Gateway<small>OPC UA</small></div></div>
     <div class="field"><label for="u">User name</label><input id="u" name="username" autocomplete="username" required></div>
     <div class="field"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
@@ -921,7 +921,7 @@ function usersView() {
 /// A password someone else chose (first start, reset by an admin) is
 /// replaced before anything else.
 function mustChangeView() {
-  return html`<div class="login">${gatewayLogo("login-backdrop")}<form class="card" data-form="password">
+  return html`<div class="login"><form class="card" data-form="password">
     <div class="brand">${gatewayLogo()}<div>Choose a new password<small>${state.user.username}</small></div></div>
     <p class="section-note">Your password was set by someone else. Choose your own to continue.</p>
     <div class="field"><label for="c">Current password</label><input id="c" name="current" type="password" required autocomplete="current-password"></div>
