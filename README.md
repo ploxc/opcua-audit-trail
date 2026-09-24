@@ -54,6 +54,10 @@ Then trust, one step at a time: the PLC certificate in the gateway (**Targets
 in the gateway (**Certificates → Trust**). The same client pointed directly at
 the PLC (`opc.tcp://127.0.0.1:4840/`) stays locked out.
 
+For a simulated PLC closer to the real thing (many changing values, several
+security policies), [`docker/opc-plc`](docker/opc-plc/README.md) starts
+Microsoft's open source OPC PLC, locked down the same way.
+
 ## Quick start (binary)
 
 ```sh

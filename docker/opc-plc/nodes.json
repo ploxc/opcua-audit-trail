@@ -1,0 +1,10 @@
+{
+  "Folder": "Line1",
+  "NodeList": [
+    { "NodeId": "Line1.Setpoint", "Name": "Setpoint", "DataType": "Double", "Description": "Setpoint, written by the HMI" },
+    { "NodeId": "Line1.Running", "Name": "Running", "DataType": "Boolean", "Description": "Start/stop" },
+    { "NodeId": "Line1.Recipe", "Name": "Recipe", "DataType": "String", "Description": "Active recipe" },
+    { "NodeId": "Line1.LifeBit", "Name": "LifeBit", "DataType": "Boolean", "Description": "Toggled by the HMI every second: try summarising it" },
+    { "NodeId": "Line1.ReadOnly", "Name": "ReadOnly", "DataType": "Int32", "AccessLevel": "CurrentRead", "Description": "Writes are rejected: shows up as a failed write" }
+  ]
+}
