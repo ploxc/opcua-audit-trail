@@ -4,6 +4,8 @@ mod discovery;
 mod export;
 mod pki;
 mod relay;
+#[cfg(windows)]
+mod service;
 mod targets;
 #[cfg(test)]
 mod testutil;
@@ -37,6 +39,10 @@ struct Cli {
         default_value = "config.toml"
     )]
     config: PathBuf,
+    /// Write logs to daily files in this directory (kept 14 days) instead of
+    /// the console.
+    #[arg(long, global = true, env = "OPCUA_GATEWAY_LOG_DIR")]
+    log_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -46,7 +52,12 @@ enum Command {
     /// Write an example config (if missing) and create the gateway certificate.
     Init,
     /// Run the gateway.
-    Run,
+    Run {
+        /// If the config file does not exist yet, create it as a copy of this
+        /// file first (used by the container image).
+        #[arg(long)]
+        create_config_from: Option<PathBuf>,
+    },
     /// Show the endpoints (security policies, modes, login methods) of a server.
     Discover {
         /// Endpoint URL, e.g. opc.tcp://192.168.0.10:4840
@@ -57,6 +68,21 @@ enum Command {
     /// Manage web UI users.
     #[command(subcommand)]
     User(UserCommand),
+    /// Install or remove the Windows service.
+    #[cfg(windows)]
+    #[command(subcommand)]
+    Service(ServiceCommand),
+}
+
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Register an auto-start service for this config (run as administrator).
+    Install,
+    /// Stop and remove the service.
+    Uninstall,
+    /// Entry point used by the service manager.
+    Run,
 }
 
 #[derive(Subcommand)]
@@ -78,17 +104,73 @@ enum UserCommand {
     List,
 }
 
-fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // The client library logs its own errors for failures we already report.
-                "info,opcua_client=off,opcua_core=warn,opcua_crypto=warn,opcua_types=warn".into()
-            }),
-        )
-        .init();
+fn init_logging(log_dir: Option<&Path>) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        // The client library logs its own errors for failures we already report.
+        "info,opcua_client=off,opcua_core=warn,opcua_crypto=warn,opcua_types=warn".into()
+    });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    let Some(dir) = log_dir else {
+        builder.init();
+        return None;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("gateway")
+        .filename_suffix("log")
+        .max_log_files(14)
+        .build(dir);
+    match appender {
+        Ok(appender) => {
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            builder.with_ansi(false).with_writer(writer).init();
+            Some(guard)
+        }
+        Err(e) => {
+            builder.init();
+            tracing::error!("cannot log to {}: {e}", dir.display());
+            None
+        }
+    }
+}
 
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    let _log_guard = init_logging(cli.log_dir.as_deref());
+
+    #[cfg(windows)]
+    if let Command::Service(cmd) = &cli.command {
+        let result = match cmd {
+            ServiceCommand::Run => service::dispatch(cli.config.clone()),
+            ServiceCommand::Install => std::path::absolute(&cli.config)
+                .map_err(anyhow::Error::from)
+                .and_then(|config| {
+                    let log_dir = cli
+                        .log_dir
+                        .clone()
+                        .unwrap_or_else(|| config.parent().unwrap_or(Path::new(".")).join("logs"));
+                    service::install(&config, &log_dir)?;
+                    println!(
+                        "installed service {} (config {}, logs in {}); start it with: sc start {}",
+                        service::NAME,
+                        config.display(),
+                        log_dir.display(),
+                        service::NAME
+                    );
+                    Ok(())
+                }),
+            ServiceCommand::Uninstall => service::uninstall().map(|()| println!("service removed")),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -99,10 +181,32 @@ fn main() -> ExitCode {
     let result = runtime.block_on(async {
         match cli.command {
             Command::Init => init(&cli.config),
-            Command::Run => run(&cli.config, shutdown_signal()).await,
+            Command::Run { create_config_from } => {
+                if let Some(template) = create_config_from.filter(|_| !cli.config.exists()) {
+                    if let Some(dir) = cli.config.parent().filter(|d| !d.as_os_str().is_empty()) {
+                        std::fs::create_dir_all(dir).ok();
+                    }
+                    if let Err(e) = std::fs::copy(&template, &cli.config) {
+                        eprintln!(
+                            "error: cannot create {} from {}: {e}",
+                            cli.config.display(),
+                            template.display()
+                        );
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    println!(
+                        "created {} from {}",
+                        cli.config.display(),
+                        template.display()
+                    );
+                }
+                run(&cli.config, shutdown_signal()).await
+            }
             Command::Discover { endpoint_url } => discover(&cli.config, &endpoint_url).await,
             Command::Verify => verify(&cli.config).await,
             Command::User(cmd) => user_command(&cli.config, cmd),
+            #[cfg(windows)]
+            Command::Service(_) => unreachable!("handled above"),
         }
     });
     match result {
@@ -367,7 +471,12 @@ async fn discover(path: &Path, endpoint_url: &str) -> anyhow::Result<ExitCode> {
 
 async fn verify(path: &Path) -> anyhow::Result<ExitCode> {
     let config = Config::load(path)?;
-    let report = AuditReader::new(&config.audit_database()).verify().await?;
+    let db = config.audit_database();
+    if !db.exists() {
+        println!("no audit trail yet at {}", db.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let report = AuditReader::new(&db).verify().await?;
     println!(
         "{} records (seq {}..{}), head {}",
         report.records,

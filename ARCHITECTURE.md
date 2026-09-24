@@ -223,7 +223,8 @@ helper.
   (browser) and `auditor` (audit log only). LDAP/AD later. Sessions are
   HttpOnly/SameSite=Strict cookies. Every state-changing request needs a
   custom header (CSRF protection). UI logins and every change made through
-  the UI are audited. Plain HTTP for now: use a TLS reverse proxy.
+  the UI are audited. HTTPS with rustls (`ring` provider), using the gateway
+  certificate or PEM files.
 
 The web UI binds to `127.0.0.1` by default. The compose file only publishes it
 on the host's loopback. Targets can be changed at runtime: they are written
@@ -231,11 +232,19 @@ back to `config.toml` with the file's comments preserved.
 
 ## Build and deployment
 
-* One static binary per platform: Linux x86_64 / ARM64 / ARMv7 (musl; ARMv7 for
-  PLCnext AXC F 2152), Windows (runs as a service), macOS.
-* Docker image (distroless, non-root) plus `docker-compose.yml`, and later a
-  profile that also runs QuestDB.
-* Configuration: one TOML file; relative paths resolve against the file's directory.
+* One binary per platform: Linux x86_64 / ARM64 / ARMv7 (static musl; ARMv7
+  for PLCnext AXC F 2152), Windows, macOS. Built by `.github/workflows/release.yml`
+  for every `v*` tag, with SHA-256 checksums.
+* Linux: `packaging/linux/install.sh` installs a hardened systemd unit that runs
+  as a dedicated user. Windows: `service install` registers an auto-start
+  service that logs to daily files.
+* Container: distroless, non-root. The release image is built from the musl
+  binaries for amd64, arm64 and arm/v7, and published to GHCR. Config, PKI,
+  users and the audit trail live in `/data`; the config is created from a
+  template on first start, so the web UI can update it.
+  `docker-compose.yml` has an optional QuestDB profile.
+* Configuration: one TOML file; relative paths resolve against the file's
+  directory.
 
 ## Testing
 
@@ -257,7 +266,7 @@ back to `config.toml` with the file's comments preserved.
 | 4. Old values & display names | Read-before-write, node name cache | ✅ done |
 | 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard, browser | ✅ done |
 | 6. Export | QuestDB (ILP/HTTP) and syslog (RFC 5424) export with persisted positions; exported hashes anchor the chain | ✅ done |
-| 7. Packaging | Windows service, systemd unit, multi-arch images, releases | |
+| 7. Packaging | HTTPS for the UI, Windows service, systemd unit and installer, file logging, release workflow (binaries + multi-arch images) | ✅ done |
 
 ## Decision log
 

@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+tracing-appender = "0.2"
 
 [dev-dependencies]
 async-opcua = { version = "0.19", features = ["client", "server"] }
@@ -58,3 +59,6 @@ opt-level = 2
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[target."cfg(windows)".dependencies]
+windows-service = "0.8"

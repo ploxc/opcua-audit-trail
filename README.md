@@ -8,14 +8,14 @@ audit trail of every write, method call and client session. It is a single Rust
 binary that runs standalone (Linux, Windows, macOS, ARM PLCs such as PLCnext) or
 in Docker.
 
-> **Status: milestones 1–6 of 7.** The relay works for security `None`, `Sign`
+> **Status: all 7 roadmap milestones done; not yet tested against real PLCs.** The relay works for security `None`, `Sign`
 > and `SignAndEncrypt` (all RSA policies), anonymous and user name logins, and
 > every service (reads, writes, subscriptions, method calls, …). Writes, method
 > calls, history updates, node management, sessions and connections are
 > audited, with old value → new value and the node's display name. The web UI
 > covers status, the audit trail, targets, certificates, an OPC UA browser and
-> users. Audit records can be exported to QuestDB and syslog. Next: packaging
-> (Windows service, systemd, releases) and HTTPS.
+> users. Audit records can be exported to QuestDB and syslog. It installs as
+> a systemd or Windows service or runs as a container, with optional HTTPS.
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap.
 
 ## Try it without a PLC
@@ -74,15 +74,65 @@ The gateway follows standard OPC UA trust handling, in its `pki/` directory:
 The web UI's **Certificates** page does all of this with buttons. The
 **Targets** page can trust a PLC certificate directly from discovery.
 
-## Quick start (Docker)
+## Installation
+
+Release archives (Linux x86_64/ARM64/ARMv7 static, Windows, macOS) and
+multi-arch images (`ghcr.io/harted/opcua-audit-trail`) are built for every
+`v*` tag.
+
+### Linux (systemd)
 
 ```sh
-# edit docker/config.toml (targets, certificate_hostnames), then
-docker compose up -d
+tar xzf opcua-audit-gateway-*-linux-amd64.tar.gz && cd opcua-audit-gateway-*
+sudo ./install.sh ./opcua-audit-gateway
+sudo nano /etc/opcua-audit-gateway/config.toml    # or add targets in the web UI
+journalctl -u opcua-audit-gateway | grep password  # initial admin password
 ```
 
-Data (certificates, users and the audit database) lives in the `gateway-data`
-volume. The initial admin password is in `docker compose logs gateway`.
+The service runs as the unprivileged user `opcua-gw` with a hardened unit.
+Data, certificates and the audit trail live in `/var/lib/opcua-audit-gateway`.
+Running `install.sh` again upgrades the binary and keeps config and data.
+On a PLCnext controller use the `armv7` archive or the container image.
+
+### Windows (service)
+
+```powershell
+opcua-audit-gateway.exe --config C:\gateway\config.toml init
+opcua-audit-gateway.exe --config C:\gateway\config.toml service install   # as administrator
+sc start OpcUaAuditGateway
+```
+
+Logs go to `C:\gateway\logs` (daily files, kept 14 days), including the
+initial admin password. `service uninstall` removes the service. Any command
+accepts `--log-dir` to log to files instead of the console.
+
+### Docker
+
+```sh
+docker compose up -d
+docker compose logs gateway | grep password
+```
+
+Everything (config, certificates, users, audit trail) lives in the `/data`
+volume. On the first start `/data/config.toml` is created from
+`docker/config.toml`. Manage targets in the web UI. To change other settings:
+`docker compose cp gateway:/data/config.toml .`, edit the file,
+`docker compose cp config.toml gateway:/data/config.toml`, then
+`docker compose restart gateway`.
+
+## HTTPS
+
+```toml
+[web]
+listen = "0.0.0.0:8443"
+tls = true                          # uses the gateway certificate, or:
+# tls_certificate = "web-cert.pem"  # PEM chain, e.g. from your plant CA
+# tls_private_key = "web-key.pem"
+```
+
+With the gateway certificate, browsers ask once to accept it. To avoid that,
+import `pki/own/cert.der` as trusted, or use a certificate from your own CA.
+With TLS the session cookie is marked `Secure`.
 
 ## Audit export
 
@@ -142,8 +192,8 @@ requests also need the header `X-Requested-With: opcua-audit-gateway`.
 | GET | `/api/audit/verify` | Verify the hash chain |
 | | `/api/targets`, `/api/certificates/…`, `/api/users`, `/api/browser/{target}/…` | Used by the UI; see `src/web/mod.rs` |
 
-The web UI serves plain HTTP. Put it behind a TLS reverse proxy (or keep it on
-`127.0.0.1`) until built-in HTTPS arrives.
+By default the web UI serves plain HTTP on `127.0.0.1`. For remote access,
+enable HTTPS (see above).
 
 ## Development
 

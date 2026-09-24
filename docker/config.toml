@@ -1,5 +1,6 @@
-# Default configuration inside the container image.
-# Mount your own file over /etc/opcua-audit-gateway/config.toml to change it.
+# Template for /data/config.toml: copied there on the container's first start.
+# After that, /data/config.toml is the live configuration (targets can be
+# managed in the web UI).
 
 [gateway]
 application_name = "OPC UA Audit Gateway"
