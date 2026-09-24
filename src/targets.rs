@@ -217,6 +217,17 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
         if t.min_security != crate::config::MinSecurity::None {
             table["min_security"] = toml_edit::value(t.min_security.as_str());
         }
+        let defaults: TargetConfig = toml::from_str(
+            "name = \"x\"\nlisten = \"127.0.0.1:1\"\nendpoint_url = \"opc.tcp://x\"",
+        )
+        .expect("valid");
+        if t.max_connections != defaults.max_connections {
+            table["max_connections"] = toml_edit::value(t.max_connections as i64);
+        }
+        if t.max_connections_per_address != defaults.max_connections_per_address {
+            table["max_connections_per_address"] =
+                toml_edit::value(t.max_connections_per_address as i64);
+        }
         array.push(table);
     }
     if targets.is_empty() {
@@ -243,6 +254,8 @@ mod tests {
             endpoint_url: "opc.tcp://127.0.0.1:1/".into(),
             discovery_interval_secs: 60,
             min_security: Default::default(),
+            max_connections: 50,
+            max_connections_per_address: 10,
         }
     }
 

@@ -6,6 +6,19 @@
 //! same `request_handle`, so the trail can be queried per node.
 
 use chrono::{DateTime, Utc};
+
+/// Shortens text a client chose before it goes into the audit trail, so
+/// nobody can fill the disk with a few huge requests.
+pub fn clip(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        None => text.to_string(),
+        Some((cut, _)) => format!("{}… ({} characters)", &text[..cut], text.chars().count()),
+    }
+}
+
+/// Limits for [`clip`].
+pub const MAX_NAME: usize = 256;
+pub const MAX_TEXT: usize = 1024;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,6 +149,12 @@ pub enum AuditEvent {
 
     // Client connections and sessions
     ClientConnected,
+    /// Connections refused because a limit was reached, summed per address.
+    ConnectionsRefused {
+        remote_addr: String,
+        count: u64,
+        reason: String,
+    },
     ClientDisconnected {
         reason: String,
     },
@@ -234,6 +253,7 @@ impl AuditEvent {
             AuditEvent::UpstreamUnavailable { .. } => "upstream_unavailable",
             AuditEvent::UpstreamEndpointsChanged { .. } => "upstream_endpoints_changed",
             AuditEvent::ClientConnected => "client_connected",
+            AuditEvent::ConnectionsRefused { .. } => "connections_refused",
             AuditEvent::ClientDisconnected { .. } => "client_disconnected",
             AuditEvent::SecureChannelOpened { .. } => "secure_channel_opened",
             AuditEvent::SessionCreated { .. } => "session_created",

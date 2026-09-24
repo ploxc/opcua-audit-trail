@@ -148,7 +148,7 @@ pub async fn login(
         let _ = s
             .audit
             .record_committed(AuditEntry::new(AuditEvent::UiLoginFailed {
-                user: req.username,
+                user: crate::audit::event::clip(&req.username, 64),
             }))
             .await;
         // Slow down guessing a little more than argon2 already does.

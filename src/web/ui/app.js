@@ -169,6 +169,7 @@ const EVENT_LABELS = {
   gateway_stopped: "Gateway stopped", config_changed: "Configuration changed", ui_login: "UI login",
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
+  connections_refused: "Connections refused",
 };
 const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred"]);
 const eventBadge = (type) => {
@@ -196,6 +197,7 @@ function eventSummary(e) {
     case "upstream_available": return `${e.endpoint_url} (${e.endpoints} endpoints)`;
     case "upstream_endpoints_changed": return html`<div>${e.endpoint_url}</div><div class="small muted">before: ${e.before.join("; ")}</div><div class="small">now: ${e.after.join("; ")}</div>`;
     case "subscriptions_transferred": return `subscriptions ${e.subscription_ids.join(", ")}`;
+    case "connections_refused": return `${e.count} from ${e.remote_addr}: ${e.reason}`;
     case "upstream_unavailable": return e.reason;
     case "config_changed": return html`<b>${e.by}</b>: ${e.summary}`;
     case "ui_login": case "ui_login_failed": return e.user;

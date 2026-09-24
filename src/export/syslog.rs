@@ -148,6 +148,7 @@ fn severity(kind: &str) -> u8 {
         | "ui_login_failed"
         | "upstream_unavailable"
         | "upstream_endpoints_changed"
+        | "connections_refused"
         | "events_lost" => 4,
         "write"
         | "call"

@@ -260,6 +260,79 @@ pub async fn bind(target: &RelayTarget) -> std::io::Result<tokio::net::TcpListen
     tokio::net::TcpListener::bind(target.config.listen).await
 }
 
+/// New connections per second one address may open (with a burst of twice
+/// that): enough for any HMI, too few to flood the audit trail.
+const CONNECTION_RATE: f64 = 5.0;
+
+struct AddressState {
+    active: usize,
+    tokens: f64,
+    last: Instant,
+    refused: u64,
+    reason: &'static str,
+}
+
+/// Decides which new connections a target accepts.
+struct Admission {
+    max_total: usize,
+    max_per_address: usize,
+    active: usize,
+    addresses: HashMap<std::net::IpAddr, AddressState>,
+}
+
+impl Admission {
+    fn admit(&mut self, ip: std::net::IpAddr) -> Result<(), ()> {
+        let now = Instant::now();
+        let full = self.active >= self.max_total;
+        let state = self.addresses.entry(ip).or_insert(AddressState {
+            active: 0,
+            tokens: 2.0 * CONNECTION_RATE,
+            last: now,
+            refused: 0,
+            reason: "",
+        });
+        state.tokens = (state.tokens
+            + now.duration_since(state.last).as_secs_f64() * CONNECTION_RATE)
+            .min(2.0 * CONNECTION_RATE);
+        state.last = now;
+        let reason = if full {
+            "too many connections to this target"
+        } else if state.active >= self.max_per_address {
+            "too many connections from this address"
+        } else if state.tokens < 1.0 {
+            "too many new connections per second from this address"
+        } else {
+            state.tokens -= 1.0;
+            state.active += 1;
+            self.active += 1;
+            return Ok(());
+        };
+        state.refused += 1;
+        state.reason = reason;
+        Err(())
+    }
+
+    fn release(&mut self, ip: std::net::IpAddr) {
+        self.active = self.active.saturating_sub(1);
+        if let Some(state) = self.addresses.get_mut(&ip) {
+            state.active = state.active.saturating_sub(1);
+        }
+    }
+
+    /// Refusals since the last call, per address; forgets idle addresses.
+    fn take_refused(&mut self) -> Vec<(std::net::IpAddr, u64, &'static str)> {
+        let refused = self
+            .addresses
+            .iter_mut()
+            .filter(|(_, s)| s.refused > 0)
+            .map(|(ip, s)| (*ip, std::mem::take(&mut s.refused), s.reason))
+            .collect();
+        self.addresses
+            .retain(|_, s| s.active > 0 || s.last.elapsed() < Duration::from_secs(60));
+        refused
+    }
+}
+
 /// Accepts clients for one target until its `shutdown` token is cancelled.
 pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) {
     tracing::info!(
@@ -268,14 +341,44 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
         target.config.listen,
         target.config.endpoint_url
     );
+    let admission = Arc::new(Mutex::new(Admission {
+        max_total: target.config.max_connections,
+        max_per_address: target.config.max_connections_per_address,
+        active: 0,
+        addresses: HashMap::new(),
+    }));
+    // Refused connections are recorded as one summary per address.
+    let mut report = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
             _ = target.shutdown.cancelled() => break,
+            _ = report.tick() => {
+                let refused = admission.lock().take_refused();
+                for (ip, count, reason) in refused {
+                    tracing::warn!(target = %target.config.name, "refused {count} connections from {ip}: {reason}");
+                    let entry = crate::audit::AuditEntry::new(crate::audit::AuditEvent::ConnectionsRefused {
+                        remote_addr: ip.to_string(),
+                        count,
+                        reason: reason.into(),
+                    })
+                    .target(target.config.name.clone());
+                    let _ = target.audit.record(entry).await;
+                }
+            }
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    if admission.lock().admit(peer.ip()).is_err() {
+                        drop(stream);
+                        continue;
+                    }
                     let _ = stream.set_nodelay(true);
                     let id = target.connection_ids.fetch_add(1, Ordering::Relaxed);
-                    tokio::spawn(connection::run(target.clone(), stream, peer, id));
+                    let target = target.clone();
+                    let admission = admission.clone();
+                    tokio::spawn(async move {
+                        connection::run(target, stream, peer, id).await;
+                        admission.lock().release(peer.ip());
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("accept failed: {e}");

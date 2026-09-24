@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use bytes::BytesMut;
 use futures::StreamExt;
 use opcua::core::comms::buffer::SendBuffer;
 use opcua::core::comms::chunker::Chunker;
@@ -22,15 +23,20 @@ use opcua::types::{
 };
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
-use tokio_util::codec::FramedRead;
+use tokio_util::codec::{Decoder, FramedRead};
 
-/// Buffer and message limits the gateway offers to clients.
+/// Buffer and message limits.
 #[derive(Debug, Clone)]
 pub struct Limits {
     pub send_buffer_size: usize,
     pub receive_buffer_size: usize,
+    /// Largest message the gateway sends or accepts from the upstream server.
     pub max_message_size: usize,
     pub max_chunk_count: usize,
+    /// Largest request a client may send. Every byte of it is held in memory
+    /// until the request is complete, before anyone is authenticated.
+    pub max_request_size: usize,
+    pub max_request_chunks: usize,
     pub hello_timeout: Duration,
 }
 
@@ -41,8 +47,45 @@ impl Default for Limits {
             receive_buffer_size: 65535,
             max_message_size: 64 * 1024 * 1024,
             max_chunk_count: 4096,
+            max_request_size: 8 * 1024 * 1024,
+            max_request_chunks: 1024,
             hello_timeout: Duration::from_secs(10),
         }
+    }
+}
+
+/// Largest Hello the gateway reads (the endpoint URL is at most 4096 bytes).
+const MAX_HELLO_SIZE: usize = 8192;
+/// Largest OpenSecureChannel request before a channel exists (it carries a
+/// certificate of a few kilobytes).
+const MAX_OPEN_SIZE: usize = 64 * 1024;
+
+/// async-opcua's codec buffers as many bytes as a frame header announces
+/// (up to 4 GiB) before checking anything. This one refuses a frame whose
+/// announced size exceeds the limit as soon as its header has arrived.
+pub struct LimitedCodec {
+    inner: TcpCodec,
+    max_frame: usize,
+}
+
+impl Decoder for LimitedCodec {
+    type Item = Message;
+    type Error = std::io::Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Message>, Self::Error> {
+        if buf.len() >= 8 {
+            let size = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+            if size > self.max_frame {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "frame of {size} bytes exceeds the negotiated {} bytes",
+                        self.max_frame
+                    ),
+                ));
+            }
+        }
+        self.inner.decode(buf)
     }
 }
 
@@ -86,10 +129,15 @@ pub struct ChannelBinding {
 }
 
 pub struct Downstream {
-    read: FramedRead<ReadHalf<TcpStream>, TcpCodec>,
+    read: FramedRead<ReadHalf<TcpStream>, LimitedCodec>,
     write: WriteHalf<TcpStream>,
     send_buffer: SendBuffer,
     pending_chunks: Vec<MessageChunk>,
+    /// Size of `pending_chunks` in bytes.
+    pending_bytes: usize,
+    /// What the client may send: chunks per request and bytes per request.
+    max_request_chunks: usize,
+    max_request_size: usize,
     sequence_numbers: SequenceNumberHandle,
     closing: bool,
     /// Set once the channel is issued.
@@ -115,7 +163,13 @@ impl Downstream {
         decoding: DecodingOptions,
     ) -> Result<Self, StatusCode> {
         let (read, mut write) = tokio::io::split(stream);
-        let mut read = FramedRead::new(read, TcpCodec::new(decoding.clone()));
+        let mut read = FramedRead::new(
+            read,
+            LimitedCodec {
+                inner: TcpCodec::new(decoding.clone()),
+                max_frame: MAX_HELLO_SIZE,
+            },
+        );
 
         let result = tokio::time::timeout(limits.hello_timeout, read.next()).await;
         let hello = match result {
@@ -161,18 +215,23 @@ impl Downstream {
             limits.max_chunk_count,
             true,
         );
+        // The Acknowledge states what the gateway accepts; the Hello's message
+        // size and chunk count are what the client accepts, i.e. limits for
+        // the responses.
         let ack = AcknowledgeMessage::new(
             0,
             (limits.receive_buffer_size as u32).min(hello.send_buffer_size),
             (limits.send_buffer_size as u32).min(hello.receive_buffer_size),
-            min_zero_infinite(limits.max_message_size as u32, hello.max_message_size),
-            min_zero_infinite(limits.max_chunk_count as u32, hello.max_chunk_count),
+            limits.max_request_size as u32,
+            limits.max_request_chunks as u32,
         );
         send_buffer.revise(
             ack.send_buffer_size as usize,
-            ack.max_message_size as usize,
-            ack.max_chunk_count as usize,
+            min_zero_infinite(limits.max_message_size as u32, hello.max_message_size) as usize,
+            min_zero_infinite(limits.max_chunk_count as u32, hello.max_chunk_count) as usize,
         );
+        // From now on no frame may exceed the receive buffer the client got.
+        read.decoder_mut().max_frame = ack.receive_buffer_size as usize;
         let mut buf = Vec::with_capacity(ack.byte_len());
         ack.encode(&mut buf)
             .map_err(|_| StatusCode::BadEncodingError)?;
@@ -186,6 +245,9 @@ impl Downstream {
             write,
             send_buffer,
             pending_chunks: Vec::new(),
+            pending_bytes: 0,
+            max_request_chunks: limits.max_request_chunks,
+            max_request_size: limits.max_request_size,
             sequence_numbers: SequenceNumberHandle::new(true),
             closing: false,
             binding: None,
@@ -280,10 +342,12 @@ impl Downstream {
                 Ok(None) => PollResult::Chunk,
                 Ok(Some(request)) => {
                     self.pending_chunks.clear();
+                    self.pending_bytes = 0;
                     PollResult::Request(request)
                 }
                 Err(e) => {
                     self.pending_chunks.clear();
+                    self.pending_bytes = 0;
                     match e.full_context() {
                         Some((id, handle)) => PollResult::Recoverable(e.status(), id, handle),
                         None => {
@@ -308,6 +372,14 @@ impl Downstream {
             ));
         };
         let header = chunk.message_header(&channel.decoding_options())?;
+        if self.binding.is_none() && !header.message_type.is_open_secure_channel() {
+            // Nothing but OpenSecureChannel is accepted, let alone buffered,
+            // before a channel exists.
+            return Err(Error::new(
+                StatusCode::BadSecureChannelIdInvalid,
+                "message before OpenSecureChannel",
+            ));
+        }
         if header.message_type.is_open_secure_channel() {
             if let Some(binding) = &self.binding {
                 // Checked before the library sees the chunk: parsing an
@@ -318,14 +390,24 @@ impl Downstream {
         if header.is_final == MessageIsFinalType::FinalError {
             // The client aborted a multi-chunk request.
             self.pending_chunks.clear();
+            self.pending_bytes = 0;
             return Ok(None);
         }
         let chunk = channel.verify_and_remove_security_server(chunk.data)?;
-        if self.send_buffer.max_chunk_count > 0
-            && self.pending_chunks.len() >= self.send_buffer.max_chunk_count
-        {
+        if self.pending_chunks.len() >= self.max_request_chunks {
             return Err(Error::decoding(
                 "message exceeds the negotiated chunk count",
+            ));
+        }
+        self.pending_bytes += chunk.data.len();
+        let limit = if self.binding.is_none() {
+            MAX_OPEN_SIZE
+        } else {
+            self.max_request_size
+        };
+        if self.pending_bytes > limit {
+            return Err(Error::decoding(
+                "message exceeds the negotiated message size",
             ));
         }
         let info = chunk.chunk_info(channel)?;
@@ -432,6 +514,28 @@ mod tests {
         )
         .unwrap();
         chunks.remove(0)
+    }
+
+    /// Audit finding R3: a frame announcing more than the limit is refused
+    /// from its header, before anything is buffered.
+    #[test]
+    fn oversized_frame_is_refused_from_its_header() {
+        let mut codec = LimitedCodec {
+            inner: TcpCodec::new(DecodingOptions::default()),
+            max_frame: 65535,
+        };
+        let mut buf = BytesMut::new();
+        buf.extend_from_slice(b"MSGF");
+        buf.extend_from_slice(&(1u32 << 30).to_le_bytes());
+        assert!(codec.decode(&mut buf).is_err());
+
+        let mut small = BytesMut::new();
+        small.extend_from_slice(b"MSGF");
+        small.extend_from_slice(&100u32.to_le_bytes());
+        assert!(
+            codec.decode(&mut small).unwrap().is_none(),
+            "waits for the rest"
+        );
     }
 
     /// Audit finding R2: a renewal may not switch policy or certificate.

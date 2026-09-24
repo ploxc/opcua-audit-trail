@@ -202,6 +202,20 @@ pub struct TargetConfig {
     /// authenticated, so this is the defence against a stripped endpoint list.
     #[serde(default)]
     pub min_security: MinSecurity,
+    /// Most client connections at once, and per client address. Every
+    /// connection can open a channel on the PLC, which allows only a few.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    #[serde(default = "default_max_connections_per_address")]
+    pub max_connections_per_address: usize,
+}
+
+fn default_max_connections() -> usize {
+    50
+}
+
+fn default_max_connections_per_address() -> usize {
+    10
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -312,6 +326,9 @@ impl Config {
             }
             if t.discovery_interval_secs == 0 {
                 bail!("target '{}': discovery_interval_secs must be > 0", t.name);
+            }
+            if t.max_connections == 0 || t.max_connections_per_address == 0 {
+                bail!("target '{}': connection limits must be > 0", t.name);
             }
         }
         Ok(())

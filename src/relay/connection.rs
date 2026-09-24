@@ -45,7 +45,9 @@ use super::endpoints::{self, gateway_endpoints, matching_upstream};
 use super::transport::{ChannelBinding, Downstream, PollResult, Request};
 use super::upstream::{Upstream, UpstreamError};
 use super::{ClientInfo, RelayTarget, SessionEntry};
-use crate::audit::event::{AuditEntry, AuditEvent, ClientContext, UserIdentity};
+use crate::audit::event::{
+    clip, AuditEntry, AuditEvent, ClientContext, UserIdentity, MAX_NAME, MAX_TEXT,
+};
 use crate::config::FailMode;
 
 /// Upper bound for secure channel token lifetimes granted to clients.
@@ -775,16 +777,14 @@ async fn create_session(ctx: Ctx, request: Box<CreateSessionRequest>) -> Respons
         }
     }
 
-    let session_name = if request.session_name.is_empty() {
-        request
-            .client_description
-            .application_name
-            .text
-            .as_ref()
-            .to_string()
-    } else {
-        request.session_name.as_ref().to_string()
-    };
+    let session_name = clip(
+        if request.session_name.is_empty() {
+            request.client_description.application_name.text.as_ref()
+        } else {
+            request.session_name.as_ref()
+        },
+        MAX_NAME,
+    );
     let client_nonce = random::byte_string(NONCE_LENGTH);
     let upstream_request = CreateSessionRequest {
         request_header: request.request_header.clone(),
@@ -874,21 +874,14 @@ async fn create_session(ctx: Ctx, request: Box<CreateSessionRequest>) -> Respons
     let server_nonce = random::byte_string(NONCE_LENGTH);
 
     let client = ClientContext {
-        application_uri: Some(
-            request
-                .client_description
-                .application_uri
-                .as_ref()
-                .to_string(),
-        ),
-        application_name: Some(
-            request
-                .client_description
-                .application_name
-                .text
-                .as_ref()
-                .to_string(),
-        ),
+        application_uri: Some(clip(
+            request.client_description.application_uri.as_ref(),
+            MAX_TEXT,
+        )),
+        application_name: Some(clip(
+            request.client_description.application_name.text.as_ref(),
+            MAX_NAME,
+        )),
         session_id: Some(upstream.session_id.to_string()),
         ..ctx.client.clone()
     };
@@ -988,7 +981,7 @@ fn translate_identity(
     }
     if let Some(t) = token.inner_as::<UserNameIdentityToken>() {
         let user = UserIdentity::UserName {
-            name: t.user_name.as_ref().to_string(),
+            name: clip(t.user_name.as_ref(), MAX_NAME),
         };
         let fail = |status: StatusCode| (status, user.clone());
         let password = decrypt_password(
@@ -1024,7 +1017,7 @@ fn translate_identity(
         // Signed with the user's private key: cannot be relayed.
         let user = X509::from_byte_string(&t.certificate_data)
             .map(|c| UserIdentity::Certificate {
-                subject: c.subject_name(),
+                subject: clip(&c.subject_name(), MAX_TEXT),
                 thumbprint: c.thumbprint().as_hex_string(),
             })
             .unwrap_or(UserIdentity::Certificate {
