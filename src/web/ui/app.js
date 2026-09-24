@@ -604,8 +604,7 @@ function auditView() {
     <form class="card filters" data-form="audit-filter">
       <div><label>Target</label><select name="target"><option value="">All</option>${targets.map((t) => html`<option ${new Html(f.target === t.name ? "selected" : "")}>${t.name}</option>`)}</select></div>
       <div><label>Type</label><select name="kinds"><option value="">All</option>${EVENT_GROUPS.map(([k, label, kinds]) => html`<option value="${kinds.join(",")}" ${flag(f.kinds === kinds.join(","), "selected")}>${label}</option>`)}</select></div>
-      <div><label>Event</label><input name="kind" list="event-kinds" autocomplete="off" value="${EVENT_LABELS[f.kind] || f.kind || ""}" placeholder="Any, type to search">
-        <datalist id="event-kinds">${eventsByLabel().map(([, v]) => html`<option value="${v}">`)}</datalist></div>
+      <div><label>Event</label><select name="kind"><option value="">All</option>${eventsByLabel().map(([k, v]) => html`<option value="${k}" ${flag(f.kind === k, "selected")}>${v}</option>`)}</select></div>
       <div><label>User</label><input name="user" value="${f.user || ""}" placeholder="part of the name"></div>
       <div><label>Node</label><input name="node_id" value="${f.node_id || ""}" placeholder="part of the id or name"></div>
       <div><label>From</label><input type="datetime-local" name="since" value="${f.since || ""}"></div>
@@ -1351,11 +1350,7 @@ const forms = {
     }
   },
   async "audit-filter"(form) {
-    const f = formData(form);
-    // The event is picked by its label; an unknown text is sent as typed.
-    const label = (f.kind || "").trim().toLowerCase();
-    if (label) f.kind = Object.keys(EVENT_LABELS).find((k) => EVENT_LABELS[k].toLowerCase() === label || k === label) || f.kind.trim();
-    setFilters(f);
+    setFilters(formData(form));
     state.audit.selected = null;
     await loadAudit(); renderPage();
   },
