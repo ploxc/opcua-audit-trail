@@ -6,6 +6,19 @@
 //! same `request_handle`, so the trail can be queried per node.
 
 use chrono::{DateTime, Utc};
+
+/// Shortens text a client chose before it goes into the audit trail, so
+/// nobody can fill the disk with a few huge requests.
+pub fn clip(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        None => text.to_string(),
+        Some((cut, _)) => format!("{}… ({} characters)", &text[..cut], text.chars().count()),
+    }
+}
+
+/// Limits for [`clip`].
+pub const MAX_NAME: usize = 256;
+pub const MAX_TEXT: usize = 1024;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +116,11 @@ pub enum AuditEvent {
     UiLoginFailed {
         user: String,
     },
+    /// Discovery of a server that is not (yet) a target, from the web UI.
+    Discovery {
+        by: String,
+        endpoint_url: String,
+    },
     /// Records that audit records up to and including `last_seq` were deleted by
     /// retention. `last_hash` is the hash of that record, so the remaining chain
     /// stays verifiable from this point on.
@@ -115,6 +133,27 @@ pub enum AuditEvent {
     EventsLost {
         count: u64,
     },
+    /// At start, the newest records were missing: the trail had reached
+    /// `expected_seq` but ends at `found_seq`. The chain continues after
+    /// `expected_seq`, so `verify` keeps reporting the gap.
+    TrailTruncated {
+        expected_seq: i64,
+        found_seq: i64,
+    },
+    /// An exporter found records missing between what it delivered last and
+    /// what the trail holds now (pruned before export, or the database was
+    /// replaced). Delivery resumes at `next_seq`.
+    ExportGap {
+        destination: String,
+        after_seq: i64,
+        next_seq: i64,
+        reason: String,
+    },
+    /// The wall clock moved differently from the time that really passed
+    /// (by `seconds`, positive = forward). Retention skips that round.
+    ClockJumped {
+        seconds: i64,
+    },
 
     // Upstream server
     UpstreamAvailable {
@@ -125,9 +164,23 @@ pub enum AuditEvent {
         endpoint_url: String,
         reason: String,
     },
+    /// The security the upstream server offers changed (policy, mode,
+    /// certificate or login types). The gateway follows it, so this also
+    /// changes what clients are offered.
+    UpstreamEndpointsChanged {
+        endpoint_url: String,
+        before: Vec<String>,
+        after: Vec<String>,
+    },
 
     // Client connections and sessions
     ClientConnected,
+    /// Connections refused because a limit was reached, summed per address.
+    ConnectionsRefused {
+        remote_addr: String,
+        count: u64,
+        reason: String,
+    },
     ClientDisconnected {
         reason: String,
     },
@@ -157,6 +210,9 @@ pub enum AuditEvent {
         request_handle: u32,
         service: String,
         node_ids: Vec<String>,
+        /// Per node: what is about to be written or called with.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<serde_json::Value>,
     },
     Write {
         request_handle: u32,
@@ -169,6 +225,14 @@ pub enum AuditEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         old_value: Option<AuditValue>,
         new_value: AuditValue,
+        /// Status code, source and server timestamp written along with the
+        /// value, when the client set them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        written_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_timestamp: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_timestamp: Option<String>,
         status: String,
     },
     Call {
@@ -192,6 +256,12 @@ pub enum AuditEvent {
         node_id: String,
         status: String,
     },
+    /// A client took over subscriptions, possibly those of another session.
+    SubscriptionsTransferred {
+        request_handle: u32,
+        subscription_ids: Vec<u32>,
+        status: String,
+    },
 }
 
 impl AuditEvent {
@@ -203,11 +273,17 @@ impl AuditEvent {
             AuditEvent::ConfigChanged { .. } => "config_changed",
             AuditEvent::UiLogin { .. } => "ui_login",
             AuditEvent::UiLoginFailed { .. } => "ui_login_failed",
+            AuditEvent::Discovery { .. } => "discovery",
             AuditEvent::RetentionPruned { .. } => "retention_pruned",
             AuditEvent::EventsLost { .. } => "events_lost",
+            AuditEvent::TrailTruncated { .. } => "trail_truncated",
+            AuditEvent::ClockJumped { .. } => "clock_jumped",
+            AuditEvent::ExportGap { .. } => "export_gap",
             AuditEvent::UpstreamAvailable { .. } => "upstream_available",
             AuditEvent::UpstreamUnavailable { .. } => "upstream_unavailable",
+            AuditEvent::UpstreamEndpointsChanged { .. } => "upstream_endpoints_changed",
             AuditEvent::ClientConnected => "client_connected",
+            AuditEvent::ConnectionsRefused { .. } => "connections_refused",
             AuditEvent::ClientDisconnected { .. } => "client_disconnected",
             AuditEvent::SecureChannelOpened { .. } => "secure_channel_opened",
             AuditEvent::SessionCreated { .. } => "session_created",
@@ -220,6 +296,7 @@ impl AuditEvent {
             AuditEvent::Call { .. } => "call",
             AuditEvent::HistoryUpdate { .. } => "history_update",
             AuditEvent::NodeManagement { .. } => "node_management",
+            AuditEvent::SubscriptionsTransferred { .. } => "subscriptions_transferred",
         }
     }
 
@@ -255,6 +332,9 @@ mod tests {
                     data_type: "Double".into(),
                     value: 12.5.into(),
                 },
+                written_status: None,
+                source_timestamp: None,
+                server_timestamp: None,
                 status: "Good".into(),
             },
         ];

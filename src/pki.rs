@@ -22,6 +22,57 @@ use crate::config::GatewayConfig;
 /// tedious to update, so this errs on the long side.
 const CERTIFICATE_DAYS: u32 = 5 * 365;
 const KEY_SIZE: u32 = 2048;
+/// Most certificates kept in `rejected/`: every unknown client adds one.
+const MAX_REJECTED: usize = 200;
+
+/// Whether a certificate's common name is safe as the file name async-opcua
+/// derives from it (it only removes `/`; on Windows `\` and `:` would
+/// leave the PKI directory).
+pub fn safe_file_name(cert: &X509) -> bool {
+    let name = cert.common_name().unwrap_or_default();
+    !name.chars().any(|c| {
+        c.is_control()
+            || (cfg!(windows) && matches!(c, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+    })
+}
+
+/// Deletes the oldest files of `rejected/` beyond [`MAX_REJECTED`].
+pub fn cap_rejected(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            e.path().is_file().then(|| (modified, e.path()))
+        })
+        .collect();
+    if files.len() <= MAX_REJECTED {
+        return;
+    }
+    files.sort();
+    for (_, path) in &files[..files.len() - MAX_REJECTED] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Makes the private key readable by the service only.
+fn protect_private_key(store: &CertificateStore) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let key = store.own_private_key_path();
+        if let Some(dir) = key.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+        if key.exists() {
+            let _ = std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = store;
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CertificateInfo {
@@ -60,15 +111,21 @@ impl Pki {
     /// a self-signed one when none exists. Returns the certificate and whether it
     /// was newly created.
     pub fn ensure_own_certificate(&self, gateway: &GatewayConfig) -> anyhow::Result<(X509, bool)> {
-        if let (Ok(cert), Ok(_)) = (self.store.read_own_cert(), self.store.read_own_pkey()) {
-            return Ok((cert, false));
-        }
-        let args = certificate_request(gateway);
-        let (cert, _key) = self
-            .store
-            .create_and_store_application_instance_cert(&args, false)
-            .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
-        Ok((cert, true))
+        // async-opcua writes the key with the default mode; also fixes keys
+        // written by earlier versions.
+        let result =
+            if let (Ok(cert), Ok(_)) = (self.store.read_own_cert(), self.store.read_own_pkey()) {
+                (cert, false)
+            } else {
+                let args = certificate_request(gateway);
+                let (cert, _key) = self
+                    .store
+                    .create_and_store_application_instance_cert(&args, false)
+                    .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
+                (cert, true)
+            };
+        protect_private_key(&self.store);
+        Ok(result)
     }
 
     pub fn own_certificate(&self) -> anyhow::Result<X509> {
@@ -83,6 +140,13 @@ impl Pki {
         list_dir(&self.store.rejected_certs_dir())
     }
 
+    /// Number of rejected certificates, without parsing them.
+    pub fn rejected_count(&self) -> usize {
+        std::fs::read_dir(self.store.rejected_certs_dir())
+            .map(|d| d.flatten().filter(|e| e.path().is_file()).count())
+            .unwrap_or(0)
+    }
+
     pub fn own_certificate_der(&self) -> anyhow::Result<Vec<u8>> {
         let path = self.store.own_certificate_path();
         std::fs::read(&path).with_context(|| format!("reading {}", path.display()))
@@ -90,6 +154,9 @@ impl Pki {
 
     /// Adds a certificate to the trust list (and removes it from rejected).
     pub fn trust(&self, cert: &X509) -> anyhow::Result<CertificateInfo> {
+        if !safe_file_name(cert) {
+            bail!("the certificate's common name cannot be used as a file name");
+        }
         let name = CertificateStore::cert_file_name(cert);
         let der = cert
             .to_der()
@@ -142,12 +209,18 @@ impl Pki {
             .store
             .create_and_store_application_instance_cert(&certificate_request(gateway), true)
             .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
+        protect_private_key(&self.store);
         Ok(cert)
     }
 
     /// Installs a certificate (DER or PEM) and its private key (PEM), e.g. one
     /// issued by a plant CA. Refuses a key that does not belong to the certificate.
-    pub fn import_own(&self, cert: &[u8], key_pem: &[u8]) -> anyhow::Result<X509> {
+    pub fn import_own(
+        &self,
+        cert: &[u8],
+        key_pem: &[u8],
+        gateway: &GatewayConfig,
+    ) -> anyhow::Result<X509> {
         let cert = X509::from_der(cert)
             .or_else(|_| X509::from_pem(cert))
             .map_err(|_| anyhow!("the certificate is neither DER nor PEM"))?;
@@ -168,23 +241,39 @@ impl Pki {
         {
             bail!("the private key does not belong to the certificate");
         }
+        // Clients reject a certificate that is not valid now or names
+        // another application.
+        cert.is_time_valid(&chrono::Utc::now())
+            .map_err(|_| anyhow!("the certificate is expired or not yet valid"))?;
+        cert.is_application_uri_valid(&gateway.application_uri())
+            .map_err(|_| {
+                anyhow!(
+                    "the certificate's subjectAltName must contain the application URI {}",
+                    gateway.application_uri()
+                )
+            })?;
         self.backup_own()?;
         let der = cert
             .to_der()
             .map_err(|e| anyhow!("encoding certificate: {e}"))?;
-        write_file(&self.store.own_certificate_path(), &der)?;
-        write_file(&self.store.own_private_key_path(), key_pem)?;
+        // Key first: each file is replaced in one step, and a key the old
+        // certificate does not match is only a moment's state.
+        crate::fsutil::write_atomic(&self.store.own_private_key_path(), key_pem, Some(0o600))?;
+        crate::fsutil::write_atomic(&self.store.own_certificate_path(), &der, Some(0o644))?;
+        protect_private_key(&self.store);
         Ok(cert)
     }
 
+    /// Keeps the current pair as `<file>.<timestamp>.bak`.
     fn backup_own(&self) -> anyhow::Result<()> {
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         for path in [
             self.store.own_certificate_path(),
             self.store.own_private_key_path(),
         ] {
             if path.exists() {
                 let mut bak = path.clone().into_os_string();
-                bak.push(".bak");
+                bak.push(format!(".{stamp}.bak"));
                 std::fs::copy(&path, PathBuf::from(bak))?;
             }
         }
@@ -323,9 +412,29 @@ mod tests {
         };
         let (cert, key) = make("a");
         let (_, other_key) = make("b");
-        let err = pki.import_own(&cert, &other_key).unwrap_err();
+        let gateway = GatewayConfig {
+            application_uri: Some("urn:OPCUADemo".into()),
+            ..GatewayConfig::default()
+        };
+        let err = pki.import_own(&cert, &other_key, &gateway).unwrap_err();
         assert!(err.to_string().contains("does not belong"));
-        let imported = pki.import_own(&cert, &key).unwrap();
+        // A certificate for another application is refused.
+        let other_app = GatewayConfig {
+            application_uri: Some("urn:someone-else".into()),
+            ..GatewayConfig::default()
+        };
+        let err = pki.import_own(&cert, &key, &other_app).unwrap_err();
+        assert!(err.to_string().contains("application URI"), "{err}");
+        let imported = pki.import_own(&cert, &key, &gateway).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(pki.store.own_private_key_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the key is private");
+        }
         assert_eq!(
             pki.own_certificate().unwrap().thumbprint().as_hex_string(),
             imported.thumbprint().as_hex_string()

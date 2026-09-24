@@ -36,6 +36,8 @@ const MAX_BROWSE_PAGES: usize = 20;
 
 struct Entry {
     session: Arc<Session>,
+    /// The session's event loop; once it ends, the session is dead.
+    event_loop: tokio::task::JoinHandle<opcua::types::StatusCode>,
     last_used: Instant,
     ui_user: String,
     target: String,
@@ -47,11 +49,42 @@ pub struct BrowserSessions {
 }
 
 impl BrowserSessions {
+    /// The user's live session on the target. A session whose connection
+    /// ended (PLC restart, network) is dropped, so the UI can reconnect.
     fn get(&self, user: &str, target: &str) -> Option<Arc<Session>> {
+        let key = (user.to_string(), target.to_string());
         let mut map = self.map.lock();
-        let entry = map.get_mut(&(user.to_string(), target.to_string()))?;
+        let entry = map.get_mut(&key)?;
+        if entry.event_loop.is_finished() {
+            map.remove(&key);
+            return None;
+        }
         entry.last_used = Instant::now();
         Some(entry.session.clone())
+    }
+
+    /// Ends every browser session of a UI user (deleted, lost the role).
+    pub async fn close_user(&self, state: &AppState, user: &str) {
+        let entries: Vec<Entry> = {
+            let mut map = self.map.lock();
+            let keys: Vec<_> = map.keys().filter(|(u, _)| u == user).cloned().collect();
+            keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+        };
+        for entry in entries {
+            close(state, entry).await;
+        }
+    }
+
+    /// Ends every browser session on a target (removed or changed).
+    pub async fn close_target(&self, state: &AppState, target: &str) {
+        let entries: Vec<Entry> = {
+            let mut map = self.map.lock();
+            let keys: Vec<_> = map.keys().filter(|(_, t)| t == target).cloned().collect();
+            keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+        };
+        for entry in entries {
+            close(state, entry).await;
+        }
     }
 
     fn take(&self, user: &str, target: &str) -> Option<Entry> {
@@ -114,7 +147,10 @@ pub struct ConnectResponse {
     user: String,
 }
 
-/// The most secure endpoint that supports the requested login type.
+/// The most secure endpoint that supports the requested login type, by the
+/// gateway's own ranking (the server's `security_level` comes from an
+/// unauthenticated answer). A password is never sent in the clear: a user
+/// name login needs a secured channel or an encrypting token policy.
 fn pick_endpoint(
     endpoints: &[EndpointDescription],
     token: UserTokenType,
@@ -125,13 +161,21 @@ fn pick_endpoint(
             let policy = SecurityPolicy::from_uri(e.security_policy_uri.as_ref());
             policy != SecurityPolicy::Unknown
                 && policy.is_supported()
-                && e.user_identity_tokens
-                    .iter()
-                    .flatten()
-                    .any(|t| t.token_type == token && is_relayable_token(t))
+                && e.user_identity_tokens.iter().flatten().any(|t| {
+                    t.token_type == token
+                        && is_relayable_token(t)
+                        && (token != UserTokenType::UserName
+                            || policy != SecurityPolicy::None
+                            || !matches!(
+                                SecurityPolicy::from_uri(t.security_policy_uri.as_ref()),
+                                SecurityPolicy::None | SecurityPolicy::Unknown
+                            ))
+                })
         })
         .collect();
-    candidates.sort_by_key(|e| std::cmp::Reverse(e.security_level));
+    candidates.sort_by_key(|e| {
+        std::cmp::Reverse((crate::relay::endpoints::security_of(e), e.security_level))
+    });
     candidates.first().map(|e| (*e).clone())
 }
 
@@ -172,17 +216,29 @@ pub async fn connect(
     })?;
     let mut endpoint = pick_endpoint(&endpoints, token_type).ok_or_else(|| {
         ApiError::bad_request(anyhow::anyhow!(
-            "the target offers no endpoint for this kind of login"
+            "the target offers no endpoint for this kind of login (a password is only sent \
+             over a secured channel or encrypted)"
         ))
     })?;
+    // Trust is checked on connect, but not the validity dates (see below).
+    if SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref()) != SecurityPolicy::None {
+        let cert = opcua::crypto::X509::from_byte_string(&endpoint.server_certificate)
+            .map_err(|e| ApiError::bad_request(anyhow::anyhow!("server certificate: {e}")))?;
+        if cert.is_time_valid(&chrono::Utc::now()).is_err() {
+            return Err(ApiError::bad_request(anyhow::anyhow!(
+                "the target's certificate is expired or not yet valid"
+            )));
+        }
+    }
     // Connect to the configured URL, not the (possibly unreachable) host name
     // the server advertises.
     endpoint.endpoint_url = relay.config.endpoint_url.as_str().into();
 
     let pki_dir = s.config.gateway.pki_dir.clone();
     let mut store = CertificateStore::new(&pki_dir);
-    // Trust is still checked; only host name and URI checks are skipped, as
-    // PLC certificates often lack the address they are reached by.
+    // Trust is still checked. Skipped are the host name and application URI
+    // checks (PLC certificates often lack the address they are reached by)
+    // and, by async-opcua, the validity dates, which are checked above.
     store.set_skip_verify_certs(true);
     let client = ClientBuilder::new()
         .application_name(s.config.gateway.application_name.clone())
@@ -222,15 +278,20 @@ pub async fn connect(
     .target(target_name.clone())
     .client(browser_client(&user.username));
     let _ = s.audit.record_committed(entry).await;
-    s.browser.map.lock().insert(
+    let replaced = s.browser.map.lock().insert(
         (user.username.clone(), target_name.clone()),
         Entry {
             session,
+            event_loop: handle,
             last_used: Instant::now(),
             ui_user: user.username.clone(),
             target: target_name,
         },
     );
+    // Two connects at once: close the session that lost, not leak it.
+    if let Some(old) = replaced {
+        close(&s, old).await;
+    }
     let policy = SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref());
     Ok(Json(ConnectResponse {
         security_policy: policy.to_str().into(),
@@ -277,6 +338,44 @@ pub struct BrowseItem {
     browse_name: String,
     display_name: String,
     node_class: String,
+    /// Whether the node has children the tree can unfold.
+    has_children: bool,
+}
+
+/// Hierarchical references followed by the tree.
+fn children_of(node: NodeId) -> BrowseDescription {
+    BrowseDescription {
+        node_id: node,
+        browse_direction: BrowseDirection::Forward,
+        reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+        include_subtypes: true,
+        node_class_mask: NodeClassMask::empty().bits(),
+        result_mask: BrowseResultMask::None as u32,
+    }
+}
+
+/// Finds the nodes without children, with one browse (one reference per
+/// node) per batch of nodes. On error, every node keeps its arrow.
+async fn mark_leaves(session: &Session, items: &mut [(NodeId, BrowseItem)]) {
+    for batch in items.chunks_mut(100) {
+        let descriptions: Vec<_> = batch.iter().map(|(n, _)| children_of(n.clone())).collect();
+        let Ok(results) = session.browse(&descriptions, 1, None).await else {
+            return;
+        };
+        let mut continuation_points = Vec::new();
+        for ((_, item), result) in batch.iter_mut().zip(&results) {
+            if result.status_code.is_good() {
+                item.has_children = result.references.as_ref().is_some_and(|r| !r.is_empty());
+            }
+            if !result.continuation_point.is_null_or_empty() {
+                continuation_points.push(result.continuation_point.clone());
+            }
+        }
+        // Servers keep few continuation points: release them right away.
+        if !continuation_points.is_empty() {
+            let _ = session.browse_next(true, &continuation_points).await;
+        }
+    }
 }
 
 pub async fn browse(
@@ -291,12 +390,8 @@ pub async fn browse(
         None => opcua::types::ObjectId::ObjectsFolder.into(),
     };
     let description = BrowseDescription {
-        node_id: node,
-        browse_direction: BrowseDirection::Forward,
-        reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
-        include_subtypes: true,
-        node_class_mask: NodeClassMask::empty().bits(),
         result_mask: BrowseResultMask::All as u32,
+        ..children_of(node)
     };
     let upstream = |e: opcua::types::Error| ApiError(StatusCode::BAD_GATEWAY, e.to_string());
     let mut results = session
@@ -312,11 +407,17 @@ pub async fn browse(
                 result.status_code.to_string(),
             ));
         }
-        items.extend(result.references.iter().flatten().map(|r| BrowseItem {
-            node_id: r.node_id.node_id.to_string(),
-            browse_name: r.browse_name.to_string(),
-            display_name: r.display_name.text.as_ref().to_string(),
-            node_class: format!("{:?}", r.node_class),
+        items.extend(result.references.iter().flatten().map(|r| {
+            (
+                r.node_id.node_id.clone(),
+                BrowseItem {
+                    node_id: r.node_id.node_id.to_string(),
+                    browse_name: r.browse_name.to_string(),
+                    display_name: r.display_name.text.as_ref().to_string(),
+                    node_class: format!("{:?}", r.node_class),
+                    has_children: true,
+                },
+            )
         }));
         if result.continuation_point.is_null_or_empty() {
             break;
@@ -326,7 +427,8 @@ pub async fn browse(
             .await
             .map_err(upstream)?;
     }
-    Ok(Json(items))
+    mark_leaves(&session, &mut items).await;
+    Ok(Json(items.into_iter().map(|(_, item)| item).collect()))
 }
 
 #[derive(Serialize)]

@@ -5,9 +5,16 @@
 //! text of the [`AuditEntry`]. Changing, inserting or deleting a record breaks
 //! the chain from that point on, which [`verify`] detects.
 //!
-//! Retention deletes the oldest records and then appends a
-//! [`AuditEvent::RetentionPruned`] record naming the last deleted sequence
+//! Retention deletes the oldest records and, in the same transaction, appends
+//! a [`AuditEvent::RetentionPruned`] record naming the last deleted sequence
 //! number and hash, so the remaining chain stays verifiable.
+//!
+//! What the chain proves: records between the first and the last one were
+//! not changed, removed or reordered by someone who did not recompute the
+//! hashes. It cannot prove that the newest records were not cut off, or that
+//! the whole chain was not rebuilt: that needs an anchor outside the
+//! database, such as the hashes the exporters ship, or a head noted down and
+//! passed to `verify --expect`.
 
 use std::path::Path;
 
@@ -39,7 +46,18 @@ CREATE INDEX IF NOT EXISTS audit_ts ON audit (ts);
 CREATE INDEX IF NOT EXISTS audit_target_ts ON audit (target, ts);
 CREATE INDEX IF NOT EXISTS audit_node ON audit (node_id);
 CREATE INDEX IF NOT EXISTS audit_user ON audit (user);
+-- The newest record ever written, updated with every append. If the audit
+-- table ends before it, records were removed.
+CREATE TABLE IF NOT EXISTS chain_head (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    seq  INTEGER NOT NULL,
+    hash TEXT NOT NULL
+);
 "#;
+
+/// Most records one retention run deletes, so the writer is not blocked
+/// for long; the next run continues.
+pub const MAX_PRUNE: i64 = 20_000;
 
 fn record_hash(prev_hash: &str, seq: i64, body: &str) -> String {
     let mut hasher = Sha256::new();
@@ -58,7 +76,9 @@ fn ts_column(ts: &DateTime<Utc>) -> String {
 
 fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // FULL: a committed record survives a power cut. Fail-closed forwards a
+    // change as soon as its intent is committed.
+    conn.pragma_update(None, "synchronous", "FULL")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
@@ -80,88 +100,187 @@ impl AuditStore {
             .with_context(|| format!("opening audit database {}", path.display()))?;
         configure(&conn)?;
         conn.execute_batch(SCHEMA)?;
-        let (last_seq, last_hash) = conn
+        let table_head: Option<(i64, String)> = conn
             .query_row(
                 "SELECT seq, hash FROM audit ORDER BY seq DESC LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?
-            .unwrap_or((0, GENESIS_HASH.to_string()));
-        Ok(Self {
+            .optional()?;
+        let written: Option<(i64, String)> = conn
+            .query_row("SELECT seq, hash FROM chain_head WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        let found = table_head.as_ref().map_or(0, |(seq, _)| *seq);
+        let (last_seq, last_hash, truncated) = match (table_head, written) {
+            // Sequence numbers are never reused: continue after the newest
+            // record ever written, even if it is gone.
+            (_, Some((seq, hash))) if found < seq => (seq, hash, true),
+            (Some((seq, hash)), _) => (seq, hash, false),
+            (None, _) => (0, GENESIS_HASH.to_string(), false),
+        };
+        let mut store = Self {
             conn,
             last_seq,
             last_hash,
-        })
+        };
+        if truncated {
+            tracing::error!(
+                "the audit trail ends at record {found}, but record {last_seq} was written: \
+                 the newest records are missing"
+            );
+            store.append(&[AuditEntry::new(AuditEvent::TrailTruncated {
+                expected_seq: last_seq,
+                found_seq: found,
+            })])?;
+        }
+        Ok(store)
     }
 
     /// Appends entries in one transaction and returns their sequence numbers.
     /// On error nothing is written and the chain head is unchanged.
     pub fn append(&mut self, entries: &[AuditEntry]) -> anyhow::Result<Vec<i64>> {
         let tx = self.conn.transaction()?;
-        let mut seq = self.last_seq;
-        let mut hash = self.last_hash.clone();
-        let mut seqs = Vec::with_capacity(entries.len());
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO audit (seq, ts, target, kind, remote_addr, application_uri, user,
-                                    node_id, body, prev_hash, hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            )?;
-            for entry in entries {
-                seq += 1;
-                let body = serde_json::to_string(entry)?;
-                let new_hash = record_hash(&hash, seq, &body);
-                let client = entry.client.as_ref();
-                stmt.execute(params![
-                    seq,
-                    ts_column(&entry.ts),
-                    entry.target,
-                    entry.event.kind(),
-                    client.map(|c| &c.remote_addr),
-                    client.and_then(|c| c.application_uri.as_ref()),
-                    client.and_then(|c| c.user.as_ref()).map(|u| u.label()),
-                    entry.event.node_id(),
-                    body,
-                    hash,
-                    new_hash,
-                ])?;
-                hash = new_hash;
-                seqs.push(seq);
-            }
-        }
+        let (seqs, seq, hash) = insert(&tx, entries, self.last_seq, &self.last_hash)?;
         tx.commit()?;
         self.last_seq = seq;
         self.last_hash = hash;
         Ok(seqs)
     }
 
-    /// Deletes records older than `cutoff` and appends a `RetentionPruned`
-    /// record. Returns the number of deleted records.
+    /// Deletes records older than `cutoff` and, in the same transaction,
+    /// appends a `RetentionPruned` record. Returns the number deleted, at
+    /// most [`MAX_PRUNE`].
+    ///
+    /// Only the oldest records in one piece are deleted, up to the first
+    /// record at or after `cutoff`, and never the newest record: a record
+    /// with a wrong (too old) timestamp between newer ones keeps them all.
+    /// Nothing is deleted while the newest record is dated in the future,
+    /// i.e. the clock went back.
     pub fn prune_before(&mut self, cutoff: DateTime<Utc>) -> anyhow::Result<u64> {
-        let last: Option<(i64, String)> = self
+        let head: Option<(i64, String)> = self
             .conn
             .query_row(
-                "SELECT seq, hash FROM audit WHERE ts < ?1 ORDER BY seq DESC LIMIT 1",
-                [ts_column(&cutoff)],
+                "SELECT seq, ts FROM audit ORDER BY seq DESC LIMIT 1",
+                [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some((last_seq, last_hash)) = last else {
+        let Some((head_seq, head_ts)) = head else {
             return Ok(0);
         };
-        // The chain head may be deleted too: the prune record links to it
-        // through the in-memory `last_hash`.
-        let deleted = self
+        if head_ts > ts_column(&(Utc::now() + chrono::Duration::minutes(5))) {
+            tracing::warn!("retention skipped: the newest audit record is dated after now");
+            return Ok(0);
+        }
+        let first_seq: i64 = self
             .conn
-            .execute("DELETE FROM audit WHERE seq <= ?1", [last_seq])? as u64;
-        self.append(&[AuditEntry::new(AuditEvent::RetentionPruned {
-            deleted,
-            last_seq,
-            last_hash,
-        })])?;
+            .query_row("SELECT MIN(seq) FROM audit", [], |r| r.get(0))?;
+        let first_kept: Option<i64> = self.conn.query_row(
+            "SELECT MIN(seq) FROM audit WHERE ts >= ?1",
+            [ts_column(&cutoff)],
+            |r| r.get(0),
+        )?;
+        let last_seq =
+            (first_kept.unwrap_or(head_seq).min(head_seq) - 1).min(first_seq + MAX_PRUNE - 1);
+        if last_seq < first_seq {
+            return Ok(0);
+        }
+        let last_hash: String =
+            self.conn
+                .query_row("SELECT hash FROM audit WHERE seq = ?1", [last_seq], |r| {
+                    r.get(0)
+                })?;
+        let tx = self.conn.transaction()?;
+        let deleted = tx.execute("DELETE FROM audit WHERE seq <= ?1", [last_seq])? as u64;
+        let (_, seq, hash) = insert(
+            &tx,
+            &[AuditEntry::new(AuditEvent::RetentionPruned {
+                deleted,
+                last_seq,
+                last_hash,
+            })],
+            self.last_seq,
+            &self.last_hash,
+        )?;
+        tx.commit()?;
+        self.last_seq = seq;
+        self.last_hash = hash;
         Ok(deleted)
     }
+}
+
+/// The indexed columns of a record, derived from its entry. `append` writes
+/// them and `verify` checks them with the same function.
+/// ts, target, kind, remote_addr, application_uri, user, node_id.
+type Columns = (
+    String,
+    Option<String>,
+    &'static str,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn columns(entry: &AuditEntry) -> Columns {
+    let client = entry.client.as_ref();
+    (
+        ts_column(&entry.ts),
+        entry.target.clone(),
+        entry.event.kind(),
+        client.map(|c| c.remote_addr.clone()),
+        client.and_then(|c| c.application_uri.clone()),
+        client.and_then(|c| c.user.as_ref()).map(|u| u.label()),
+        entry.event.node_id().map(str::to_string),
+    )
+}
+
+/// Inserts entries after (`seq`, `hash`) and moves the chain head along.
+/// Returns their sequence numbers and the new head.
+fn insert(
+    tx: &rusqlite::Transaction,
+    entries: &[AuditEntry],
+    mut seq: i64,
+    hash: &str,
+) -> anyhow::Result<(Vec<i64>, i64, String)> {
+    let mut hash = hash.to_string();
+    let mut seqs = Vec::with_capacity(entries.len());
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO audit (seq, ts, target, kind, remote_addr, application_uri, user,
+                                node_id, body, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )?;
+        for entry in entries {
+            seq += 1;
+            let body = serde_json::to_string(entry)?;
+            let new_hash = record_hash(&hash, seq, &body);
+            let (ts, target, kind, remote_addr, application_uri, user, node_id) = columns(entry);
+            stmt.execute(params![
+                seq,
+                ts,
+                target,
+                kind,
+                remote_addr,
+                application_uri,
+                user,
+                node_id,
+                body,
+                hash,
+                new_hash,
+            ])?;
+            hash = new_hash;
+            seqs.push(seq);
+        }
+    }
+    tx.execute(
+        "INSERT INTO chain_head (id, seq, hash) VALUES (1, ?1, ?2)
+         ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, hash = excluded.hash",
+        params![seq, hash],
+    )?;
+    Ok((seqs, seq, hash))
 }
 
 /// Filter for [`query`]. All fields are optional and combined with AND.
@@ -182,6 +301,7 @@ pub struct AuditQuery {
 pub struct StoredRecord {
     pub seq: i64,
     pub hash: String,
+    pub prev_hash: String,
     #[serde(flatten)]
     pub entry: AuditEntry,
 }
@@ -198,7 +318,7 @@ pub fn open_reader(path: &Path) -> anyhow::Result<Connection> {
 
 /// Newest records first.
 pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredRecord>> {
-    let mut sql = String::from("SELECT seq, hash, body FROM audit WHERE 1=1");
+    let mut sql = String::from("SELECT seq, hash, body, prev_hash FROM audit WHERE 1=1");
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut add = |clause: &str, value: Box<dyn rusqlite::ToSql>| {
         args.push(value);
@@ -234,14 +354,20 @@ pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredReco
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (seq, hash, body) = row?;
+        let (seq, hash, body, prev_hash) = row?;
         let entry = serde_json::from_str(&body)
             .with_context(|| format!("audit record {seq} has an unreadable body"))?;
-        out.push(StoredRecord { seq, hash, entry });
+        out.push(StoredRecord {
+            seq,
+            hash,
+            prev_hash,
+            entry,
+        });
     }
     Ok(out)
 }
@@ -253,21 +379,27 @@ pub fn query_after(
     limit: u32,
 ) -> anyhow::Result<Vec<StoredRecord>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT seq, hash, body FROM audit WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+        "SELECT seq, hash, body, prev_hash FROM audit WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![after_seq, limit], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
         ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (seq, hash, body) = row?;
+        let (seq, hash, body, prev_hash) = row?;
         let entry = serde_json::from_str(&body)
             .with_context(|| format!("audit record {seq} has an unreadable body"))?;
-        out.push(StoredRecord { seq, hash, entry });
+        out.push(StoredRecord {
+            seq,
+            hash,
+            prev_hash,
+            entry,
+        });
     }
     Ok(out)
 }
@@ -293,10 +425,62 @@ impl VerifyReport {
     }
 }
 
+/// A record known from outside the database (an exporter's last delivery,
+/// or a head noted down earlier): the trail must still contain it, unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Anchor {
+    pub seq: i64,
+    pub hash: String,
+    /// Where it comes from, for the error message.
+    pub source: String,
+}
+
 /// Walks the whole chain and checks every link, hash and indexed column.
+#[cfg(test)]
 pub fn verify(conn: &Connection) -> anyhow::Result<VerifyReport> {
+    verify_against(conn, &[])
+}
+
+/// [`verify`], and checks that every anchor is still in the trail.
+pub fn verify_against(conn: &Connection, anchors: &[Anchor]) -> anyhow::Result<VerifyReport> {
+    let mut report = verify_chain(conn)?;
+    if !report.ok() {
+        return Ok(report);
+    }
+    for anchor in anchors {
+        let problem = if report.last_seq.is_none_or(|last| anchor.seq > last) {
+            Some(format!(
+                "records up to {} are missing: {} had record {} (hash {})",
+                anchor.seq, anchor.source, anchor.seq, anchor.hash
+            ))
+        } else if report.first_seq.is_some_and(|first| anchor.seq < first) {
+            None // pruned by retention since
+        } else {
+            let hash: Option<String> = conn
+                .query_row("SELECT hash FROM audit WHERE seq = ?1", [anchor.seq], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            (hash.as_deref() != Some(anchor.hash.as_str())).then(|| {
+                format!(
+                    "record {} differs from {} (hash {})",
+                    anchor.seq, anchor.source, anchor.hash
+                )
+            })
+        };
+        if let Some(problem) = problem {
+            report.error = Some(problem);
+            break;
+        }
+    }
+    Ok(report)
+}
+
+fn verify_chain(conn: &Connection) -> anyhow::Result<VerifyReport> {
     let mut stmt = conn.prepare(
-        "SELECT seq, ts, kind, node_id, body, prev_hash, hash FROM audit ORDER BY seq ASC",
+        "SELECT seq, ts, kind, node_id, body, prev_hash, hash, target, remote_addr,
+                application_uri, user
+         FROM audit ORDER BY seq ASC",
     )?;
     let mut rows = stmt.query([])?;
     let mut report = VerifyReport {
@@ -318,6 +502,12 @@ pub fn verify(conn: &Connection) -> anyhow::Result<VerifyReport> {
         let body: String = row.get(4)?;
         let prev_hash: String = row.get(5)?;
         let hash: String = row.get(6)?;
+        let stored: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = (row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?);
 
         let fail = |msg: String| -> anyhow::Result<()> { bail!("record {seq}: {msg}") };
         let result: anyhow::Result<()> = (|| {
@@ -338,9 +528,11 @@ pub fn verify(conn: &Connection) -> anyhow::Result<VerifyReport> {
             }
             let entry: AuditEntry = serde_json::from_str(&body)
                 .map_err(|e| anyhow::anyhow!("record {seq}: unreadable body: {e}"))?;
-            if ts_column(&entry.ts) != ts
-                || entry.event.kind() != kind
-                || entry.event.node_id() != node_id.as_deref()
+            let (c_ts, c_target, c_kind, c_remote, c_uri, c_user, c_node) = columns(&entry);
+            if c_ts != ts
+                || c_kind != kind
+                || c_node != node_id
+                || (c_target, c_remote, c_uri, c_user) != stored
             {
                 fail("indexed columns do not match the record body".into())?;
             }
@@ -392,6 +584,9 @@ mod tests {
                 data_type: "Double".into(),
                 value: value.into(),
             },
+            written_status: None,
+            source_timestamp: None,
+            server_timestamp: None,
             status: "Good".into(),
         })
         .target("plc1")
@@ -526,5 +721,164 @@ mod tests {
         assert!(report.ok(), "{:?}", report.error);
         assert_eq!(report.first_seq, Some(3));
         assert_eq!(report.last_seq, Some(4));
+    }
+
+    fn at(ts: DateTime<Utc>, value: f64) -> AuditEntry {
+        let mut e = write_event("ns=2;s=A", value);
+        e.ts = ts;
+        e
+    }
+
+    fn seqs(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn.prepare("SELECT seq FROM audit ORDER BY seq").unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// Audit finding A2: records with a wrong, too old timestamp between
+    /// newer ones (a clock that was wrong at boot) must not take the newer
+    /// ones with them; the newest record always stays.
+    #[test]
+    fn retention_deletes_only_the_old_prefix() {
+        let (_dir, mut store, path) = store();
+        let old = Utc::now() - chrono::Duration::days(400);
+        let epoch = DateTime::from_timestamp(0, 0).unwrap();
+        store.append(&[at(old, 1.0), at(old, 2.0)]).unwrap(); // 1, 2
+        store.append(&[write_event("ns=2;s=A", 3.0)]).unwrap(); // 3: today
+        store.append(&[at(epoch, 4.0)]).unwrap(); // 4: clock not set yet
+        store.append(&[write_event("ns=2;s=A", 5.0)]).unwrap(); // 5: today
+        let deleted = store
+            .prune_before(Utc::now() - chrono::Duration::days(365))
+            .unwrap();
+        assert_eq!(deleted, 2);
+        assert_eq!(seqs(&store.conn), vec![3, 4, 5, 6]);
+        assert!(verify(&open_reader(&path).unwrap()).unwrap().ok());
+
+        // Everything older than the cutoff (clock far ahead): the newest
+        // record still stays.
+        let deleted = store
+            .prune_before(Utc::now() + chrono::Duration::days(3650))
+            .unwrap();
+        assert_eq!(deleted, 3);
+        assert_eq!(seqs(&store.conn), vec![6, 7]);
+        assert!(verify(&open_reader(&path).unwrap()).unwrap().ok());
+    }
+
+    /// Nothing is pruned while the newest record is dated in the future:
+    /// the clock went back.
+    #[test]
+    fn retention_waits_when_the_clock_went_back() {
+        let (_dir, mut store, _path) = store();
+        let old = Utc::now() - chrono::Duration::days(400);
+        store.append(&[at(old, 1.0)]).unwrap();
+        store
+            .append(&[at(Utc::now() + chrono::Duration::days(30), 2.0)])
+            .unwrap();
+        let deleted = store
+            .prune_before(Utc::now() - chrono::Duration::days(365))
+            .unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    /// Audit finding A3: committed records survive a power cut.
+    #[test]
+    fn commits_are_durable() {
+        let (_dir, store, _path) = store();
+        let sync: i64 = store
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 2, "FULL");
+    }
+
+    /// Audit finding A5: every indexed column must match the record body.
+    #[test]
+    fn detects_tampered_user_column() {
+        let (_dir, mut store, path) = store();
+        store.append(&[write_event("ns=2;s=A", 1.0)]).unwrap();
+        store
+            .conn
+            .execute("UPDATE audit SET user = 'someone_else'", [])
+            .unwrap();
+        let report = verify(&open_reader(&path).unwrap()).unwrap();
+        assert!(report.error.unwrap().contains("indexed columns"));
+    }
+
+    /// Audit finding N9: when the newest records are gone, numbering
+    /// continues after them (no sequence number is used twice), the loss is
+    /// recorded and `verify` keeps reporting it.
+    #[test]
+    fn a_cut_off_tail_is_noticed_at_start() {
+        let (_dir, mut store, path) = store();
+        for i in 0..5 {
+            store
+                .append(&[write_event("ns=2;s=A", f64::from(i))])
+                .unwrap();
+        }
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DELETE FROM audit WHERE seq > 3", []).unwrap();
+        drop(conn);
+
+        let mut store = AuditStore::open(&path).unwrap();
+        assert_eq!(seqs(&store.conn), vec![1, 2, 3, 6]);
+        let kind: String = store
+            .conn
+            .query_row("SELECT kind FROM audit WHERE seq = 6", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "trail_truncated");
+        assert_eq!(
+            store.append(&[write_event("ns=2;s=A", 9.0)]).unwrap(),
+            vec![7]
+        );
+        assert!(!verify(&open_reader(&path).unwrap()).unwrap().ok());
+    }
+
+    /// Audit finding A1: a trail cut off while the gateway was stopped, or
+    /// rebuilt, still verifies on its own; a record known from outside (an
+    /// export, a noted head) catches both.
+    #[test]
+    fn anchors_catch_truncation_and_rebuilding() {
+        let (_dir, mut store, path) = store();
+        for i in 0..5 {
+            store
+                .append(&[write_event("ns=2;s=A", f64::from(i))])
+                .unwrap();
+        }
+        let hash4: String = store
+            .conn
+            .query_row("SELECT hash FROM audit WHERE seq = 4", [], |r| r.get(0))
+            .unwrap();
+        let anchor = Anchor {
+            seq: 4,
+            hash: hash4.clone(),
+            source: "test".into(),
+        };
+        let reader = open_reader(&path).unwrap();
+        assert!(verify_against(&reader, std::slice::from_ref(&anchor))
+            .unwrap()
+            .ok());
+
+        // Cut off the tail (and the head marker, as someone with file
+        // access would): the chain alone still verifies.
+        store
+            .conn
+            .execute("DELETE FROM audit WHERE seq > 3", [])
+            .unwrap();
+        store.conn.execute("DELETE FROM chain_head", []).unwrap();
+        assert!(verify(&reader).unwrap().ok());
+        let report = verify_against(&reader, &[anchor]).unwrap();
+        assert!(report.error.unwrap().contains("missing"));
+
+        // A record with another hash than the one exported.
+        let other = Anchor {
+            seq: 3,
+            hash: "0".repeat(64),
+            source: "test".into(),
+        };
+        let report = verify_against(&reader, &[other]).unwrap();
+        assert!(report.error.unwrap().contains("differs"));
     }
 }

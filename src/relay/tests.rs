@@ -29,6 +29,7 @@ struct Harness {
     gateway_pki: PathBuf,
     db: PathBuf,
     audit: AuditHandle,
+    relay: Arc<RelayTarget>,
     setpoint: NodeId,
     read_only: NodeId,
     method: NodeId,
@@ -36,9 +37,63 @@ struct Harness {
 
 /// Starts a test server ("the PLC") and a gateway in front of it.
 async fn harness(fail_mode: FailMode) -> Harness {
+    harness_with_latency(fail_mode, None).await
+}
+
+/// A TCP proxy in front of the PLC that delays every PLC -> gateway byte by
+/// `delay` (order preserved): a PLC on a real network.
+async fn delaying_proxy(plc_port: u16, delay: Duration) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((down, _)) = listener.accept().await {
+            let up = tokio::net::TcpStream::connect(("127.0.0.1", plc_port))
+                .await
+                .unwrap();
+            let (mut down_r, mut down_w) = down.into_split();
+            let (mut up_r, mut up_w) = up.into_split();
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut down_r, &mut up_w).await;
+                let _ = up_w.shutdown().await;
+            });
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<(tokio::time::Instant, Vec<u8>)>();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    match up_r.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let due = tokio::time::Instant::now() + delay;
+                            if tx.send((due, buf[..n].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                while let Some((due, bytes)) = rx.recv().await {
+                    tokio::time::sleep_until(due).await;
+                    if down_w.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = down_w.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+async fn harness_with_latency(fail_mode: FailMode, latency: Option<Duration>) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let plc = start_test_plc(dir.path()).await;
-    let server_port = plc.port;
+    let server_port = match latency {
+        Some(delay) => delaying_proxy(plc.port, delay).await,
+        None => plc.port,
+    };
 
     // Gateway.
     let gateway_port = free_port();
@@ -78,7 +133,7 @@ async fn harness(fail_mode: FailMode) -> Harness {
         &config.audit,
     ));
     let listener = bind(&relay).await.unwrap();
-    tokio::spawn(serve(relay, listener));
+    tokio::spawn(serve(relay.clone(), listener));
 
     let gateway_url = format!("opc.tcp://127.0.0.1:{gateway_port}/");
     wait_listening(gateway_port).await;
@@ -93,6 +148,7 @@ async fn harness(fail_mode: FailMode) -> Harness {
         gateway_url,
         db,
         audit,
+        relay,
     }
 }
 
@@ -325,6 +381,48 @@ async fn username_write_through_aes256_rsa_pss() {
     .await;
 }
 
+/// Audit finding P2: revoking trust in a client certificate ends its
+/// connection at once, not when the client next reconnects.
+#[tokio::test]
+async fn untrusting_a_client_closes_its_connection() {
+    let h = harness(FailMode::Open).await;
+    let session = h
+        .connect(
+            "p2",
+            SecurityPolicy::Basic256Sha256,
+            MessageSecurityMode::SignAndEncrypt,
+            operator(),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read_value(&session, &h.setpoint).await,
+        Variant::Double(0.0)
+    );
+
+    let pki = Pki::open(&h.gateway_pki).unwrap();
+    for cert in pki.trusted() {
+        if cert.subject.contains("Test HMI p2") {
+            pki.untrust(&cert.thumbprint).unwrap();
+        }
+    }
+    h.relay.recheck_trust();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let result = session
+        .read(
+            &[ReadValueId {
+                node_id: h.setpoint.clone(),
+                attribute_id: AttributeId::Value as u32,
+                ..Default::default()
+            }],
+            TimestampsToReturn::Neither,
+            0.0,
+        )
+        .await;
+    assert!(result.is_err(), "the revoked client can still read");
+}
+
 #[tokio::test]
 async fn wrong_password_is_audited() {
     let h = harness(FailMode::Open).await;
@@ -494,7 +592,110 @@ async fn fail_closed_records_intent_before_forwarding() {
     assert_eq!(intents.len(), 1);
     assert_eq!(writes.len(), 1);
     assert!(intents[0].seq < writes[0].seq);
+    // The intent already carries the value that is about to be written.
+    let AuditEvent::ChangeIntent { details, .. } = &intents[0].entry.event else {
+        panic!("expected an intent");
+    };
+    assert_eq!(details[0]["new_value"]["value"], serde_json::json!(1.0));
     h.verify_chain().await;
+}
+
+/// Audit finding R1: a client that sends a write and disconnects before the
+/// response must not leave a change on the PLC without a record.
+async fn write_then_disconnect(fail_mode: FailMode) {
+    use std::collections::HashSet;
+    let h = harness_with_latency(fail_mode, Some(Duration::from_millis(150))).await;
+    let reader = h
+        .connect(
+            "r1-reader",
+            SecurityPolicy::None,
+            MessageSecurityMode::None,
+            IdentityToken::Anonymous,
+            false,
+        )
+        .await
+        .unwrap();
+    let client_pki = h.dir.path().join("client-r1-pki");
+    let mut client = ClientBuilder::new()
+        .application_name("Test HMI r1")
+        .application_uri("urn:test-hmi-r1")
+        .pki_dir(&client_pki)
+        .create_sample_keypair(true)
+        .trust_server_certs(true)
+        .session_retry_limit(0)
+        .client()
+        .unwrap();
+
+    let mut applied = Vec::new();
+    for i in 0..4 {
+        let value = 1000.0 + f64::from(i);
+        let (session, event_loop) = client
+            .connect_to_matching_endpoint(
+                (
+                    h.gateway_url.as_str(),
+                    SecurityPolicy::None.to_uri(),
+                    MessageSecurityMode::None,
+                ),
+                IdentityToken::Anonymous,
+            )
+            .await
+            .unwrap();
+        let handle = event_loop.spawn();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), session.wait_for_connection())
+                .await
+                .unwrap_or(false)
+        );
+        // Fire the write, then kill the socket before the response arrives.
+        let node = h.setpoint.clone();
+        let write_session = session.clone();
+        let writer = tokio::spawn(async move {
+            let _ = write_session.write(&[write_value(&node, value)]).await;
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        handle.abort();
+        writer.abort();
+        drop(session);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if read_value(&reader, &h.setpoint).await == Variant::Double(value) {
+            applied.push(value);
+        }
+    }
+    assert!(!applied.is_empty(), "no write reached the PLC");
+
+    // The gateway finishes the writes after the client is gone.
+    let mut missing = applied.clone();
+    for _ in 0..50 {
+        let recorded: HashSet<String> = h
+            .records("write")
+            .await
+            .into_iter()
+            .filter_map(|r| match r.entry.event {
+                AuditEvent::Write { new_value, .. } => Some(new_value.value.to_string()),
+                _ => None,
+            })
+            .collect();
+        missing.retain(|v| !recorded.contains(&serde_json::json!(v).to_string()));
+        if missing.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        missing.is_empty(),
+        "writes applied on the PLC without an audit record: {missing:?}"
+    );
+    h.verify_chain().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_is_recorded_when_client_disconnects_fail_open() {
+    write_then_disconnect(FailMode::Open).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn write_is_recorded_when_client_disconnects_fail_closed() {
+    write_then_disconnect(FailMode::Closed).await;
 }
 
 #[tokio::test]

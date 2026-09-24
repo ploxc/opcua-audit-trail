@@ -2,6 +2,7 @@ mod audit;
 mod config;
 mod discovery;
 mod export;
+mod fsutil;
 mod pki;
 mod relay;
 #[cfg(windows)]
@@ -64,7 +65,16 @@ enum Command {
         endpoint_url: String,
     },
     /// Check the integrity of the audit trail's hash chain.
-    Verify,
+    ///
+    /// The chain alone cannot show that its newest records were cut off or
+    /// that it was rebuilt. Records known from elsewhere catch that: the last
+    /// exported records are checked automatically, and `--expect` adds heads
+    /// noted down earlier (printed by every run).
+    Verify {
+        /// A record that must still be in the trail, as SEQ:HASH.
+        #[arg(long = "expect", value_name = "SEQ:HASH")]
+        expect: Vec<String>,
+    },
     /// Manage web UI users.
     #[command(subcommand)]
     User(UserCommand),
@@ -150,12 +160,33 @@ fn main() -> ExitCode {
                         .log_dir
                         .clone()
                         .unwrap_or_else(|| config.parent().unwrap_or(Path::new(".")).join("logs"));
-                    service::install(&config, &log_dir)?;
+                    let loaded = Config::load(&config)?;
+                    let mut dirs = vec![
+                        config.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                        loaded.gateway.data_dir.clone(),
+                        loaded.gateway.pki_dir.clone(),
+                        log_dir.clone(),
+                    ];
+                    // A directory inside another one is covered by it.
+                    dirs.sort();
+                    dirs.dedup();
+                    let nested: Vec<_> = dirs
+                        .iter()
+                        .filter(|d| dirs.iter().any(|p| p != *d && d.starts_with(p)))
+                        .cloned()
+                        .collect();
+                    dirs.retain(|d| !nested.contains(d));
+                    service::install(&config, &log_dir, &dirs)?;
                     println!(
-                        "installed service {} (config {}, logs in {}); start it with: sc start {}",
+                        "installed service {} (config {}, logs in {}); only the service and \
+                         administrators can access {}. Start it with: sc start {}",
                         service::NAME,
                         config.display(),
                         log_dir.display(),
+                        dirs.iter()
+                            .map(|d| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         service::NAME
                     );
                     Ok(())
@@ -203,7 +234,7 @@ fn main() -> ExitCode {
                 run(&cli.config, shutdown_signal()).await
             }
             Command::Discover { endpoint_url } => discover(&cli.config, &endpoint_url).await,
-            Command::Verify => verify(&cli.config).await,
+            Command::Verify { expect } => verify(&cli.config, &expect).await,
             Command::User(cmd) => user_command(&cli.config, cmd),
             #[cfg(windows)]
             Command::Service(_) => unreachable!("handled above"),
@@ -265,7 +296,10 @@ fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
         }
         UserCommand::Passwd { username } => {
             users.set_password(&username, &read_new_password()?)?;
-            println!("password of {username} changed");
+            if username == "admin" {
+                let _ = std::fs::remove_file(users::initial_password_file(&config));
+            }
+            println!("password of {username} changed; their web sessions have ended");
         }
         UserCommand::Role { username, role } => {
             users.set_role(&username, Role::parse(&role)?)?;
@@ -322,10 +356,15 @@ async fn run(
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
         let password = users::random_password();
-        users.create("admin", &password, Role::Admin)?;
+        users.create_with("admin", &password, Role::Admin, true)?;
+        // Into a file only the service can read, not into the logs.
+        let file = users::initial_password_file(&config);
+        fsutil::write_atomic(&file, format!("{password}\n").as_bytes(), Some(0o600))
+            .with_context(|| format!("writing {}", file.display()))?;
         tracing::warn!(
-            "created web UI user 'admin' with password '{password}'. \
-             Log in and change it (or: opcua-audit-gateway user passwd admin)"
+            "created web UI user 'admin'; its password is in {} and must be changed at \
+             the first login (or: opcua-audit-gateway user passwd admin)",
+            file.display()
         );
         let _ = audit
             .record(AuditEntry::new(AuditEvent::ConfigChanged {
@@ -349,6 +388,7 @@ async fn run(
     let exports = export::start(
         &config.export,
         AuditReader::new(&db),
+        audit.clone(),
         &config.gateway.data_dir.join("export-state.json"),
     )?;
 
@@ -383,16 +423,19 @@ async fn run(
         tracing::info!("web UI on https://{}", config.web.listen);
         axum_server::from_tcp_rustls(listener, tls)?
             .handle(handle)
-            .serve(router.into_make_service())
+            .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(config.web.listen)
             .await
             .with_context(|| format!("binding web UI to {}", config.web.listen))?;
         tracing::info!("web UI on http://{}", config.web.listen);
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await?;
     }
 
     tracing::info!("shutting down");
@@ -469,18 +512,44 @@ async fn discover(path: &Path, endpoint_url: &str) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn verify(path: &Path) -> anyhow::Result<ExitCode> {
+async fn verify(path: &Path, expect: &[String]) -> anyhow::Result<ExitCode> {
     let config = Config::load(path)?;
+    let mut anchors = export::anchors_from(&config.gateway.data_dir.join("export-state.json"));
+    for e in expect {
+        let (seq, hash) = e
+            .split_once(':')
+            .with_context(|| format!("--expect {e}: use SEQ:HASH"))?;
+        anchors.push(audit::store::Anchor {
+            seq: seq
+                .parse()
+                .with_context(|| format!("--expect {e}: invalid sequence number"))?,
+            hash: hash.to_string(),
+            source: format!("--expect {e}"),
+        });
+    }
     let db = config.audit_database();
     if !db.exists() {
-        println!("no audit trail yet at {}", db.display());
-        return Ok(ExitCode::SUCCESS);
+        if anchors.is_empty() {
+            println!("no audit trail yet at {}", db.display());
+            return Ok(ExitCode::SUCCESS);
+        }
+        println!(
+            "AUDIT TRAIL MISSING: {} does not exist, but {} had records",
+            db.display(),
+            anchors[0].source
+        );
+        return Ok(ExitCode::from(2));
     }
-    let report = AuditReader::new(&db).verify().await?;
+    let report = AuditReader::new(&db).verify_against(anchors).await?;
     println!(
         "{} records (seq {}..{}), head {}",
         report.records,
         report.first_seq.unwrap_or(0),
+        report.last_seq.unwrap_or(0),
+        report.head_hash
+    );
+    println!(
+        "note the head to check later: opcua-audit-gateway verify --expect {}:{}",
         report.last_seq.unwrap_or(0),
         report.head_hash
     );

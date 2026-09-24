@@ -140,23 +140,30 @@ impl TargetManager {
             }
             None => None,
         };
-        match self.start(&new_config, &target).await {
-            Ok(r) => {
-                running.insert(target.name.clone(), r);
-            }
-            Err(e) => {
-                // Put the old target back as it was.
-                if let Some(old_target) = old {
-                    if let Ok(r) = self.start(&config, &old_target).await {
-                        running.insert(old_target.name.clone(), r);
-                    }
+        let started = self.start(&new_config, &target).await;
+        // Only a change that is running and saved counts; otherwise the old
+        // target is put back as it was.
+        let result = match started {
+            Ok(r) => match write_targets(&self.config_path, &new_config.targets) {
+                Ok(()) => {
+                    running.insert(target.name.clone(), r);
+                    *config = new_config;
+                    return Ok(());
                 }
-                return Err(e);
+                Err(e) => {
+                    r.stop().await;
+                    self.statuses.write().await.remove(&target.name);
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        };
+        if let Some(old_target) = old {
+            if let Ok(r) = self.start(&config, &old_target).await {
+                running.insert(old_target.name.clone(), r);
             }
         }
-        write_targets(&self.config_path, &new_config.targets)?;
-        *config = new_config;
-        Ok(())
+        result
     }
 
     pub async fn remove(&self, name: &str) -> anyhow::Result<()> {
@@ -174,6 +181,14 @@ impl TargetManager {
         self.statuses.write().await.remove(name);
         *config = new_config;
         Ok(())
+    }
+
+    /// Makes every connection re-check its certificates (after trust in one
+    /// was revoked), closing those that are no longer trusted.
+    pub async fn recheck_trust(&self) {
+        for running in self.running.lock().await.values() {
+            running.relay.recheck_trust();
+        }
     }
 
     /// Restarts every target, e.g. after the gateway certificate changed.
@@ -206,6 +221,20 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
         table["listen"] = toml_edit::value(t.listen.to_string());
         table["endpoint_url"] = toml_edit::value(t.endpoint_url.as_str());
         table["discovery_interval_secs"] = toml_edit::value(t.discovery_interval_secs as i64);
+        if t.min_security != crate::config::MinSecurity::None {
+            table["min_security"] = toml_edit::value(t.min_security.as_str());
+        }
+        let defaults: TargetConfig = toml::from_str(
+            "name = \"x\"\nlisten = \"127.0.0.1:1\"\nendpoint_url = \"opc.tcp://x\"",
+        )
+        .expect("valid");
+        if t.max_connections != defaults.max_connections {
+            table["max_connections"] = toml_edit::value(t.max_connections as i64);
+        }
+        if t.max_connections_per_address != defaults.max_connections_per_address {
+            table["max_connections_per_address"] =
+                toml_edit::value(t.max_connections_per_address as i64);
+        }
         array.push(table);
     }
     if targets.is_empty() {
@@ -213,11 +242,10 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
     } else {
         doc["targets"] = toml_edit::Item::ArrayOfTables(array);
     }
-    // Write atomically, so a crash never leaves a half-written config.
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    // Atomic and durable, keeping the file's permissions (it may hold
+    // export credentials).
+    crate::fsutil::write_atomic(path, doc.to_string().as_bytes(), None)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
@@ -231,6 +259,9 @@ mod tests {
             listen: ([127, 0, 0, 1], port).into(),
             endpoint_url: "opc.tcp://127.0.0.1:1/".into(),
             discovery_interval_secs: 60,
+            min_security: Default::default(),
+            max_connections: 50,
+            max_connections_per_address: 10,
         }
     }
 

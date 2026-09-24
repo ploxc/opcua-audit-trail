@@ -1,8 +1,11 @@
 //! Running as a Windows service.
 //!
-//! `opcua-audit-gateway --config C:\gateway\config.toml service install`
-//! registers an auto-start service (LocalSystem) that runs
-//! `… --config <absolute path> --log-dir <config dir>\logs service run`.
+//! `opcua-audit-gateway --config <dir>\config.toml service install`
+//! registers an auto-start service that runs
+//! `… --config <absolute path> --log-dir <config dir>\logs service run`
+//! under its own virtual account (`NT SERVICE\OpcUaAuditGateway`), and
+//! restricts the config, data, certificate and log directories to that
+//! account, SYSTEM and administrators.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -19,6 +22,9 @@ use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 pub const NAME: &str = "OpcUaAuditGateway";
+/// The virtual account the service runs as; Windows creates it with the
+/// service.
+const ACCOUNT: &str = "NT SERVICE\\OpcUaAuditGateway";
 const DISPLAY_NAME: &str = "OPC UA Audit Gateway";
 
 static CONFIG: OnceLock<PathBuf> = OnceLock::new();
@@ -84,7 +90,9 @@ fn run_service() -> anyhow::Result<()> {
     result.map(|_| ())
 }
 
-pub fn install(config: &Path, log_dir: &Path) -> anyhow::Result<()> {
+/// Registers the service and locks down `dirs` (config, data, certificates,
+/// logs) so only the service, SYSTEM and administrators can use them.
+pub fn install(config: &Path, log_dir: &Path, dirs: &[PathBuf]) -> anyhow::Result<()> {
     let manager = ServiceManager::local_computer(
         None::<&str>,
         ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -106,13 +114,83 @@ pub fn install(config: &Path, log_dir: &Path) -> anyhow::Result<()> {
             "run".into(),
         ],
         dependencies: Vec::new(),
-        account_name: None,
+        account_name: Some(ACCOUNT.into()),
         account_password: None,
     };
     let service = manager
-        .create_service(&info, ServiceAccess::CHANGE_CONFIG)
+        .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::DELETE)
         .context("creating the service")?;
     service.set_description("Transparent OPC UA gateway with an audit trail of every write")?;
+    for dir in dirs {
+        if let Err(e) = restrict(dir) {
+            let _ = service.delete();
+            return Err(e.context("the service was not installed"));
+        }
+    }
+    Ok(())
+}
+
+/// Replaces the permissions of `dir` and everything in it: full control for
+/// SYSTEM and administrators (who also own it), modify for the service, and
+/// nothing for other users. Without this, the default permissions of a
+/// directory such as `C:\gateway` let any local user change the config, the
+/// users or the executable, or read the private key.
+fn restrict(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // SIDs, so this works whatever the language of Windows.
+    const SYSTEM: &str = "*S-1-5-18";
+    const ADMINISTRATORS: &str = "*S-1-5-32-544";
+    let service = format!("{ACCOUNT}:(OI)(CI)M");
+    let system = format!("{SYSTEM}:(OI)(CI)F");
+    let administrators = format!("{ADMINISTRATORS}:(OI)(CI)F");
+    let children = dir.join("*");
+    let steps: [&[&std::ffi::OsStr]; 3] = [
+        &[
+            dir.as_os_str(),
+            "/setowner".as_ref(),
+            ADMINISTRATORS.as_ref(),
+            "/T".as_ref(),
+            "/L".as_ref(),
+            "/Q".as_ref(),
+        ],
+        &[
+            dir.as_os_str(),
+            "/inheritance:r".as_ref(),
+            "/grant:r".as_ref(),
+            system.as_ref(),
+            administrators.as_ref(),
+            service.as_ref(),
+            "/Q".as_ref(),
+        ],
+        // Drop anything set explicitly on the contents; they inherit the
+        // permissions above.
+        &[
+            children.as_os_str(),
+            "/reset".as_ref(),
+            "/T".as_ref(),
+            "/L".as_ref(),
+            "/Q".as_ref(),
+        ],
+    ];
+    for (i, args) in steps.iter().enumerate() {
+        let output = std::process::Command::new("icacls")
+            .args(*args)
+            .output()
+            .context("running icacls")?;
+        // An empty directory has no contents to reset.
+        let empty = i == 2
+            && std::fs::read_dir(dir)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
+        if !output.status.success() && !empty {
+            anyhow::bail!(
+                "setting the permissions of {}: {}{}",
+                dir.display(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
     Ok(())
 }
 

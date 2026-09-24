@@ -97,7 +97,7 @@ const state = {
   audit: { rows: [], filters: {}, selected: null, olderAvailable: false, live: false },
   targets: { editing: null, discovery: {} },
   certificates: null,
-  browser: { target: "", connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {} },
+  browser: { target: "", connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {}, watchError: null },
   users: [],
   version: "",
 };
@@ -118,7 +118,22 @@ function toast(message, kind = "") {
   host.append(t);
   setTimeout(() => t.remove(), kind === "bad" ? 7000 : 3500);
 }
-const fail = (e) => { if (e.status !== 401) toast(e.message, "bad"); };
+const fail = (e) => {
+  // 409 from the browser API: its session on the target is gone.
+  if (e.status === 409 && state.browser.connection) return browserLost();
+  if (e.status !== 401) toast(e.message, "bad");
+};
+
+const BROWSER_EMPTY = () => ({ connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {}, watchError: null });
+
+/// The browser session ended (idle timeout, gateway restart, target down):
+/// back to the connect form, with one message instead of one per refresh.
+function browserLost() {
+  Object.assign(state.browser, BROWSER_EMPTY());
+  toast("The browser session on the target has ended. Connect again to continue.", "bad");
+  renderPage();
+  schedule(currentPage().id);
+}
 
 // OPC UA timestamps carry up to 9 fraction digits; Date parses 3.
 const time = (iso) => (iso ? new Date(String(iso).replace(/(\.\d{3})\d+/, "$1")).toLocaleString() : "");
@@ -168,11 +183,14 @@ const EVENT_LABELS = {
   upstream_available: "Target reachable", upstream_unavailable: "Target unreachable", gateway_started: "Gateway started",
   gateway_stopped: "Gateway stopped", config_changed: "Configuration changed", ui_login: "UI login",
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
+  upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
+  connections_refused: "Connections refused", trail_truncated: "Trail cut off", clock_jumped: "Clock jumped",
+  export_gap: "Export gap",
 };
-const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management"]);
+const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred"]);
 const eventBadge = (type) => {
   const kind = CHANGE_EVENTS.has(type) ? "accent"
-    : /failed|rejected|unavailable|lost/.test(type) ? "bad"
+    : /failed|rejected|unavailable|lost|changed$|truncated|gap|jumped|refused/.test(type) && type !== "config_changed" ? "bad"
     : type === "change_intent" ? "warn" : "neutral";
   return html`<span class="badge plain ${kind}">${EVENT_LABELS[type] || type}</span>`;
 };
@@ -180,7 +198,7 @@ function eventSummary(e) {
   switch (e.type) {
     case "write":
       return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)}${when(e.attribute !== "Value", html` <span class="muted">(${e.attribute})</span>`)}</div>
-        <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span></div>`;
+        <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span>${when(e.written_status, html` <span class="muted">status ${e.written_status}</span>`)}${when(e.source_timestamp, html` <span class="muted">source time ${e.source_timestamp}</span>`)}</div>`;
     case "call":
       return html`<div>${e.display_name || e.method_id} <span class="muted mono">${e.object_id}</span></div>
         <div class="change">(${e.input_arguments.map(valueText).join(", ")})</div>`;
@@ -193,6 +211,12 @@ function eventSummary(e) {
     case "certificate_rejected": return html`${e.subject} <span class="muted">${e.reason}</span>`;
     case "client_disconnected": return e.reason;
     case "upstream_available": return `${e.endpoint_url} (${e.endpoints} endpoints)`;
+    case "upstream_endpoints_changed": return html`<div>${e.endpoint_url}</div><div class="small muted">before: ${e.before.join("; ")}</div><div class="small">now: ${e.after.join("; ")}</div>`;
+    case "subscriptions_transferred": return `subscriptions ${e.subscription_ids.join(", ")}`;
+    case "connections_refused": return `${e.count} from ${e.remote_addr}: ${e.reason}`;
+    case "trail_truncated": return `records ${e.found_seq + 1} to ${e.expected_seq} are missing`;
+    case "clock_jumped": return `by ${e.seconds} s`;
+    case "export_gap": return `${e.destination}: ${e.reason}`;
     case "upstream_unavailable": return e.reason;
     case "config_changed": return html`<b>${e.by}</b>: ${e.summary}`;
     case "ui_login": case "ui_login_failed": return e.user;
@@ -232,6 +256,11 @@ function render() {
     app.querySelector("input[name=username]")?.focus();
     return;
   }
+  if (state.user.must_change_password) {
+    app.innerHTML = mustChangeView().s;
+    app.querySelector("input[name=current]")?.focus();
+    return;
+  }
   const page = currentPage();
   const rejected = state.status?.rejected_certificates || 0;
   app.innerHTML = html`<div class="shell">
@@ -269,7 +298,13 @@ function renderPage() {
   const form = typing ? active.closest("form[data-form]") : null;
   const kept = form ? [...form.elements].filter((e) => e.name && e.type !== "file").map((e) => [e.name, e.type === "checkbox" ? e.checked : e.value]) : [];
   const focusName = typing ? active.name : null;
+  // Scroll positions inside the page (e.g. the browser tree) survive too.
+  const scrolls = [...el.querySelectorAll("[data-keep-scroll]")].map((e) => [e.dataset.keepScroll, e.scrollTop, e.scrollLeft]);
   el.innerHTML = pageView(currentPage()).s;
+  for (const [key, top, left] of scrolls) {
+    const again = el.querySelector(`[data-keep-scroll="${key}"]`);
+    if (again) { again.scrollTop = top; again.scrollLeft = left; }
+  }
   if (form) {
     const again = el.querySelector(`form[data-form="${form.dataset.form}"]`);
     for (const [name, value] of kept) {
@@ -321,6 +356,7 @@ function dashboardView() {
     <div class="page-head"><div class="inline">${menuButton}<h1>Dashboard</h1></div>
       <span class="muted small">Gateway ${s.version} · updates every 5 s</span></div>
     ${when(s.exports?.some((e) => e.last_error), html`<div class="alert warn">Audit export is failing; records wait in the local store and are sent once the destination is back.</div>`)}
+    ${s.exports?.filter((e) => e.gap).map((e) => html`<div class="alert bad">Export to ${e.name}: ${e.gap}</div>`)}
     ${when(s.lost_audit_events > 0, html`<div class="alert bad">${s.lost_audit_events} audit events could not be stored. Check the disk of the audit database.</div>`)}
     ${when(s.rejected_certificates > 0 && can("admin"), html`<div class="alert warn">${s.rejected_certificates} certificate(s) are waiting for a decision. <a href="#/certificates">Review</a></div>`)}
     <div class="stats">
@@ -484,11 +520,14 @@ function targetsView() {
       <dl class="kv"><dt>Clients connect to</dt><dd class="mono">${clientUrl(t.listen)} <span class="muted">(listening on ${t.listen})</span></dd>
         <dt>Target server</dt><dd class="mono">${t.endpoint_url}</dd>
         <dt>Discovery every</dt><dd>${t.discovery_interval_secs} s</dd>
+        <dt>Minimum security</dt><dd>${MIN_SECURITY[t.min_security || "none"]}</dd>
         ${when(t.status?.last_error, html`<dt>Error</dt><dd class="small">${t.status?.last_error}</dd>`)}</dl>
       <h3 class="mt">Endpoints offered to clients</h3>
       ${endpointsTable(state.targets.discovery[t.name] || t.status?.endpoints, trusted)}
     </div>`)}`;
 }
+
+const MIN_SECURITY = { none: "Follow the target (incl. None)", sign: "Sign or better", sign_and_encrypt: "Sign & encrypt only" };
 
 function targetForm(t) {
   const isNew = t.original === null;
@@ -500,6 +539,7 @@ function targetForm(t) {
       <div><label>Listen address (for clients)</label><input name="listen" value="${t.listen}" required placeholder="0.0.0.0:4841"></div>
       <div><label>Target endpoint URL</label><input name="endpoint_url" value="${t.endpoint_url}" required placeholder="opc.tcp://192.168.0.10:4840"></div>
       <div><label>Discovery interval (s)</label><input name="discovery_interval_secs" type="number" min="1" value="${t.discovery_interval_secs}"></div>
+      <div><label>Minimum security</label><select name="min_security">${Object.entries(MIN_SECURITY).map(([k, v]) => html`<option value="${k}" ${new Html((t.min_security || "none") === k ? "selected" : "")}>${v}</option>`)}</select></div>
     </div>
     <p class="hint">On the PLC itself, use another port than the PLC's own server (e.g. 4841) and let the PLC's server accept only the gateway.</p>
     <div class="inline"><button class="primary" type="submit">${isNew ? "Add" : "Save"}</button>
@@ -555,9 +595,9 @@ function treeView(nodeId) {
   if (!children) return html``;
   return html`<ul>${children.map((c) => {
     const open = state.browser.expanded.has(c.node_id);
-    const leafish = c.node_class === "Method";
+    const leaf = c.has_children === false || c.node_class === "Method" || state.browser.tree[c.node_id]?.length === 0;
     return html`<li><div class="node ${state.browser.selected === c.node_id ? "selected" : ""}" data-action="select-node" data-node="${c.node_id}">
-      <span class="toggle" data-action="toggle-node" data-node="${c.node_id}">${leafish ? "" : open ? "▾" : "▸"}</span>
+      ${leaf ? html`<span class="toggle"></span>` : html`<span class="toggle" data-action="toggle-node" data-node="${c.node_id}">${open ? "▾" : "▸"}</span>`}
       <span>${c.display_name || c.browse_name}</span><span class="kind">${c.node_class}</span></div>
       ${when(open, () => treeView(c.node_id))}</li>`;
   })}</ul>`;
@@ -582,7 +622,7 @@ function browserView() {
       <span class="badge ok">${b.target}</span><span class="muted small">${b.connection.security_policy} / ${b.connection.security_mode} as ${b.connection.user}</span></div>
       <div class="actions"><button data-action="browser-disconnect">Disconnect</button></div></div>
     <div class="browser">
-      <div class="card"><h2>Objects</h2><div class="tree">${treeView("root")}</div></div>
+      <div class="card"><h2>Objects</h2><div class="tree" data-keep-scroll="tree">${treeView("root")}</div></div>
       <div>
         <div class="card"><div class="card-head"><h2>${b.selected ? "Attributes" : "Select a node"}</h2>
           ${when(b.selected && b.attributes.some((a) => a.attribute === "Value"), html`<button class="small" data-action="watch" data-node="${b.selected}">Watch value</button>`)}</div>
@@ -590,6 +630,7 @@ function browserView() {
             <td class="mono">${attributeText(a)} <span class="muted">${a.value.data_type}</span></td></tr>`)}</tbody></table></div>`)}
         </div>
         <div class="card"><div class="card-head"><h2>Watch list</h2><span class="muted small">refreshes every second</span></div>
+          ${when(b.watchError, html`<div class="alert warn">Values cannot be read right now: ${b.watchError}</div>`)}
           ${watch.length ? html`<div class="table-wrap"><table><thead><tr><th>Node</th><th>Value</th><th>Status</th><th>Source time</th><th></th></tr></thead><tbody>
             ${watch.map((n) => { const v = b.values[n.node_id] || {}; return html`<tr><td>${n.name}<div class="mono muted small">${n.node_id}</div></td>
               <td class="mono">${valueText(v.value)}</td><td>${statusBadge(v.status)}</td><td class="nowrap small">${time(v.source_timestamp)}</td>
@@ -637,6 +678,19 @@ function usersView() {
       <p class="hint">Auditor: dashboard and audit trail. Operator: also the browser. Admin: also targets, certificates and users.</p></form>`;
 }
 
+/// A password someone else chose (first start, reset by an admin) is
+/// replaced before anything else.
+function mustChangeView() {
+  return html`<div class="login">${logo("login-backdrop")}<form class="card" data-form="password">
+    <div class="brand">${logo()}<div>Choose a new password<small>${state.user.username}</small></div></div>
+    <p class="section-note">Your password was set by someone else. Choose your own to continue.</p>
+    <div class="field"><label for="c">Current password</label><input id="c" name="current" type="password" required autocomplete="current-password"></div>
+    <div class="field"><label for="n">New password (min. 8)</label><input id="n" name="new" type="password" minlength="8" required autocomplete="new-password"></div>
+    <button class="primary" type="submit">Continue</button>
+    <p class="mt"><button type="button" class="link small" data-action="logout">Log out</button></p>
+  </form></div>`;
+}
+
 function accountView() {
   return html`<div class="page-head"><div class="inline">${menuButton}<h1>Account</h1></div></div>
     <form class="card" data-form="password"><h2>Change password</h2><div class="form-grid">
@@ -674,8 +728,16 @@ function schedule(pageId) {
 
 async function pollWatch() {
   const b = state.browser;
-  const values = await post(`/browser/${encodeURIComponent(b.target)}/values`, { nodes: b.watch.map((w) => w.node_id) });
-  for (const v of values) b.values[v.node_id] = v;
+  try {
+    const values = await post(`/browser/${encodeURIComponent(b.target)}/values`, { nodes: b.watch.map((w) => w.node_id) });
+    for (const v of values) b.values[v.node_id] = v;
+    b.watchError = null;
+  } catch (e) {
+    // A lost session ends the browser; anything else is shown in place,
+    // not as a new message every second.
+    if (e.status === 409 || e.status === 401) throw e;
+    b.watchError = e.message;
+  }
 }
 
 // ---------- events ----------
@@ -689,7 +751,12 @@ const readFile = (file) => new Promise((resolve, reject) => {
 });
 
 const actions = {
-  async logout() { await post("/logout"); state.user = null; render(); },
+  async logout() {
+    await post("/logout");
+    // Start from a clean page: nothing of this user's session stays behind.
+    location.hash = "";
+    location.reload();
+  },
   theme() {
     // Like ploxc.com: follow the system until the user picks a mode.
     const root = document.documentElement;
@@ -706,10 +773,10 @@ const actions = {
   async "clear-filter"() { state.audit.filters = {}; await loadAudit(); renderPage(); },
   live(el) { state.audit.live = el.checked; schedule("audit"); },
   // targets
-  "new-target"() { state.targets.editing = { original: null, name: "", listen: "0.0.0.0:4841", endpoint_url: "opc.tcp://", discovery_interval_secs: 60 }; renderPage(); },
+  "new-target"() { state.targets.editing = { original: null, name: "", listen: "0.0.0.0:4841", endpoint_url: "opc.tcp://", discovery_interval_secs: 60, min_security: "none" }; renderPage(); },
   "edit-target"(el) {
     const t = state.status.targets.find((x) => x.name === el.dataset.name);
-    state.targets.editing = { original: t.name, name: t.name, listen: t.listen, endpoint_url: t.endpoint_url, discovery_interval_secs: t.discovery_interval_secs };
+    state.targets.editing = { original: t.name, name: t.name, listen: t.listen, endpoint_url: t.endpoint_url, discovery_interval_secs: t.discovery_interval_secs, min_security: t.min_security || "none" };
     renderPage();
   },
   "cancel-target"() { state.targets.editing = null; renderPage(); },
@@ -721,7 +788,12 @@ const actions = {
   },
   async "discover-target"(el) { state.targets.discovery[el.dataset.name] = await post(`/targets/${encodeURIComponent(el.dataset.name)}/discover`); toast("Discovery done"); renderPage(); },
   async "trust-server"(el) {
-    const cert = await post(`/targets/${encodeURIComponent(el.dataset.name)}/trust-server`);
+    const t = (state.status?.targets || []).find((x) => x.name === el.dataset.name);
+    const endpoints = state.targets.discovery[el.dataset.name] || t?.status?.endpoints || [];
+    const shown = endpoints.find((e) => e.server_certificate)?.server_certificate;
+    if (!shown) { toast("No certificate known yet: discover the target first.", "bad"); return; }
+    if (!confirm(`Trust this server certificate?\n\n${shown.subject}\nThumbprint ${shown.thumbprint}\n\nCompare the thumbprint with the one shown on the PLC first.`)) return;
+    const cert = await post(`/targets/${encodeURIComponent(el.dataset.name)}/trust-server`, { thumbprint: shown.thumbprint });
     toast(`Trusted ${cert.subject}`);
     state.certificates = await get("/certificates");
     renderPage();
@@ -773,7 +845,7 @@ const actions = {
   async "browser-disconnect"() {
     const b = state.browser;
     await post(`/browser/${encodeURIComponent(b.target)}/disconnect`);
-    Object.assign(b, { connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {} });
+    Object.assign(b, BROWSER_EMPTY());
     renderPage(); schedule("browser");
   },
   // users
@@ -808,7 +880,7 @@ const forms = {
   async target(form) {
     const t = state.targets.editing;
     const data = formData(form);
-    const body = { name: data.name, listen: data.listen, endpoint_url: data.endpoint_url, discovery_interval_secs: Number(data.discovery_interval_secs) || 60 };
+    const body = { name: data.name, listen: data.listen, endpoint_url: data.endpoint_url, discovery_interval_secs: Number(data.discovery_interval_secs) || 60, min_security: data.min_security || "none" };
     if (t.original === null) await post("/targets", body);
     else await put(`/targets/${encodeURIComponent(t.original)}`, body);
     toast(t.original === null ? "Target added" : "Target saved");
@@ -831,7 +903,13 @@ const forms = {
     renderPage();
   },
   async "new-user"(form) { await post("/users", formData(form)); form.reset(); toast("User added"); await load(); },
-  async password(form) { await post("/me/password", formData(form)); form.reset(); toast("Password changed"); },
+  async password(form) {
+    const wasForced = state.user.must_change_password;
+    await post("/me/password", formData(form));
+    form.reset(); toast("Password changed");
+    state.user = await get("/me");
+    if (wasForced) { render(); await load(); }
+  },
 };
 
 document.addEventListener("click", async (event) => {

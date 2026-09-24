@@ -19,8 +19,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use opcua::client::Client;
-use opcua::crypto::{CertificateStore, PrivateKey, X509};
-use opcua::types::{ByteString, DecodingOptions, EndpointDescription, NodeId, StatusCode};
+use opcua::crypto::{CertificateStore, PrivateKey, SecurityPolicy, X509};
+use opcua::types::{
+    ByteString, DecodingOptions, EndpointDescription, MessageSecurityMode, NodeId, StatusCode,
+};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -94,6 +96,12 @@ pub struct SessionEntry {
     pub upstream_nonce: ByteString,
     pub timeout: Duration,
     pub last_used: Instant,
+    /// Security of the channel the session was created on. It may only be
+    /// re-activated over a channel at least as secure.
+    pub security_policy: SecurityPolicy,
+    pub security_mode: MessageSecurityMode,
+    /// The connection the session belongs to (created or last activated on).
+    pub connection_id: u64,
 }
 
 #[derive(Default)]
@@ -106,7 +114,7 @@ impl SessionRegistry {
         let mut sessions = self.sessions.lock();
         let now = Instant::now();
         // Forget sessions the upstream server has certainly timed out by now.
-        sessions.retain(|_, s| now.duration_since(s.last_used) < s.timeout * 2);
+        sessions.retain(|_, s| now.duration_since(s.last_used) < s.timeout.saturating_mul(2));
         sessions.insert(token, entry);
     }
 
@@ -118,12 +126,26 @@ impl SessionRegistry {
         })
     }
 
-    pub fn client(&self, token: &NodeId) -> Option<ClientContext> {
+    /// The session's client, if the session belongs to `connection_id`.
+    pub fn client_of(&self, token: &NodeId, connection_id: u64) -> Option<ClientContext> {
         self.with(token, |s| s.client.clone())
+            .filter(|_| self.owned_by(token, connection_id))
     }
 
-    pub fn remove(&self, token: &NodeId) -> Option<SessionEntry> {
-        self.sessions.lock().remove(token)
+    fn owned_by(&self, token: &NodeId, connection_id: u64) -> bool {
+        self.sessions
+            .lock()
+            .get(token)
+            .is_some_and(|s| s.connection_id == connection_id)
+    }
+
+    /// Removes the session if it belongs to `connection_id`.
+    pub fn remove_owned(&self, token: &NodeId, connection_id: u64) -> Option<SessionEntry> {
+        let mut sessions = self.sessions.lock();
+        if sessions.get(token)?.connection_id != connection_id {
+            return None;
+        }
+        sessions.remove(token)
     }
 }
 
@@ -159,6 +181,9 @@ pub struct RelayTarget {
     /// Cancelled when the target is removed or reconfigured: stops the
     /// listener and closes all its connections.
     pub shutdown: CancellationToken,
+    /// Bumped when certificates are untrusted: every connection re-checks
+    /// its client and server certificate and closes if one is revoked.
+    pub trust_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl RelayTarget {
@@ -188,7 +213,13 @@ impl RelayTarget {
             connection_ids: AtomicU64::new(1),
             request_handles: AtomicU32::new(GATEWAY_REQUEST_HANDLES),
             shutdown: CancellationToken::new(),
+            trust_changed: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// Makes every connection re-check its certificates.
+    pub fn recheck_trust(&self) {
+        self.trust_changed.send_modify(|n| *n += 1);
     }
 
     /// Request handle for requests the gateway itself sends in a client's
@@ -201,15 +232,18 @@ impl RelayTarget {
         self.channel_ids.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Upstream endpoints from the target monitor's cache, or discovered now.
+    /// Upstream endpoints from the target monitor's cache, or discovered now,
+    /// without those below the target's minimum security.
     pub async fn upstream_endpoints(&self) -> Result<Vec<EndpointDescription>, StatusCode> {
+        let min = self.config.min_security;
         if let Some(status) = self.statuses.read().await.get(&self.config.name) {
             if !status.raw_endpoints.is_empty() {
-                return Ok(status.raw_endpoints.clone());
+                return Ok(endpoints::at_least(status.raw_endpoints.clone(), min));
             }
         }
         discovery::discover_raw(&self.discovery, &self.config.endpoint_url)
             .await
+            .map(|e| endpoints::at_least(e, min))
             .map_err(|e| {
                 tracing::warn!(target = %self.config.name, "{e:#}");
                 StatusCode::BadServerNotConnected
@@ -226,6 +260,79 @@ pub async fn bind(target: &RelayTarget) -> std::io::Result<tokio::net::TcpListen
     tokio::net::TcpListener::bind(target.config.listen).await
 }
 
+/// New connections per second one address may open (with a burst of twice
+/// that): enough for any HMI, too few to flood the audit trail.
+const CONNECTION_RATE: f64 = 5.0;
+
+struct AddressState {
+    active: usize,
+    tokens: f64,
+    last: Instant,
+    refused: u64,
+    reason: &'static str,
+}
+
+/// Decides which new connections a target accepts.
+struct Admission {
+    max_total: usize,
+    max_per_address: usize,
+    active: usize,
+    addresses: HashMap<std::net::IpAddr, AddressState>,
+}
+
+impl Admission {
+    fn admit(&mut self, ip: std::net::IpAddr) -> Result<(), ()> {
+        let now = Instant::now();
+        let full = self.active >= self.max_total;
+        let state = self.addresses.entry(ip).or_insert(AddressState {
+            active: 0,
+            tokens: 2.0 * CONNECTION_RATE,
+            last: now,
+            refused: 0,
+            reason: "",
+        });
+        state.tokens = (state.tokens
+            + now.duration_since(state.last).as_secs_f64() * CONNECTION_RATE)
+            .min(2.0 * CONNECTION_RATE);
+        state.last = now;
+        let reason = if full {
+            "too many connections to this target"
+        } else if state.active >= self.max_per_address {
+            "too many connections from this address"
+        } else if state.tokens < 1.0 {
+            "too many new connections per second from this address"
+        } else {
+            state.tokens -= 1.0;
+            state.active += 1;
+            self.active += 1;
+            return Ok(());
+        };
+        state.refused += 1;
+        state.reason = reason;
+        Err(())
+    }
+
+    fn release(&mut self, ip: std::net::IpAddr) {
+        self.active = self.active.saturating_sub(1);
+        if let Some(state) = self.addresses.get_mut(&ip) {
+            state.active = state.active.saturating_sub(1);
+        }
+    }
+
+    /// Refusals since the last call, per address; forgets idle addresses.
+    fn take_refused(&mut self) -> Vec<(std::net::IpAddr, u64, &'static str)> {
+        let refused = self
+            .addresses
+            .iter_mut()
+            .filter(|(_, s)| s.refused > 0)
+            .map(|(ip, s)| (*ip, std::mem::take(&mut s.refused), s.reason))
+            .collect();
+        self.addresses
+            .retain(|_, s| s.active > 0 || s.last.elapsed() < Duration::from_secs(60));
+        refused
+    }
+}
+
 /// Accepts clients for one target until its `shutdown` token is cancelled.
 pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) {
     tracing::info!(
@@ -234,14 +341,44 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
         target.config.listen,
         target.config.endpoint_url
     );
+    let admission = Arc::new(Mutex::new(Admission {
+        max_total: target.config.max_connections,
+        max_per_address: target.config.max_connections_per_address,
+        active: 0,
+        addresses: HashMap::new(),
+    }));
+    // Refused connections are recorded as one summary per address.
+    let mut report = tokio::time::interval(Duration::from_secs(10));
     loop {
         tokio::select! {
             _ = target.shutdown.cancelled() => break,
+            _ = report.tick() => {
+                let refused = admission.lock().take_refused();
+                for (ip, count, reason) in refused {
+                    tracing::warn!(target = %target.config.name, "refused {count} connections from {ip}: {reason}");
+                    let entry = crate::audit::AuditEntry::new(crate::audit::AuditEvent::ConnectionsRefused {
+                        remote_addr: ip.to_string(),
+                        count,
+                        reason: reason.into(),
+                    })
+                    .target(target.config.name.clone());
+                    let _ = target.audit.record(entry).await;
+                }
+            }
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    if admission.lock().admit(peer.ip()).is_err() {
+                        drop(stream);
+                        continue;
+                    }
                     let _ = stream.set_nodelay(true);
                     let id = target.connection_ids.fetch_add(1, Ordering::Relaxed);
-                    tokio::spawn(connection::run(target.clone(), stream, peer, id));
+                    let target = target.clone();
+                    let admission = admission.clone();
+                    tokio::spawn(async move {
+                        connection::run(target, stream, peer, id).await;
+                        admission.lock().release(peer.ip());
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("accept failed: {e}");

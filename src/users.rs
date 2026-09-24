@@ -48,6 +48,18 @@ pub struct User {
     pub username: String,
     pub role: Role,
     pub created_at: String,
+    /// Set for passwords someone else chose (initial admin, reset by an
+    /// admin): the user must choose a new one before doing anything else.
+    pub must_change_password: bool,
+}
+
+/// What a web session needs to know about its user on every request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionState {
+    pub role: Role,
+    /// Bumped by every change of password or role: older sessions end.
+    pub epoch: i64,
+    pub must_change_password: bool,
 }
 
 pub struct UserStore {
@@ -94,6 +106,22 @@ impl UserStore {
                 created_at    TEXT NOT NULL
             );",
         )?;
+        // Columns added later.
+        for (column, definition) in [
+            ("session_epoch", "INTEGER NOT NULL DEFAULT 0"),
+            ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let exists: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name = ?1",
+                [column],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE users ADD COLUMN {column} {definition}"
+                ))?;
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -108,12 +136,30 @@ impl UserStore {
     }
 
     pub fn create(&self, username: &str, password: &str, role: Role) -> anyhow::Result<()> {
+        self.create_with(username, password, role, false)
+    }
+
+    /// `must_change_password`: the user has to replace the password at the
+    /// first login (it was chosen by someone else).
+    pub fn create_with(
+        &self,
+        username: &str,
+        password: &str,
+        role: Role,
+        must_change_password: bool,
+    ) -> anyhow::Result<()> {
         validate(username, password)?;
         let hash = hash(password)?;
         let inserted = self.conn.lock().execute(
-            "INSERT OR IGNORE INTO users (username, password_hash, role, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![username, hash, role.as_str(), Utc::now().to_rfc3339()],
+            "INSERT OR IGNORE INTO users (username, password_hash, role, created_at, must_change_password)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                username,
+                hash,
+                role.as_str(),
+                Utc::now().to_rfc3339(),
+                must_change_password
+            ],
         )?;
         if inserted == 0 {
             bail!("user '{username}' already exists");
@@ -124,13 +170,14 @@ impl UserStore {
     /// Returns the user if the password is right. Always runs a hash
     /// verification, so response time does not reveal whether a user exists.
     pub fn verify(&self, username: &str, password: &str) -> anyhow::Result<Option<User>> {
-        let row: Option<(String, String, String)> = self
+        let row: Option<(String, String, String, bool)> = self
             .conn
             .lock()
             .query_row(
-                "SELECT password_hash, role, created_at FROM users WHERE username = ?1",
+                "SELECT password_hash, role, created_at, must_change_password
+                 FROM users WHERE username = ?1",
                 [username],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
         // Verifying against a dummy hash keeps the timing the same for
@@ -146,66 +193,131 @@ impl UserStore {
             })
             .unwrap_or(false);
         match row {
-            Some((_, role, created_at)) if ok => Ok(Some(User {
+            Some((_, role, created_at, must_change_password)) if ok => Ok(Some(User {
                 username: username.to_string(),
                 role: Role::parse(&role)?,
                 created_at,
+                must_change_password,
             })),
             _ => Ok(None),
         }
     }
 
+    /// The user's current role and session epoch; `None` if the user is gone.
+    pub fn session_state(&self, username: &str) -> anyhow::Result<Option<SessionState>> {
+        let row: Option<(String, i64, bool)> = self
+            .conn
+            .lock()
+            .query_row(
+                "SELECT role, session_epoch, must_change_password FROM users WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(role, epoch, must_change_password)| {
+            Ok(SessionState {
+                role: Role::parse(&role)?,
+                epoch,
+                must_change_password,
+            })
+        })
+        .transpose()
+    }
+
     pub fn list(&self) -> anyhow::Result<Vec<User>> {
         let conn = self.conn.lock();
-        let mut stmt =
-            conn.prepare("SELECT username, role, created_at FROM users ORDER BY username")?;
+        let mut stmt = conn.prepare(
+            "SELECT username, role, created_at, must_change_password FROM users ORDER BY username",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
             ))
         })?;
         rows.map(|r| {
-            let (username, role, created_at) = r?;
+            let (username, role, created_at, must_change_password) = r?;
             Ok(User {
                 username,
                 role: Role::parse(&role)?,
                 created_at,
+                must_change_password,
             })
         })
         .collect()
     }
 
+    /// Sets the user's own new password. Ends the user's sessions.
     pub fn set_password(&self, username: &str, password: &str) -> anyhow::Result<()> {
-        validate(username, password)?;
-        let hash = hash(password)?;
-        let n = self.conn.lock().execute(
-            "UPDATE users SET password_hash = ?2 WHERE username = ?1",
-            params![username, hash],
-        )?;
-        if n == 0 {
-            bail!("no user '{username}'");
-        }
-        Ok(())
+        self.update(username, None, Some(password), false)
+            .map(|_| ())
     }
 
+    /// Changes the role. Ends the user's sessions.
     pub fn set_role(&self, username: &str, role: Role) -> anyhow::Result<()> {
-        let conn = self.conn.lock();
-        self.ensure_admin_remains(&conn, username, Some(role))?;
-        let n = conn.execute(
-            "UPDATE users SET role = ?2 WHERE username = ?1",
-            params![username, role.as_str()],
+        self.update(username, Some(role), None, false).map(|_| ())
+    }
+
+    /// Changes role and/or password in one step: either all of it is
+    /// applied or none. `must_change_password` marks a password chosen by
+    /// someone else. Ends the user's sessions. Returns what changed.
+    pub fn update(
+        &self,
+        username: &str,
+        role: Option<Role>,
+        password: Option<&str>,
+        must_change_password: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        if role.is_none() && password.is_none() {
+            bail!("nothing to change");
+        }
+        // Everything that can fail is checked before anything is written.
+        let hash = match password {
+            Some(p) => {
+                validate(username, p)?;
+                Some(hash(p)?)
+            }
+            None => None,
+        };
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT COUNT(*) > 0 FROM users WHERE username = ?1",
+            [username],
+            |r| r.get(0),
         )?;
-        if n == 0 {
+        if !exists {
             bail!("no user '{username}'");
         }
-        Ok(())
+        let mut changes = Vec::new();
+        if let Some(role) = role {
+            Self::ensure_admin_remains(&tx, username, Some(role))?;
+            tx.execute(
+                "UPDATE users SET role = ?2 WHERE username = ?1",
+                params![username, role.as_str()],
+            )?;
+            changes.push(format!("role {}", role.as_str()));
+        }
+        if let Some(hash) = hash {
+            tx.execute(
+                "UPDATE users SET password_hash = ?2, must_change_password = ?3 WHERE username = ?1",
+                params![username, hash, must_change_password],
+            )?;
+            changes.push("password".into());
+        }
+        tx.execute(
+            "UPDATE users SET session_epoch = session_epoch + 1 WHERE username = ?1",
+            [username],
+        )?;
+        tx.commit()?;
+        Ok(changes)
     }
 
     pub fn delete(&self, username: &str) -> anyhow::Result<()> {
         let conn = self.conn.lock();
-        self.ensure_admin_remains(&conn, username, None)?;
+        Self::ensure_admin_remains(&conn, username, None)?;
         let n = conn.execute("DELETE FROM users WHERE username = ?1", [username])?;
         if n == 0 {
             bail!("no user '{username}'");
@@ -215,7 +327,6 @@ impl UserStore {
 
     /// Refuses changes that would leave nobody able to administer the gateway.
     fn ensure_admin_remains(
-        &self,
         conn: &Connection,
         username: &str,
         new_role: Option<Role>,
@@ -241,6 +352,12 @@ impl UserStore {
         }
         Ok(())
     }
+}
+
+/// Where the first admin password is written (readable by the service only).
+/// Removed once the password is changed.
+pub fn initial_password_file(config: &crate::config::Config) -> std::path::PathBuf {
+    config.gateway.data_dir.join("initial-admin-password.txt")
 }
 
 /// A random password for the first admin account.
@@ -305,6 +422,36 @@ mod tests {
         users.set_password("a", "second-password").unwrap();
         assert!(users.verify("a", "first-password").unwrap().is_none());
         assert!(users.verify("a", "second-password").unwrap().is_some());
+    }
+
+    /// Audit finding W3: a failing part of an update applies nothing.
+    #[test]
+    fn updates_are_all_or_nothing() {
+        let (_dir, users) = store();
+        users.create("a", "first-password", Role::Auditor).unwrap();
+        let epoch = users.session_state("a").unwrap().unwrap().epoch;
+        assert!(users
+            .update("a", Some(Role::Admin), Some("short"), false)
+            .is_err());
+        let state = users.session_state("a").unwrap().unwrap();
+        assert_eq!(state.role, Role::Auditor);
+        assert_eq!(state.epoch, epoch);
+
+        users
+            .update("a", Some(Role::Operator), Some("second-password"), true)
+            .unwrap();
+        let state = users.session_state("a").unwrap().unwrap();
+        assert_eq!(state.role, Role::Operator);
+        assert!(state.epoch > epoch, "sessions end");
+        assert!(state.must_change_password);
+        users.set_password("a", "third-password").unwrap();
+        assert!(
+            !users
+                .session_state("a")
+                .unwrap()
+                .unwrap()
+                .must_change_password
+        );
     }
 
     #[test]

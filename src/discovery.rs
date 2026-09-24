@@ -197,11 +197,37 @@ pub async fn monitor_target(
         status.last_check = Some(Utc::now());
         let event = match result {
             Ok(endpoints) => {
-                let event =
-                    (previous != UpstreamState::Available).then(|| AuditEvent::UpstreamAvailable {
+                let before: Vec<String> = status
+                    .raw_endpoints
+                    .iter()
+                    .map(crate::relay::endpoints::summary)
+                    .collect();
+                let after: Vec<String> = endpoints
+                    .iter()
+                    .map(crate::relay::endpoints::summary)
+                    .collect();
+                let event = if previous != UpstreamState::Available {
+                    Some(AuditEvent::UpstreamAvailable {
                         endpoint_url: target.endpoint_url.clone(),
                         endpoints: endpoints.len(),
-                    });
+                    })
+                } else {
+                    None
+                };
+                // The gateway follows the server, so a change in what the
+                // server offers changes what clients are offered.
+                let changed = (!before.is_empty() && before != after).then(|| {
+                    tracing::warn!(
+                        target = %target.name,
+                        "the upstream server's endpoints changed: {before:?} -> {after:?}"
+                    );
+                    AuditEvent::UpstreamEndpointsChanged {
+                        endpoint_url: target.endpoint_url.clone(),
+                        before,
+                        after,
+                    }
+                });
+                let event = event.into_iter().chain(changed).collect::<Vec<_>>();
                 status.state = UpstreamState::Available;
                 status.last_error = None;
                 status.endpoints = endpoints.iter().map(EndpointInfo::from).collect();
@@ -211,19 +237,20 @@ pub async fn monitor_target(
             Err(e) => {
                 let reason = format!("{e:#}");
                 tracing::warn!(target = %target.name, "{reason}");
-                let event = (previous != UpstreamState::Unavailable).then(|| {
-                    AuditEvent::UpstreamUnavailable {
+                let event = (previous != UpstreamState::Unavailable)
+                    .then(|| AuditEvent::UpstreamUnavailable {
                         endpoint_url: target.endpoint_url.clone(),
                         reason: reason.clone(),
-                    }
-                });
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>();
                 status.state = UpstreamState::Unavailable;
                 status.last_error = Some(reason);
                 event
             }
         };
         drop(map);
-        if let Some(event) = event {
+        for event in event {
             let _ = audit
                 .record(AuditEntry::new(event).target(target.name.clone()))
                 .await;
