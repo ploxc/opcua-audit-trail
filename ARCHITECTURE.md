@@ -208,6 +208,12 @@ produces everything, also for ARMv7. A strict Content-Security-Policy (no
 inline scripts) applies. All rendering goes through an escaping template
 helper.
 
+The look follows the Ploxc brand, as in Modbux and on ploxc.com: primary
+`#5b9279`, dark `#181818`/`#1F1F1F`, light `#fafafa`/`#ffffff`, the Inter
+font and Material icons. Light or dark follows the system until the user
+picks one. Inter (SIL Open Font License, `src/web/ui/fonts/OFL.txt`) is
+embedded, so the UI needs no internet access.
+
 * **Dashboard**: upstream status per target, active client sessions (IP,
   application, user, security, since), last writes, lost audit events.
 * **Targets**: endpoint URL, *Discover* (policies, modes, user tokens, server
@@ -285,4 +291,5 @@ back to `config.toml` with the file's comments preserved.
 | Fail-closed guarantee | A `change_intent` record is committed before a change request is forwarded; the outcome follows as a normal record |
 | Web UI login | Local users with roles |
 | Frontend technology | Vanilla JS without a build step, instead of Svelte: a single `cargo build`, no Node toolchain in CI or cross builds |
+| UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |

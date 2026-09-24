@@ -217,6 +217,31 @@ async fn state_changes_need_the_csrf_header() {
 }
 
 #[tokio::test]
+async fn ui_assets_are_embedded() {
+    let w = web().await;
+    for (uri, status, content_type) in [
+        ("/", StatusCode::OK, "text/html; charset=utf-8"),
+        ("/favicon.svg", StatusCode::OK, "image/svg+xml"),
+        ("/fonts/inter-latin.woff2", StatusCode::OK, "font/woff2"),
+        ("/fonts/inter-latin-ext.woff2", StatusCode::OK, "font/woff2"),
+    ] {
+        let request = Request::get(uri).body(Body::empty()).unwrap();
+        let response = w.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            content_type,
+            "{uri}"
+        );
+    }
+    let request = Request::get("/fonts/other.woff2")
+        .body(Body::empty())
+        .unwrap();
+    let response = w.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn certificate_trust_flow() {
     let w = web().await;
     let admin = w.login("admin").await;

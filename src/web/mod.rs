@@ -135,6 +135,8 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/style.css", get(style_css))
+        .route("/favicon.svg", get(favicon))
+        .route("/fonts/{file}", get(font))
         .nest("/api", api)
         .layer(axum::middleware::from_fn(auth::csrf))
         .layer(axum::middleware::from_fn(security_headers))
@@ -181,6 +183,31 @@ async fn style_css() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         include_str!("ui/style.css"),
     )
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("ui/favicon.svg"),
+    )
+}
+
+/// Inter (SIL Open Font License, `ui/fonts/OFL.txt`), served from the binary so
+/// the UI needs no internet access.
+async fn font(Path(file): Path<String>) -> Response {
+    let bytes: &'static [u8] = match file.as_str() {
+        "inter-latin.woff2" => include_bytes!("ui/fonts/inter-latin.woff2"),
+        "inter-latin-ext.woff2" => include_bytes!("ui/fonts/inter-latin-ext.woff2"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "font/woff2"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn health() -> Json<serde_json::Value> {
