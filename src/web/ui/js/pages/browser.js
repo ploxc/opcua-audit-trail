@@ -91,27 +91,29 @@ function browserNodeName() {
 // value it has not received from its data source yet), and for the value
 // its timestamps.
 function attributeRow(a) {
-  const value = a.value
-    ? html`<span class="mono">${attributeText(a)}</span>
-        ${when(a.note, html` <span class="badge plain neutral">${a.note}</span>`)}
-        <span class="muted small">${a.value.data_type}</span>`
-    : "";
+  // The branches are functions, so they only run when their data is there
+  // (e.g. `a.status` is null for a good value, `a.value` null for a bad one).
+  const value = when(
+    a.value,
+    () => html`<span class="mono">${attributeText(a)}</span>
+      ${when(a.note, () => html` <span class="badge plain neutral">${a.note}</span>`)}
+      <span class="muted small">${a.value.data_type}</span>`,
+  );
   const status = when(
     a.status,
-    html`<div>
+    () => html`<div>
         <span class="badge plain ${a.status.startsWith("Uncertain") ? "warn" : "bad"} mono">
           ${a.status}
         </span>
       </div>
       <div class="muted small">${a.status_description}</div>`,
   );
+  const source = when(a.source_timestamp, () => html`Source ${time(a.source_timestamp)}`);
+  const server = when(a.server_timestamp, () => html`Server ${time(a.server_timestamp)}`);
   const stamps = when(
     a.source_timestamp || a.server_timestamp,
-    html`<div class="muted small">
-      ${when(a.source_timestamp, html`Source ${time(a.source_timestamp)}`)}${when(
-        a.source_timestamp && a.server_timestamp,
-        " · ",
-      )}${when(a.server_timestamp, html`Server ${time(a.server_timestamp)}`)}
+    () => html`<div class="muted small">
+      ${source}${when(a.source_timestamp && a.server_timestamp, " · ")}${server}
     </div>`,
   );
   return html`<tr>
