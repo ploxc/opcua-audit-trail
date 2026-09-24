@@ -134,7 +134,7 @@ pub struct ExportStatus {
 pub type ExportStatuses = Arc<RwLock<BTreeMap<String, ExportStatus>>>;
 
 pub enum Sink {
-    QuestDb(questdb::QuestDbSink),
+    QuestDb(Box<questdb::QuestDbSink>),
     Syslog(syslog::SyslogSink),
 }
 
@@ -178,7 +178,7 @@ pub fn start(
     let mut sinks = Vec::new();
     if let Some(q) = &config.questdb {
         sinks.push((
-            Sink::QuestDb(questdb::QuestDbSink::new(q)?),
+            Sink::QuestDb(Box::new(questdb::QuestDbSink::new(q)?)),
             Duration::from_secs(q.interval_secs),
         ));
     }
