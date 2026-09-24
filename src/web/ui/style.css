@@ -838,6 +838,40 @@ button.icon-button:hover {
   color: var(--fg);
   text-decoration: none;
 }
+/* Live toggle on the audit trail: a dot that pulses while records reload. */
+button.live-toggle {
+  color: var(--muted);
+  border-color: var(--input-line);
+}
+button.live-toggle.on {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 50%, transparent);
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+.live-toggle.on .live-dot {
+  opacity: 1;
+  animation: live-pulse 1.6s ease-out infinite;
+}
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-toggle.on .live-dot {
+    animation: none;
+  }
+}
 button:disabled {
   opacity: 0.5;
   cursor: default;

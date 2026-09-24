@@ -334,9 +334,10 @@ export function auditView() {
     <div class="page-head">
       <div class="inline">${menuButton}<h1>Audit trail</h1></div>
       <div class="actions">
-        <label class="inline small">
-          <input type="checkbox" name="live" data-action="live" ${flag(a.live, "checked")}> Live
-        </label>
+        <button class="live-toggle ${a.live ? "on" : ""}" data-action="live" aria-pressed="${a.live}"
+          title="${a.live ? "Stop reloading" : "Reload the records every 3 s"}">
+          <span class="live-dot"></span>Live
+        </button>
         <button data-action="toggle-top">Most written</button>
         <button data-action="verify">Verify integrity</button>
         <a class="button" href="/api/audit.csv?${auditQuery({ limit: "" })}">Export CSV</a>
@@ -537,10 +538,11 @@ export const actions = {
     renderPage();
   },
 
-  /** The "Live" checkbox: reloads the records every 3 s. */
-  live(el) {
-    state.audit.live = el.checked;
+  /** The "Live" toggle: reloads the records every 3 s. */
+  live() {
+    state.audit.live = !state.audit.live;
     schedule("audit");
+    renderPage();
   },
 };
 
