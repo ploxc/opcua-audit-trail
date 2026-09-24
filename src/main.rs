@@ -99,7 +99,7 @@ fn main() -> ExitCode {
     let result = runtime.block_on(async {
         match cli.command {
             Command::Init => init(&cli.config),
-            Command::Run => run(&cli.config).await,
+            Command::Run => run(&cli.config, shutdown_signal()).await,
             Command::Discover { endpoint_url } => discover(&cli.config, &endpoint_url).await,
             Command::Verify => verify(&cli.config).await,
             Command::User(cmd) => user_command(&cli.config, cmd),
@@ -185,7 +185,11 @@ fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run(path: &Path) -> anyhow::Result<ExitCode> {
+/// Runs the gateway until `shutdown` completes.
+async fn run(
+    path: &Path,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<ExitCode> {
     let config = Arc::new(Config::load(path)?);
 
     let pki = Pki::open(&config.gateway.pki_dir)?;
@@ -258,13 +262,34 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
         exports,
     };
     tokio::spawn(state.browser.clone().reap_idle(state.clone()));
-    let listener = tokio::net::TcpListener::bind(config.web.listen)
-        .await
-        .with_context(|| format!("binding web UI to {}", config.web.listen))?;
-    tracing::info!("web UI on http://{}", config.web.listen);
-    axum::serve(listener, web::router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let router = web::router(state);
+    if config.web.tls {
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
+            web::tls::server_config(&config)?,
+        ));
+        let listener = std::net::TcpListener::bind(config.web.listen)
+            .with_context(|| format!("binding web UI to {}", config.web.listen))?;
+        listener.set_nonblocking(true)?;
+        let handle = axum_server::Handle::new();
+        let stopper = handle.clone();
+        tokio::spawn(async move {
+            shutdown.await;
+            stopper.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+        });
+        tracing::info!("web UI on https://{}", config.web.listen);
+        axum_server::from_tcp_rustls(listener, tls)?
+            .handle(handle)
+            .serve(router.into_make_service())
+            .await?;
+    } else {
+        let listener = tokio::net::TcpListener::bind(config.web.listen)
+            .await
+            .with_context(|| format!("binding web UI to {}", config.web.listen))?;
+        tracing::info!("web UI on http://{}", config.web.listen);
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    }
 
     tracing::info!("shutting down");
     targets.stop_all().await;

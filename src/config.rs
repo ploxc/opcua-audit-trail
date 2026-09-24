@@ -131,15 +131,22 @@ impl GatewayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WebConfig {
-    /// Address of the web UI and REST API. Defaults to loopback only until the UI
-    /// has authentication.
+    /// Address of the web UI and REST API. Defaults to loopback only.
     pub listen: SocketAddr,
+    /// Serve the UI over HTTPS. Uses the gateway's OPC UA certificate unless
+    /// `tls_certificate` and `tls_private_key` point to PEM files.
+    pub tls: bool,
+    pub tls_certificate: Option<PathBuf>,
+    pub tls_private_key: Option<PathBuf>,
 }
 
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
             listen: ([127, 0, 0, 1], 8080).into(),
+            tls: false,
+            tls_certificate: None,
+            tls_private_key: None,
         }
     }
 }
@@ -219,12 +226,24 @@ impl Config {
         };
         resolve(&mut self.gateway.pki_dir);
         resolve(&mut self.gateway.data_dir);
+        for p in [&mut self.web.tls_certificate, &mut self.web.tls_private_key]
+            .into_iter()
+            .flatten()
+        {
+            resolve(p);
+        }
         if let Some(db) = self.audit.database.as_mut() {
             resolve(db);
         }
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.web.tls_certificate.is_some() != self.web.tls_private_key.is_some() {
+            bail!("web: set both tls_certificate and tls_private_key, or neither");
+        }
+        if self.web.tls_certificate.is_some() && !self.web.tls {
+            bail!("web: tls_certificate is set but tls = false");
+        }
         if let Some(q) = &self.export.questdb {
             if !q.url.starts_with("http://") {
                 bail!("export.questdb.url must start with http:// (for TLS, put a proxy in front)");
@@ -294,7 +313,11 @@ data_dir = "data"
 # certificate_hostnames = ["gateway.local", "192.168.0.20"]
 
 [web]
-# Loopback only until the web UI has authentication.
+# Loopback only by default. For remote access enable HTTPS, e.g.
+#   listen = "0.0.0.0:8443"
+#   tls = true                        # uses the gateway certificate, or:
+#   tls_certificate = "web-cert.pem"  # PEM chain
+#   tls_private_key = "web-key.pem"   # PEM (PKCS#8, PKCS#1 or SEC1)
 listen = "127.0.0.1:8080"
 
 [audit]

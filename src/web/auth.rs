@@ -166,6 +166,7 @@ pub async fn login(
         }))
         .await;
     let cookie = Cookie::build((COOKIE, token))
+        .secure(s.config.web.tls)
         .http_only(true)
         .same_site(SameSite::Strict)
         .path("/")
