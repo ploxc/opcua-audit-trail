@@ -1,5 +1,12 @@
 # Security and correctness audit
 
+> **Verified independently:** see [VERIFICATION.md](VERIFICATION.md).
+> - 29 findings were confirmed, R2 is plausible, and R7 was refuted and withdrawn.
+> - About 30 further findings were added (N1–N25 plus Info items), three of them High.
+> - Two of the "found sound" statements below were corrected.
+>
+> This file is kept as it was written.
+
 **Scope:** the whole repository at commit `bbfa4cf` (after PR #2): the relay, the audit trail, export, the web UI and API, certificates, configuration, and packaging.
 **Method:** manual code review. I checked library behaviour against the async-opcua 0.19 sources. I did not write any proof-of-concept exploits; independent agents verify the findings in [VERIFICATION.md](VERIFICATION.md).
 **Author:** the same assistant that wrote the code. That is why the findings are verified independently.
