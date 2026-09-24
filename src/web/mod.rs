@@ -143,7 +143,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(index))
-        .route("/app.js", get(app_js))
+        .route("/js/{*path}", get(script))
         .route("/style.css", get(style_css))
         .route("/favicon.svg", get(favicon))
         .route("/fonts/{file}", get(font))
@@ -222,11 +222,42 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("ui/index.html"))
 }
 
-async fn app_js() -> impl IntoResponse {
+/// The UI's JavaScript modules (`ui/js/`, see ARCHITECTURE.md), by their path
+/// under `/js/`. A new module must be added here.
+const SCRIPTS: &[(&str, &str)] = &[
+    ("main.js", include_str!("ui/js/main.js")),
+    ("html.js", include_str!("ui/js/html.js")),
+    ("api.js", include_str!("ui/js/api.js")),
+    ("state.js", include_str!("ui/js/state.js")),
+    ("format.js", include_str!("ui/js/format.js")),
+    ("components.js", include_str!("ui/js/components.js")),
+    ("ignore.js", include_str!("ui/js/ignore.js")),
+    ("alarms.js", include_str!("ui/js/alarms.js")),
+    ("pages/account.js", include_str!("ui/js/pages/account.js")),
+    ("pages/audit.js", include_str!("ui/js/pages/audit.js")),
+    ("pages/browser.js", include_str!("ui/js/pages/browser.js")),
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("ui/app.js"),
-    )
+        "pages/certificates.js",
+        include_str!("ui/js/pages/certificates.js"),
+    ),
+    (
+        "pages/dashboard.js",
+        include_str!("ui/js/pages/dashboard.js"),
+    ),
+    ("pages/settings.js", include_str!("ui/js/pages/settings.js")),
+    ("pages/targets.js", include_str!("ui/js/pages/targets.js")),
+    ("pages/users.js", include_str!("ui/js/pages/users.js")),
+];
+
+async fn script(Path(path): Path<String>) -> Response {
+    match SCRIPTS.iter().find(|(name, _)| *name == path) {
+        Some((_, source)) => (
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+            *source,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn style_css() -> impl IntoResponse {

@@ -233,6 +233,16 @@ async fn ui_assets_are_embedded() {
         ("/favicon.svg", StatusCode::OK, "image/svg+xml"),
         ("/fonts/inter-latin.woff2", StatusCode::OK, "font/woff2"),
         ("/fonts/inter-latin-ext.woff2", StatusCode::OK, "font/woff2"),
+        (
+            "/js/main.js",
+            StatusCode::OK,
+            "text/javascript; charset=utf-8",
+        ),
+        (
+            "/js/pages/audit.js",
+            StatusCode::OK,
+            "text/javascript; charset=utf-8",
+        ),
     ] {
         let request = Request::get(uri)
             .header(header::HOST, "localhost:8080")
@@ -246,12 +256,47 @@ async fn ui_assets_are_embedded() {
             "{uri}"
         );
     }
-    let request = Request::get("/fonts/other.woff2")
-        .header(header::HOST, "localhost")
-        .body(Body::empty())
-        .unwrap();
-    let response = w.app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for uri in ["/fonts/other.woff2", "/js/other.js", "/app.js"] {
+        let request = Request::get(uri)
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let response = w.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+/// Every module in `ui/js/` is embedded: a module missing from the table in
+/// mod.rs would only fail in the browser.
+#[tokio::test]
+async fn every_ui_module_is_served() {
+    fn modules(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                modules(&entry.path(), &format!("{prefix}{name}/"), out);
+            } else if name.ends_with(".js") {
+                out.push(format!("{prefix}{name}"));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/web/ui/js");
+    modules(&dir, "", &mut found);
+    assert!(found.len() > 1);
+    let w = web().await;
+    for module in found {
+        let request = Request::get(format!("/js/{module}"))
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .unwrap();
+        let response = w.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{module}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let on_disk = std::fs::read(dir.join(&module)).unwrap();
+        assert_eq!(body.as_ref(), on_disk.as_slice(), "{module}");
+    }
 }
 
 #[tokio::test]
