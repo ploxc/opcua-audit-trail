@@ -959,8 +959,14 @@ async function load() {
 function schedule(pageId) {
   clearInterval(refreshTimer);
   refreshTimer = null;
-  const every = (ms, fn) => { refreshTimer = setInterval(async () => { try { await fn(); renderPage(); } catch (e) { fail(e); } }, ms); };
+  const every = (ms, fn) => { refreshTimer = setInterval(async () => { try { if (await fn() !== false) renderPage(); } catch (e) { fail(e); } }, ms); };
   if (pageId === "dashboard") every(5000, refreshDashboard);
+  // Target status (a new target starts as "Checking…"), but not while a
+  // target is being edited: that would redraw the form.
+  if (pageId === "targets") every(5000, async () => {
+    if (state.targets.editing) return false;
+    state.status = await get("/status");
+  });
   if (pageId === "audit" && state.audit.live) every(3000, () => loadAudit());
   if (pageId === "browser" && state.browser.connection && state.browser.watch.length) every(1000, pollWatch);
 }
