@@ -24,6 +24,35 @@ function html(strings, ...values) {
 const when = (cond, then, otherwise = "") =>
   cond ? (typeof then === "function" ? then() : then) : otherwise;
 
+// ---------- icons ----------
+
+// Material icons (filled, Apache 2.0), the set Modbux uses.
+const ICON_PATHS = {
+  dashboard: '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
+  audit: '<path d="M19.5 3.5 18 2l-1.5 1.5L15 2l-1.5 1.5L12 2l-1.5 1.5L9 2 7.5 3.5 6 2v14H3v3c0 1.66 1.34 3 3 3h12c1.66 0 3-1.34 3-3V2l-1.5 1.5zM19 19c0 .55-.45 1-1 1s-1-.45-1-1v-3H8V5h11v14z"/><path d="M9 7h6v2H9zm7 0h2v2h-2zm-7 3h6v2H9zm7 0h2v2h-2z"/>',
+  targets: '<path d="M13 22h8v-7h-3v-4h-5V9h3V2H8v7h3v2H6v4H3v7h8v-7H8v-2h8v2h-3z"/>',
+  certificates: '<path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>',
+  browser: '<path d="M22 11V3h-7v3H9V3H2v8h7V8h2v10h4v3h7v-8h-7v3h-2V8h2v3z"/>',
+  users: '<path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/>',
+  account: '<circle cx="10" cy="8" r="4"/><path d="M10.67 13.02c-.22-.01-.44-.02-.67-.02-2.42 0-4.68.67-6.61 1.82-.88.52-1.39 1.5-1.39 2.53V20h9.26a6.963 6.963 0 0 1-.59-6.98zM20.75 16c0-.22-.03-.42-.06-.63l1.14-1.01-1-1.73-1.45.49c-.32-.27-.68-.48-1.08-.63L18 11h-2l-.3 1.49c-.4.15-.76.36-1.08.63l-1.45-.49-1 1.73 1.14 1.01c-.03.21-.06.41-.06.63s.03.42.06.63l-1.14 1.01 1 1.73 1.45-.49c.32.27.68.48 1.08.63L16 21h2l.3-1.49c.4-.15.76-.36 1.08-.63l1.45.49 1-1.73-1.14-1.01c.03-.21.06-.41.06-.63zM17 18c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/>',
+  dark: '<path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>',
+  light: '<path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37a.996.996 0 0 0-1.41 0 .996.996 0 0 0 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0a.996.996 0 0 0 0-1.41l-1.06-1.06zm1.06-10.96a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06zM7.05 18.36a.996.996 0 0 0 0-1.41.996.996 0 0 0-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06z"/>',
+  menu: '<path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/>',
+  logout: '<path d="m17 7-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/>',
+};
+const icon = (name, cls = "") =>
+  new Html(`<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name]}</svg>`);
+
+const LOGO_PATH = "m 107.60293,0.64220653 c -35.769829,0 -65.039135,29.45982647 -65.039135,65.27483247 V 94.927484 L 30.45287,82.757639 7.3579379,105.74314 32.676186,131.18345 7.3579379,156.5017 30.214018,179.35778 55.477552,154.09425 80.619032,179.35778 103.71607,156.37227 75.147546,127.66697 V 65.917039 c 0,-18.289883 14.380372,-32.691083 32.455384,-32.691083 18.07499,0 32.45538,14.4012 32.45538,32.691083 0,18.275197 -14.35769,32.665875 -32.41224,32.68897 l -16.215592,-0.09996 -0.124161,32.583751 16.296613,0.1 v 0.002 c 35.7698,0 65.03913,-29.45983 65.03913,-65.274832 0,-35.815005 -29.26933,-65.27483198 -65.03913,-65.27483198 z";
+const logo = (cls = "") =>
+  new Html(`<svg class="logo ${cls}" viewBox="0 0 180 180" aria-hidden="true"><circle class="dot" cx="107.599" cy="65.927" r="16.292"/><path class="mark" d="${LOGO_PATH}"/></svg>`);
+
+const menuButton = new Html(`<button class="icon-button menu-button" data-action="menu" aria-label="Menu">${icon("menu").s}</button>`);
+const THEME_KEY = "ploxc-color-mode";
+// Both icons are rendered; the stylesheet shows the one for the other mode.
+const themeButton = () => html`<button class="icon-button" data-action="theme" title="Light or dark mode" aria-label="Toggle light or dark mode">${icon("light", "icon-sun")}${icon("dark", "icon-moon")}</button>`;
+const ploxcLink = () => html`<a class="ploxc-link" href="https://ploxc.com" target="_blank" rel="noopener">${logo()}Ploxc</a>`;
+
 // ---------- API ----------
 
 class ApiError extends Error {
@@ -70,6 +99,7 @@ const state = {
   certificates: null,
   browser: { target: "", connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {} },
   users: [],
+  version: "",
 };
 const can = (role) => state.user && ROLE_LEVEL[state.user.role] >= ROLE_LEVEL[role];
 
@@ -176,13 +206,13 @@ function eventSummary(e) {
 // ---------- routing ----------
 
 const PAGES = [
-  { id: "dashboard", label: "Dashboard", role: "auditor", icon: "◧" },
-  { id: "audit", label: "Audit trail", role: "auditor", icon: "☰" },
-  { id: "targets", label: "Targets", role: "auditor", icon: "⇄" },
-  { id: "certificates", label: "Certificates", role: "auditor", icon: "✓" },
-  { id: "browser", label: "Browser", role: "operator", icon: "⌕" },
-  { id: "users", label: "Users", role: "admin", icon: "☺" },
-  { id: "account", label: "Account", role: "auditor", icon: "⚙", hidden: true },
+  { id: "dashboard", label: "Dashboard", role: "auditor", icon: "dashboard" },
+  { id: "audit", label: "Audit trail", role: "auditor", icon: "audit" },
+  { id: "targets", label: "Targets", role: "auditor", icon: "targets" },
+  { id: "certificates", label: "Certificates", role: "auditor", icon: "certificates" },
+  { id: "browser", label: "Browser", role: "operator", icon: "browser" },
+  { id: "users", label: "Users", role: "admin", icon: "users" },
+  { id: "account", label: "Account", role: "auditor", icon: "account", hidden: true },
 ];
 const currentPage = () => {
   const id = location.hash.replace(/^#\/?/, "").split("?")[0] || "dashboard";
@@ -206,20 +236,23 @@ function render() {
   const rejected = state.status?.rejected_certificates || 0;
   app.innerHTML = html`<div class="shell">
     <aside class="sidebar">
-      <div class="brand"><div class="brand-mark">✓</div><div>Audit Gateway<small>OPC UA</small></div></div>
+      <div class="brand">${logo()}<div>Audit Gateway<small>OPC UA</small></div></div>
       <nav class="nav">
         ${PAGES.filter((p) => !p.hidden && can(p.role)).map((p) => html`<a href="#/${p.id}" class="${p.id === page.id ? "active" : ""}">
-          <span aria-hidden="true">${p.icon}</span>${p.label}
+          ${icon(p.icon)}${p.label}
           ${when(p.id === "certificates" && rejected, html`<span class="count" title="Certificates waiting for a decision">${rejected}</span>`)}
         </a>`)}
       </nav>
       <div class="sidebar-foot">
-        <div class="who">${state.user.username} <span class="muted">· ${state.user.role}</span></div>
-        <div class="inline">
-          <a href="#/account" class="small">Account</a>
-          <button class="link small" data-action="theme">Theme</button>
-          <button class="link small" data-action="logout">Log out</button>
+        <div class="user-row">
+          <div class="who">${state.user.username}<small>${state.user.role}</small></div>
+          <div class="tools">
+            <a href="#/account" class="button icon-button" title="Account" aria-label="Account">${icon("account")}</a>
+            ${themeButton()}
+            <button class="icon-button" data-action="logout" title="Log out" aria-label="Log out">${icon("logout")}</button>
+          </div>
         </div>
+        <div class="made-by">${ploxcLink()}<span class="version">${state.version}</span></div>
       </div>
     </aside>
     <main class="main" id="page">${pageView(page)}</main>
@@ -264,13 +297,15 @@ function pageView(page) {
 // ---------- login ----------
 
 function loginView() {
-  return html`<div class="login"><form class="card" data-form="login">
-    <div class="brand"><div class="brand-mark">✓</div><div>OPC UA Audit Gateway<small>Sign in to continue</small></div></div>
+  return html`<div class="login">${logo("login-backdrop")}<form class="card" data-form="login">
+    <div class="brand">${logo()}<div>Audit Gateway<small>OPC UA</small></div></div>
     <div class="field"><label for="u">User name</label><input id="u" name="username" autocomplete="username" required></div>
     <div class="field"><label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required></div>
     <div id="login-error" class="alert bad hidden"></div>
     <button class="primary" type="submit">Sign in</button>
-  </form></div>`;
+  </form>
+  <div class="login-foot">${ploxcLink()}<span class="version">${state.version}</span></div>
+  <div class="login-theme">${themeButton()}</div></div>`;
 }
 
 // ---------- dashboard ----------
@@ -283,7 +318,7 @@ function dashboardView() {
   const clients = targets.reduce((n, t) => n + t.clients.length, 0);
   const recent = state.dashboardChanges || [];
   return html`
-    <div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Dashboard</h1></div>
+    <div class="page-head"><div class="inline">${menuButton}<h1>Dashboard</h1></div>
       <span class="muted small">Gateway ${s.version} · updates every 5 s</span></div>
     ${when(s.exports?.some((e) => e.last_error), html`<div class="alert warn">Audit export is failing; records wait in the local store and are sent once the destination is back.</div>`)}
     ${when(s.lost_audit_events > 0, html`<div class="alert bad">${s.lost_audit_events} audit events could not be stored. Check the disk of the audit database.</div>`)}
@@ -379,7 +414,7 @@ function auditView() {
   const targets = state.status?.targets || [];
   const selected = a.rows.find((r) => r.seq === a.selected);
   return html`
-    <div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Audit trail</h1></div>
+    <div class="page-head"><div class="inline">${menuButton}<h1>Audit trail</h1></div>
       <div class="actions">
         <label class="inline small"><input type="checkbox" name="live" data-action="live" ${new Html(a.live ? "checked" : "")}> Live</label>
         <button data-action="verify">Verify integrity</button>
@@ -434,7 +469,7 @@ function targetsView() {
   const editing = state.targets.editing;
   const trusted = new Set((state.certificates?.trusted || []).map((c) => c.thumbprint));
   return html`
-    <div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Targets</h1></div>
+    <div class="page-head"><div class="inline">${menuButton}<h1>Targets</h1></div>
       ${when(can("admin") && !editing, html`<div class="actions"><button class="primary" data-action="new-target">Add target</button></div>`)}</div>
     <p class="section-note">Each target is an OPC UA server behind the gateway. Clients connect to the gateway's listen address; the gateway follows the target's security settings.</p>
     ${when(editing, () => targetForm(editing))}
@@ -486,7 +521,7 @@ function certificatesView() {
   if (!c) return html`<p class="muted">Loading…</p>`;
   const admin = can("admin");
   return html`
-    <div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Certificates</h1></div></div>
+    <div class="page-head"><div class="inline">${menuButton}<h1>Certificates</h1></div></div>
     <div class="card"><div class="card-head"><h2>Gateway certificate</h2>
       <div class="inline"><a class="button small" href="/api/certificates/own/cert.der">Download</a>
       ${when(admin, html`<button class="small" data-action="show-import">Import…</button><button class="small danger" data-action="regenerate">Regenerate</button>`)}</div></div>
@@ -532,7 +567,7 @@ function browserView() {
   const b = state.browser;
   const targets = state.status?.targets || [];
   if (!b.connection) {
-    return html`<div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Browser</h1></div></div>
+    return html`<div class="page-head"><div class="inline">${menuButton}<h1>Browser</h1></div></div>
       <form class="card" data-form="browser-connect"><h2>Connect to a target</h2>
       <p class="section-note">Opens a read-only session directly on the target, with the gateway's certificate. The login is only used for this session and never stored.</p>
       <div class="form-grid">
@@ -543,7 +578,7 @@ function browserView() {
       </div></form>`;
   }
   const watch = b.watch;
-  return html`<div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Browser</h1>
+  return html`<div class="page-head"><div class="inline">${menuButton}<h1>Browser</h1>
       <span class="badge ok">${b.target}</span><span class="muted small">${b.connection.security_policy} / ${b.connection.security_mode} as ${b.connection.user}</span></div>
       <div class="actions"><button data-action="browser-disconnect">Disconnect</button></div></div>
     <div class="browser">
@@ -586,7 +621,7 @@ async function browseInto(nodeId) {
 // ---------- users & account ----------
 
 function usersView() {
-  return html`<div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Users</h1></div></div>
+  return html`<div class="page-head"><div class="inline">${menuButton}<h1>Users</h1></div></div>
     <div class="card"><div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody>
       ${state.users.map((u) => html`<tr><td>${u.username}</td>
         <td><select name="role-${u.username}" data-action="set-role" data-user="${u.username}">${["auditor", "operator", "admin"].map((r) => html`<option ${new Html(u.role === r ? "selected" : "")}>${r}</option>`)}</select></td>
@@ -603,7 +638,7 @@ function usersView() {
 }
 
 function accountView() {
-  return html`<div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Account</h1></div></div>
+  return html`<div class="page-head"><div class="inline">${menuButton}<h1>Account</h1></div></div>
     <form class="card" data-form="password"><h2>Change password</h2><div class="form-grid">
       <div><label>Current password</label><input name="current" type="password" required autocomplete="current-password"></div>
       <div><label>New password (min. 8)</label><input name="new" type="password" minlength="8" required autocomplete="new-password"></div>
@@ -656,10 +691,11 @@ const readFile = (file) => new Promise((resolve, reject) => {
 const actions = {
   async logout() { await post("/logout"); state.user = null; render(); },
   theme() {
+    // Like ploxc.com: follow the system until the user picks a mode.
     const root = document.documentElement;
     const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
     root.dataset.theme = dark ? "light" : "dark";
-    try { localStorage.setItem("theme", root.dataset.theme); } catch {}
+    try { localStorage.setItem(THEME_KEY, root.dataset.theme); } catch {}
   },
   menu() { document.querySelector(".shell")?.classList.toggle("nav-open"); },
   // audit
@@ -830,11 +866,12 @@ window.addEventListener("hashchange", () => {
 // ---------- start ----------
 
 try {
-  const theme = localStorage.getItem("theme");
-  if (theme) document.documentElement.dataset.theme = theme;
+  const theme = localStorage.getItem(THEME_KEY);
+  if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
 } catch {}
 
 (async () => {
+  try { state.version = (await get("/health")).version; } catch {}
   try { state.user = await get("/me"); } catch { state.user = null; }
   render();
   if (state.user) await load();
