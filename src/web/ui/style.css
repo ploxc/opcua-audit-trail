@@ -403,3 +403,15 @@ fieldset.choice label .small { grid-column: 2; }
 .readonly-kv dd { word-break: break-all; }
 @media (max-width: 520px) { .settings-grid { grid-template-columns: 1fr; } }
 .setting label.inline { color: var(--fg); font-size: 13.5px; }
+
+/* Target security section */
+.security-block { padding: 10px 0 12px; border-bottom: 1px solid var(--line); }
+.security-block:last-of-type { border-bottom: none; }
+.security-block h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+.security-block .help { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; max-width: 880px; }
+.security-block .inline-input { display: flex; align-items: center; gap: 10px; }
+.security-block .inline-input label { margin: 0; white-space: nowrap; }
+.security-block .inline-input select { max-width: 320px; }
+.mb { margin-bottom: 10px; }
+.mt-xs { margin-top: 6px; }
+tr.dimmed td { opacity: 0.5; }
