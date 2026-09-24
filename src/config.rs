@@ -33,7 +33,10 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ExportConfig {
     pub questdb: Option<QuestDbConfig>,
-    pub syslog: Option<SyslogConfig>,
+    /// No longer supported (see docs/export/SYSLOG.md); ignored with a
+    /// warning so an old config file still loads.
+    #[serde(default, skip_serializing)]
+    pub syslog: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,49 +63,6 @@ fn default_questdb_table() -> String {
 
 fn default_export_interval() -> u64 {
     5
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SyslogProtocol {
-    Udp,
-    Tcp,
-    /// Syslog over TLS (RFC 5425).
-    Tls,
-}
-
-impl SyslogProtocol {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SyslogProtocol::Udp => "udp",
-            SyslogProtocol::Tcp => "tcp",
-            SyslogProtocol::Tls => "tls",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SyslogConfig {
-    /// `host:port` of the syslog receiver (SIEM, Graylog, rsyslog, …).
-    pub address: String,
-    #[serde(default = "default_syslog_protocol")]
-    pub protocol: SyslogProtocol,
-    /// Syslog facility number; 16 = local0.
-    #[serde(default = "default_syslog_facility")]
-    pub facility: u8,
-    #[serde(default = "default_export_interval")]
-    pub interval_secs: u64,
-    /// CA certificates (PEM) for `protocol = "tls"`; default: public roots.
-    pub ca_file: Option<PathBuf>,
-}
-
-fn default_syslog_protocol() -> SyslogProtocol {
-    SyslogProtocol::Udp
-}
-
-fn default_syslog_facility() -> u8 {
-    16
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,11 +299,6 @@ impl Config {
                 resolve(p);
             }
         }
-        if let Some(s) = self.export.syslog.as_mut() {
-            if let Some(p) = s.ca_file.as_mut() {
-                resolve(p);
-            }
-        }
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -374,13 +329,8 @@ impl Config {
                 bail!("export.questdb.interval_secs must be > 0");
             }
         }
-        if let Some(s) = &self.export.syslog {
-            if s.facility > 23 {
-                bail!("export.syslog.facility must be 0..=23");
-            }
-            if s.interval_secs == 0 {
-                bail!("export.syslog.interval_secs must be > 0");
-            }
+        if self.export.syslog.is_some() {
+            tracing::warn!("[export.syslog] is no longer supported and is ignored");
         }
         let mut names = std::collections::HashSet::new();
         let mut listens = std::collections::HashSet::new();
@@ -493,10 +443,6 @@ ignored_summary_secs = 3600
 # url = "http://questdb:9000"   # or https://…
 # table = "opcua_audit"
 # ca_file = "questdb-ca.pem"    # for https with a private CA
-#
-# [export.syslog]
-# address = "siem.local:514"
-# protocol = "tcp"              # or "tls" (with ca_file = …), or "udp"
 
 # One block per upstream OPC UA server.
 # [[targets]]

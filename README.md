@@ -14,7 +14,7 @@ in Docker.
 > calls, history updates, node management, sessions and connections are
 > audited, with old value → new value and the node's display name. The web UI
 > covers status, the audit trail, targets, certificates, an OPC UA browser and
-> users. Audit records can be exported to QuestDB and syslog. It installs as
+> users. Audit records can be exported to QuestDB. It installs as
 > a systemd or Windows service or runs as a container, with optional HTTPS.
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap, and
 > [docs/audit](docs/audit/) for the security audit and its independent
@@ -202,13 +202,11 @@ url = "http://questdb:9000"   # ILP over HTTP(S); each batch is acknowledged
 table = "opcua_audit"         # created on first write
 # token = "…"  or  username = "…" / password = "…"  (use https off-host)
 # ca_file = "questdb-ca.pem"  # https with a private CA; default: public roots
-
-[export.syslog]               # SIEM: Graylog, Splunk, Wazuh, rsyslog, …
-address = "siem.local:6514"
-protocol = "tls"              # RFC 5425; "tcp" is RFC 6587 framing; "udp" is fire-and-forget
-# ca_file = "siem-ca.pem"
-facility = 16                 # local0
 ```
+
+In the web UI (Settings), a private CA is pasted as PEM text; the gateway
+keeps it in `data/questdb-ca.pem`. Syslog export is not supported (any more):
+see [docs/export/SYSLOG.md](docs/export/SYSLOG.md).
 
 Every exported record carries its sequence number, its hash and the previous
 record's hash. Once records are outside the gateway, rewriting the local
@@ -279,7 +277,7 @@ not been written yet is lost if the gateway crashes.
 | Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
 | Users | admin | Users and roles |
-| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB and syslog export, certificate host names; web server and paths shown read-only |
+| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB export, certificate host names; web server and paths shown read-only |
 
 Settings are saved in `config.toml` (comments are kept) and applied at once,
 without a restart or disconnecting clients. Passwords and tokens are never

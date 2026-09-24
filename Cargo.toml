@@ -43,7 +43,7 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 tracing-appender = "0.2"
-# TLS towards QuestDB and syslog; Mozilla's roots unless a CA file is set.
+# TLS towards QuestDB; Mozilla's roots unless a CA file is set.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
 

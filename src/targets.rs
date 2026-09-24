@@ -323,23 +323,8 @@ fn write_settings(path: &std::path::Path, config: &Config) -> anyhow::Result<()>
             t["interval_secs"] = value(q.interval_secs as i64);
         }
     }
-    match &config.export.syslog {
-        None => {
-            export.remove("syslog");
-        }
-        Some(sl) => {
-            let t = table(export, "syslog");
-            t["address"] = value(sl.address.as_str());
-            t["protocol"] = value(sl.protocol.as_str());
-            t["facility"] = value(i64::from(sl.facility));
-            set_opt(
-                t,
-                "ca_file",
-                sl.ca_file.as_ref().map(|p| p.display().to_string()),
-            );
-            t["interval_secs"] = value(sl.interval_secs as i64);
-        }
-    }
+    // Syslog export is no longer supported.
+    export.remove("syslog");
     if export.is_empty() {
         root.remove("export");
     }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::auth::AuthUser;
 use super::{ApiError, ApiResult, AppState};
-use crate::config::{AuditConfig, FailMode, QuestDbConfig, SyslogConfig, SyslogProtocol};
+use crate::config::{AuditConfig, FailMode, QuestDbConfig};
 use crate::users::Role;
 
 #[derive(Serialize)]
@@ -35,7 +35,6 @@ struct AuditView {
 #[derive(Serialize)]
 struct ExportView {
     questdb: Option<QuestDbView>,
-    syslog: Option<SyslogConfig>,
 }
 
 #[derive(Serialize)]
@@ -45,7 +44,8 @@ struct QuestDbView {
     username: Option<String>,
     password_set: bool,
     token_set: bool,
-    ca_file: Option<String>,
+    /// The CA certificates (PEM) the https endpoint is verified with.
+    ca_pem: Option<String>,
     interval_secs: u64,
 }
 
@@ -85,10 +85,9 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
                 username: q.username.clone(),
                 password_set: q.password.is_some(),
                 token_set: q.token.is_some(),
-                ca_file: q.ca_file.as_deref().map(path),
+                ca_pem: q.ca_file.as_deref().map(read_pem),
                 interval_secs: q.interval_secs,
             }),
-            syslog: c.export.syslog.clone(),
         },
         gateway: GatewayView {
             application_name: c.gateway.application_name.clone(),
@@ -162,6 +161,22 @@ pub async fn put_audit(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The CA file's contents, or why they cannot be shown.
+fn read_pem(path: &std::path::Path) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(pem) if pem.len() <= MAX_PEM => pem,
+        Ok(_) => format!("# {} is too large to show", path.display()),
+        Err(e) => format!("# {} cannot be read: {e}", path.display()),
+    }
+}
+
+const MAX_PEM: usize = 256 * 1024;
+
+/// Where a CA pasted in the settings is kept, next to the export state.
+fn managed_ca(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("questdb-ca.pem")
+}
+
 /// A secret in a form: absent keeps the stored one, empty removes it.
 fn secret(input: Option<String>, stored: Option<String>) -> Option<String> {
     match input {
@@ -186,19 +201,10 @@ pub struct QuestDbInput {
     password: Option<String>,
     #[serde(default)]
     token: Option<String>,
+    /// CA certificates (PEM) for https with a private CA; empty: public
+    /// roots.
     #[serde(default)]
-    ca_file: Option<String>,
-    interval_secs: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SyslogInput {
-    address: String,
-    protocol: SyslogProtocol,
-    facility: u8,
-    #[serde(default)]
-    ca_file: Option<String>,
+    ca_pem: Option<String>,
     interval_secs: u64,
 }
 
@@ -208,8 +214,6 @@ pub struct SyslogInput {
 pub struct ExportInput {
     #[serde(default)]
     questdb: Option<QuestDbInput>,
-    #[serde(default)]
-    syslog: Option<SyslogInput>,
 }
 
 pub async fn put_export(
@@ -218,27 +222,28 @@ pub async fn put_export(
     Json(input): Json<ExportInput>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
-    let current = s.targets.config().await.export;
+    let current = s.targets.config().await;
     let mut export = crate::config::ExportConfig::default();
+    let ca = current.gateway.data_dir.join("questdb-ca.pem.new");
     if let Some(q) = input.questdb {
-        let stored = current.questdb.clone();
+        let stored = current.export.questdb.clone();
+        let pem = non_empty(q.ca_pem);
+        if let Some(pem) = &pem {
+            if pem.len() > MAX_PEM || !pem.contains("-----BEGIN CERTIFICATE-----") {
+                return Err(ApiError::bad_request(anyhow::anyhow!(
+                    "QuestDB: the CA must be one or more PEM certificates (-----BEGIN CERTIFICATE-----)"
+                )));
+            }
+            std::fs::write(&ca, format!("{pem}\n")).map_err(|e| ApiError::bad_request(e.into()))?;
+        }
         export.questdb = Some(QuestDbConfig {
             url: q.url.trim().trim_end_matches('/').to_string(),
             table: q.table.trim().to_string(),
             username: non_empty(q.username),
             password: secret(q.password, stored.as_ref().and_then(|s| s.password.clone())),
             token: secret(q.token, stored.as_ref().and_then(|s| s.token.clone())),
-            ca_file: non_empty(q.ca_file).map(Into::into),
+            ca_file: pem.map(|_| ca.clone()),
             interval_secs: q.interval_secs,
-        });
-    }
-    if let Some(sl) = input.syslog {
-        export.syslog = Some(SyslogConfig {
-            address: sl.address.trim().to_string(),
-            protocol: sl.protocol,
-            facility: sl.facility,
-            ca_file: non_empty(sl.ca_file).map(Into::into),
-            interval_secs: sl.interval_secs,
         });
     }
     if export.questdb.as_ref().is_some_and(|q| q.table.is_empty()) {
@@ -250,32 +255,28 @@ pub async fn put_export(
         .questdb
         .as_ref()
         .is_some_and(|q| q.interval_secs == 0)
-        || export.syslog.as_ref().is_some_and(|s| s.interval_secs == 0)
     {
         return Err(ApiError::bad_request(anyhow::anyhow!(
             "the interval must be at least 1 s"
         )));
     }
-    // Relative CA files are relative to the config file, as when it is loaded.
-    let base = s
-        .targets
-        .config_path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-    for ca in [
-        export.questdb.as_mut().and_then(|q| q.ca_file.as_mut()),
-        export.syslog.as_mut().and_then(|s| s.ca_file.as_mut()),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if ca.is_relative() {
-            *ca = base.join(&*ca);
-        }
-    }
-    // Fails on a bad URL or an unreadable CA file, before anything changes.
+    // Fails on a bad URL or an unusable CA, before anything changes.
     crate::export::Exports::check(&export).map_err(ApiError::bad_request)?;
+    let old_ca = current
+        .export
+        .questdb
+        .as_ref()
+        .and_then(|q| q.ca_file.as_deref())
+        .map(read_pem);
+    let new_ca = export
+        .questdb
+        .as_ref()
+        .and_then(|q| q.ca_file.as_deref())
+        .map(read_pem);
+    if let Some(file) = export.questdb.as_mut().and_then(|q| q.ca_file.as_mut()) {
+        *file = managed_ca(&current.gateway.data_dir);
+        std::fs::rename(&ca, &*file).map_err(|e| ApiError::bad_request(e.into()))?;
+    }
     let (old, config) = s
         .targets
         .update_settings(|c| c.export = export)
@@ -297,22 +298,11 @@ pub async fn put_export(
             .as_ref()
             .map(|q| format!("{} (table {})", q.url, q.table))
     };
-    let sys = |c: &crate::config::ExportConfig| {
-        c.syslog
-            .as_ref()
-            .map(|s| format!("{}://{}", s.protocol.as_str(), s.address))
-    };
-    let questdb_same =
-        format!("{:?}", old.export.questdb) == format!("{:?}", config.export.questdb);
-    let syslog_same = format!("{:?}", old.export.syslog) == format!("{:?}", config.export.syslog);
-    let changes: Vec<String> = [
-        (!questdb_same)
-            .then(|| describe("QuestDB", quest(&old.export), quest(&config.export)))
-            .flatten(),
-        (!syslog_same)
-            .then(|| describe("syslog", sys(&old.export), sys(&config.export)))
-            .flatten(),
-    ]
+    let questdb_same = old_ca == new_ca
+        && format!("{:?}", old.export.questdb) == format!("{:?}", config.export.questdb);
+    let changes: Vec<String> = [(!questdb_same)
+        .then(|| describe("QuestDB", quest(&old.export), quest(&config.export)))
+        .flatten()]
     .into_iter()
     .flatten()
     .collect();

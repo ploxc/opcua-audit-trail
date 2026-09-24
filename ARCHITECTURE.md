@@ -228,7 +228,7 @@ cutting off the newest records is detected too (`trail_truncated`), and the
 database runs with `synchronous = FULL`.
 
 The chain proves integrity *within* the database. Someone with write access to
-the file could rebuild the entire chain. The export (QuestDB, syslog) is the
+the file could rebuild the entire chain. The export (QuestDB) is the
 answer: every exported record carries its hash, so once records are outside
 the device, a rebuilt local chain no longer matches the copy. `verify` checks
 the chain against the last record each destination acknowledged, and against
@@ -342,7 +342,7 @@ only).
 | 3. Relay, `Sign` / `SignAndEncrypt` | Certificate and signature rewriting, user token re-encryption, trust lists | ✅ done (interop with real PLCs pending) |
 | 4. Old values & display names | Read-before-write, node name cache | ✅ done |
 | 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard, browser | ✅ done |
-| 6. Export | QuestDB (ILP/HTTP) and syslog (RFC 5424) export with persisted positions; exported hashes anchor the chain | ✅ done |
+| 6. Export | QuestDB (ILP/HTTP) export with persisted positions; exported hashes anchor the chain (syslog was removed, see docs/export/SYSLOG.md) | ✅ done |
 | 7. Packaging | HTTPS for the UI, Windows service, systemd unit and installer, file logging, release workflow (binaries + multi-arch images) | ✅ done |
 
 ## Decision log

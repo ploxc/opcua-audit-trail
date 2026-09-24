@@ -99,7 +99,9 @@ const ROLE_LEVEL = { auditor: 0, operator: 1, admin: 2 };
 const state = {
   user: undefined,
   status: null,
-  audit: { rows: [], filters: {}, selected: null, olderAvailable: false, live: false },
+  // `cursor`: the page shown starts before this record (null: the newest);
+  // `back`: the cursors of the newer pages, to go back to.
+  audit: { rows: [], filters: {}, selected: null, cursor: null, back: [], olderAvailable: false, live: false },
   targets: { editing: null, discovery: {} },
   certificates: null,
   browser: { target: "", connection: null, tree: {}, expanded: new Set(), selected: null, attributes: [], watch: [], values: {}, watchError: null },
@@ -210,12 +212,23 @@ const EVENT_LABELS = {
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
   connections_refused: "Connections refused", trail_truncated: "Trail cut off", clock_jumped: "Clock jumped",
-  export_gap: "Export gap", ignored_writes: "Summarised writes", alarms_acknowledged: "Acknowledged",
+  export_gap: "Export gap", ignored_writes: "Summarised writes", alarms_acknowledged: "Acknowledged", discovery: "Discovery",
 };
 const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred", "ignored_writes"]);
 // The same as the gateway's severities (src/audit/event.rs).
 const ERROR_EVENTS = new Set(["events_lost", "trail_truncated", "export_gap", "upstream_endpoints_changed"]);
 const WARNING_EVENTS = new Set(["upstream_unavailable", "certificate_rejected", "authentication_failed", "ui_login_failed", "connections_refused", "clock_jumped"]);
+// Groups of events to filter on; the kinds are sent as one list.
+const EVENT_GROUPS = [
+  ["errors", "Errors", [...ERROR_EVENTS]],
+  ["warnings", "Warnings", [...WARNING_EVENTS]],
+  ["changes", "Writes and other changes", ["write", "ignored_writes", "call", "history_update", "node_management", "change_intent", "subscriptions_transferred"]],
+  ["connections", "Clients and sessions", ["client_connected", "client_disconnected", "secure_channel_opened", "session_created", "session_activated", "session_closed", "authentication_failed", "certificate_rejected", "connections_refused"]],
+  ["targets", "Targets", ["upstream_available", "upstream_unavailable", "upstream_endpoints_changed"]],
+  ["gateway", "Gateway and configuration", ["gateway_started", "gateway_stopped", "config_changed", "retention_pruned", "events_lost", "trail_truncated", "clock_jumped", "export_gap", "alarms_acknowledged", "discovery"]],
+  ["ui", "Web UI logins", ["ui_login", "ui_login_failed"]],
+];
+const eventsByLabel = () => Object.entries(EVENT_LABELS).sort((a, b) => a[1].localeCompare(b[1]));
 const eventBadge = (type) => {
   const kind = ERROR_EVENTS.has(type) ? "bad" : WARNING_EVENTS.has(type) ? "warn"
     : CHANGE_EVENTS.has(type) ? "accent" : "neutral";
@@ -525,7 +538,7 @@ setInterval(refreshAlarms, 10000);
 function alarmBar() {
   const e = unacked("error"), w = unacked("warning");
   const f = state.audit.filters;
-  const showing = f.kinds ? (f.kinds === alarm("error")?.kinds.join(",") ? "error" : "warning") : null;
+  const showing = f.kinds && f.after_seq ? (f.kinds === alarm("error")?.kinds.join(",") ? "error" : "warning") : null;
   if (!e && !w && !showing) return "";
   const block = (severity, n, word) => when(n, html`<div class="alarm-line"><b>${plural(n, word)}</b> not acknowledged
     <button class="small" data-action="show-alarms" data-severity="${severity}">Show</button>
@@ -584,16 +597,17 @@ function auditView() {
     ${when(a.showTop, mostWrittenCard)}
     <form class="card filters" data-form="audit-filter">
       <div><label>Target</label><select name="target"><option value="">All</option>${targets.map((t) => html`<option ${new Html(f.target === t.name ? "selected" : "")}>${t.name}</option>`)}</select></div>
-      <div><label>Event</label><select name="kind"><option value="">All</option>${Object.entries(EVENT_LABELS).map(([k, v]) => html`<option value="${k}" ${new Html(f.kind === k ? "selected" : "")}>${v}</option>`)}</select></div>
-      <div><label>User</label><input name="user" value="${f.user || ""}" placeholder="exact name"></div>
-      <div><label>Node</label><input name="node_id" value="${f.node_id || ""}" placeholder="ns=3;s=…"></div>
+      <div><label>Type</label><select name="kinds"><option value="">All</option>${EVENT_GROUPS.map(([k, label, kinds]) => html`<option value="${kinds.join(",")}" ${flag(f.kinds === kinds.join(","), "selected")}>${label}</option>`)}</select></div>
+      <div><label>Event</label><input name="kind" list="event-kinds" autocomplete="off" value="${EVENT_LABELS[f.kind] || f.kind || ""}" placeholder="Any, type to search">
+        <datalist id="event-kinds">${eventsByLabel().map(([, v]) => html`<option value="${v}">`)}</datalist></div>
+      <div><label>User</label><input name="user" value="${f.user || ""}" placeholder="part of the name"></div>
+      <div><label>Node</label><input name="node_id" value="${f.node_id || ""}" placeholder="part of the id or name"></div>
       <div><label>From</label><input type="datetime-local" name="since" value="${f.since || ""}"></div>
       <div><label>Until</label><input type="datetime-local" name="until" value="${f.until || ""}"></div>
       <div class="inline"><button class="primary" type="submit">Filter</button><button type="button" data-action="clear-filter">Clear</button></div>
     </form>
     <div class="${selected ? "split" : ""}">
-      <div class="card">${auditTable(a.rows, { selectable: true })}
-        ${when(a.olderAvailable, html`<div class="inline"><button data-action="older">Older records</button></div>`)}</div>
+      <div class="card">${auditTable(a.rows, { selectable: true })}${pager(a)}</div>
       ${when(selected, () => html`<div class="card detail"><div class="card-head"><h2>Record #${selected.seq}</h2><button class="small" data-action="close-record">Close</button></div>
         <dl class="kv"><dt>Time</dt><dd>${time(selected.ts)}</dd><dt>Hash</dt><dd class="mono small">${selected.hash}</dd></dl>
         ${when((selected.event.type === "write" && selected.event.attribute === "Value") || selected.event.type === "ignored_writes",
@@ -602,13 +616,35 @@ function auditView() {
     </div>`;
 }
 
-async function loadAudit(append = false) {
+const PAGE = 100;
+
+// New filters start at the newest page.
+function setFilters(f) {
+  Object.assign(state.audit, { filters: f, cursor: null, back: [] });
+}
+
+// Pages of 100 records, fetched one at a time: the page only ever holds one.
+function pager(a) {
+  if (!a.rows.length || (!a.back.length && !a.olderAvailable)) return "";
+  const first = a.rows[0].seq, last = a.rows[a.rows.length - 1].seq;
+  return html`<div class="pager"><span class="muted small">Page ${a.back.length + 1} · records #${last}–#${first}</span>
+    <div class="inline">
+      <button class="small" data-action="page-newest" ${flag(!a.back.length, "disabled")}>« Newest</button>
+      <button class="small" data-action="page-newer" ${flag(!a.back.length, "disabled")}>‹ Newer</button>
+      <button class="small" data-action="page-older" ${flag(!a.olderAvailable, "disabled")}>Older ›</button></div></div>`;
+}
+
+// Loads the current page; `move` goes to a newer or older one first.
+async function loadAudit(move) {
   const a = state.audit;
-  const extra = { limit: 100 };
-  if (append && a.rows.length) extra.before_seq = a.rows[a.rows.length - 1].seq;
+  if (move === "first") { a.cursor = null; a.back = []; }
+  if (move === "older" && a.rows.length) { a.back.push(a.cursor); a.cursor = a.rows[a.rows.length - 1].seq; }
+  if (move === "newer" && a.back.length) a.cursor = a.back.pop();
+  const extra = { limit: PAGE + 1 };
+  if (a.cursor !== null) extra.before_seq = a.cursor;
   const rows = await get("/audit?" + auditQuery(extra));
-  a.rows = append ? a.rows.concat(rows) : rows;
-  a.olderAvailable = rows.length === 100;
+  a.olderAvailable = rows.length > PAGE;
+  a.rows = rows.slice(0, PAGE);
 }
 
 // ---------- targets ----------
@@ -645,7 +681,7 @@ function gatewayTrust(g) {
   switch (g?.state) {
     case "trusted": return html`<div class="alert ok small">The target accepts the gateway (checked with ${g.policy}).</div>`;
     case "refused": return html`<div class="alert bad small"><b>The target refuses the gateway.</b> It does not trust this certificate yet, so no client can connect securely.
-      Download it below and trust it on the target: on a PLC, add it to its OPC UA trust list; on OPC PLC, move it from <span class="mono">pki/rejected/certs</span> to <span class="mono">pki/trusted/certs</span>.
+      Download it below and trust it on the target: add it to the target's OPC UA trust list. Many servers keep refused certificates in a <span class="mono">rejected</span> folder; moving it to the <span class="mono">trusted</span> folder does it (e.g. <span class="mono">pki/rejected/certs</span> → <span class="mono">pki/trusted/certs</span>).
       Then press Discover to check again.</div>`;
     case "target_not_trusted": return html`<div class="alert warn small">Not checked yet: trust the target's certificate first (above).</div>`;
     case "no_secure_endpoint": return html`<div class="muted small">The target offers no secure endpoint, so it needs no certificate from the gateway.</div>`;
@@ -688,7 +724,7 @@ function securitySection(t, endpoints, { editing = false } = {}) {
           : html`<span class="muted">Unknown: discover the target first.</span>`}</dd>
         <dt>Gateway's certificate</dt><dd>${own ? html`${own.subject}<div class="mono muted">${own.thumbprint}</div>` : ""}
           ${gatewayTrust(t.status?.gateway_trust)}
-          <div class="muted">The target must trust this one (import it on the PLC), and should trust only this one, so no client can bypass the gateway.
+          <div class="muted">The target must trust this one (add it to the target's trust list), and should trust only this one, so no client can bypass the gateway.
             The same certificate for all targets: see <a href="#/certificates">Certificates</a>.</div>
           <a class="button small mt-xs" href="/api/certificates/own/cert.der">Download</a></dd>
         <dt>Client certificates</dt><dd class="muted">Clients connecting securely are accepted on the <a href="#/certificates">Certificates</a> page${state.status?.rejected_certificates ? html` (<b>${state.status.rejected_certificates} waiting</b>)` : ""}.</dd>
@@ -761,7 +797,7 @@ function targetForm(t, current = null) {
 
 function certRow(c, actions) {
   return html`<tr><td>${c.subject}<div class="mono muted small">${c.thumbprint}</div></td>
-    <td class="nowrap small">${time(c.not_after)}</td><td class="nowrap">${actions}</td></tr>`;
+    <td class="nowrap small">${time(c.not_after)}</td><td class="actions-cell">${actions}</td></tr>`;
 }
 
 function certificatesView() {
@@ -784,13 +820,13 @@ function certificatesView() {
     </div>
     <div class="card"><div class="card-head"><h2>Waiting for a decision</h2><span class="muted small">${c.rejected.length} rejected</span></div>
       <p class="section-note">Unknown clients and servers land here. Trust a certificate to let that application connect.</p>
-      ${c.rejected.length ? html`<div class="table-wrap"><table><thead><tr><th>Certificate</th><th>Expires</th><th></th></tr></thead><tbody>
+      ${c.rejected.length ? html`<div class="table-wrap"><table class="middle"><thead><tr><th>Certificate</th><th>Expires</th><th></th></tr></thead><tbody>
         ${c.rejected.map((x) => certRow(x, when(admin, html`<button class="small primary" data-action="trust-cert" data-thumb="${x.thumbprint}">Trust</button>
           <button class="small danger" data-action="delete-cert" data-thumb="${x.thumbprint}">Delete</button>`)))}</tbody></table></div>`
         : html`<p class="muted small">Nothing waiting.</p>`}
     </div>
     <div class="card"><div class="card-head"><h2>Trusted</h2><span class="muted small">${c.trusted.length} certificates</span></div>
-      ${c.trusted.length ? html`<div class="table-wrap"><table><thead><tr><th>Certificate</th><th>Expires</th><th></th></tr></thead><tbody>
+      ${c.trusted.length ? html`<div class="table-wrap"><table class="middle"><thead><tr><th>Certificate</th><th>Expires</th><th></th></tr></thead><tbody>
         ${c.trusted.map((x) => certRow(x, when(admin, html`<button class="small danger" data-action="untrust-cert" data-thumb="${x.thumbprint}">Revoke trust</button>`)))}</tbody></table></div>`
         : html`<p class="muted small">No trusted certificates yet.</p>`}
     </div>`;
@@ -899,7 +935,6 @@ function settingsView() {
   const off = flag(!edit, "disabled");
   const a = st.audit;
   const q = st.export.questdb;
-  const sl = st.export.syslog;
   const save = when(edit, html`<div class="actions mt"><button class="primary" type="submit">Save</button></div>`);
   return html`${head}
   <p class="section-note">Saved in <span class="mono">${st.config_file}</span> and applied at once, without disconnecting clients. ${edit ? "" : "Only administrators can change settings."}
@@ -935,18 +970,10 @@ function settingsView() {
           <div><label>User name</label><input name="q_username" autocomplete="off" value="${q?.username || ""}" ${off}></div>
           ${secretField("q", "password", "Password", q?.password_set, off)}
           ${secretField("q", "token", "Or a token", q?.token_set, off)}
-          <div><label>CA file (https, private CA)</label><input name="q_ca_file" placeholder="public roots" value="${q?.ca_file || ""}" ${off}></div>
           <div><label>Every (s)</label><input name="q_interval" type="number" min="1" value="${q?.interval_secs || 5}" ${off}></div>
-        </div></div>
-      <div class="setting subsection"><label class="inline title"><input type="checkbox" name="syslog_on" ${flag(sl, "checked")} ${off}> Syslog (SIEM)</label>
-        ${exportState("syslog")}
-        <div class="form-grid">
-          <div><label>Address</label><input name="s_address" placeholder="siem.local:6514" value="${sl?.address || ""}" ${off}></div>
-          <div><label>Protocol</label><select name="s_protocol" ${off}>${[["tls", "TLS (RFC 5425)"], ["tcp", "TCP"], ["udp", "UDP (no delivery guarantee)"]].map(([v, l]) => html`<option value="${v}" ${flag((sl?.protocol || "tls") === v, "selected")}>${l}</option>`)}</select></div>
-          <div><label>Facility</label><input name="s_facility" type="number" min="0" max="23" value="${sl?.facility ?? 16}" ${off}></div>
-          <div><label>CA file (TLS, private CA)</label><input name="s_ca_file" placeholder="public roots" value="${sl?.ca_file || ""}" ${off}></div>
-          <div><label>Every (s)</label><input name="s_interval" type="number" min="1" value="${sl?.interval_secs || 5}" ${off}></div>
-        </div></div>
+        </div>
+        <div class="mt-xs"><label>CA certificate for https with a private CA (PEM; empty: public roots)</label>
+          <textarea name="q_ca_pem" rows="6" class="mono small" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----" ${off}>${q?.ca_pem || ""}</textarea></div></div>
       ${save}
     </form>
 
@@ -972,14 +999,21 @@ function settingsView() {
 // ---------- users & account ----------
 
 function usersView() {
+  // The last admin stays: without one, nobody can manage the gateway.
+  const admins = state.users.filter((u) => u.role === "admin").length;
   return html`<div class="page-head"><div class="inline">${menuButton}<h1>Users</h1></div></div>
-    <div class="card"><div class="table-wrap"><table><thead><tr><th>User</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody>
-      ${state.users.map((u) => html`<tr><td>${u.username}</td>
-        <td><select name="role-${u.username}" data-action="set-role" data-user="${u.username}">${["auditor", "operator", "admin"].map((r) => html`<option ${new Html(u.role === r ? "selected" : "")}>${r}</option>`)}</select></td>
+    <div class="card"><div class="table-wrap"><table class="middle"><thead><tr><th>User</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody>
+      ${state.users.map((u) => {
+        const last = u.role === "admin" && admins === 1;
+        const why = last ? "The last admin cannot be removed or demoted: add another admin first." : "";
+        return html`<tr><td>${u.username}</td>
+        <td><select name="role-${u.username}" data-action="set-role" data-user="${u.username}" title="${why}" ${flag(last, "disabled")}>${["auditor", "operator", "admin"].map((r) => html`<option ${new Html(u.role === r ? "selected" : "")}>${r}</option>`)}</select></td>
         <td class="small nowrap">${time(u.created_at)}</td>
-        <td class="nowrap"><button class="small" data-action="reset-password" data-user="${u.username}">Reset password</button>
-          <button class="small danger" data-action="delete-user" data-user="${u.username}">Delete</button></td></tr>`)}
-    </tbody></table></div></div>
+        <td class="actions-cell"><button class="small" data-action="reset-password" data-user="${u.username}">Reset password</button>
+          <button class="small danger" data-action="delete-user" data-user="${u.username}" title="${why}" ${flag(last, "disabled")}>Delete</button></td></tr>`;
+      })}
+    </tbody></table></div>
+    ${when(admins === 1, html`<p class="hint">There must always be an admin, so the last one cannot be deleted or demoted.</p>`)}</div>
     <form class="card" data-form="new-user"><h2>Add user</h2><div class="form-grid">
       <div><label>User name</label><input name="username" required></div>
       <div><label>Password (min. 8)</label><input name="password" type="password" minlength="8" required autocomplete="new-password"></div>
@@ -1097,7 +1131,7 @@ const actions = {
   async "show-alarms"(el) {
     const a = alarm(el.dataset.severity);
     if (!a) return;
-    state.audit.filters = { kinds: a.kinds.join(","), after_seq: String(a.acknowledged_up_to) };
+    setFilters({ kinds: a.kinds.join(","), after_seq: String(a.acknowledged_up_to) });
     state.audit.selected = null;
     await loadAudit(); renderPage();
   },
@@ -1107,7 +1141,7 @@ const actions = {
     if (!await dialog({ title: `Acknowledge ${plural(n, severity)}?`, confirm: "Acknowledge",
       body: html`<p>They stay in the audit trail, and the acknowledgement is recorded there too, under your name.</p><p class="muted small">New ${severity}s after this moment count again.</p>` })) return;
     state.alarms = await post("/alarms/acknowledge", { severity });
-    if (state.audit.filters.kinds) state.audit.filters = {};
+    if (state.audit.filters.after_seq) setFilters({});
     await loadAudit(); render(); load();
   },
   async "toggle-top"() {
@@ -1118,7 +1152,7 @@ const actions = {
     if (a.showTop) { a.top = await get("/audit/most-written?hours=24"); renderPage(); }
   },
   async "filter-node"(el) {
-    state.audit.filters = { ...state.audit.filters, node_id: el.dataset.node };
+    setFilters({ ...state.audit.filters, node_id: el.dataset.node });
     state.audit.selected = null;
     await loadAudit(); renderPage();
   },
@@ -1151,9 +1185,11 @@ const actions = {
     toast("Every write to this node is recorded again");
     renderPage();
   },
-  async older() { await loadAudit(true); renderPage(); },
+  async "page-older"() { state.audit.selected = null; await loadAudit("older"); renderPage(); },
+  async "page-newer"() { state.audit.selected = null; await loadAudit("newer"); renderPage(); },
+  async "page-newest"() { state.audit.selected = null; await loadAudit("first"); renderPage(); },
   async verify() { state.audit.verify = await get("/audit/verify"); renderPage(); },
-  async "clear-filter"() { state.audit.filters = {}; await loadAudit(); renderPage(); },
+  async "clear-filter"() { setFilters({}); await loadAudit(); renderPage(); },
   live(el) { state.audit.live = el.checked; schedule("audit"); },
   // targets
   "new-target"() { state.targets.editing = { original: null, name: "", listen: "0.0.0.0:4841", endpoint_url: "opc.tcp://", discovery_interval_secs: 60, min_security: "none" }; renderPage(); },
@@ -1264,7 +1300,7 @@ const forms = {
     if (body.retention_days > 0 && (old.retention_days === 0 || body.retention_days < old.retention_days)) {
       if (!await dialog({ title: `Keep records for ${body.retention_days} days?`, confirm: "Save", danger: true,
         body: html`<p>Records older than ${body.retention_days} days are deleted for good, starting right away.</p>
-          <p class="muted small">Exported copies (QuestDB, syslog) are not affected.</p>` })) return;
+          <p class="muted small">Exported copies (QuestDB) are not affected.</p>` })) return;
     }
     if (body.fail_mode === "closed" && old.fail_mode !== "closed") {
       if (!await dialog({ title: "Reject writes when the trail cannot be written?", confirm: "Save",
@@ -1284,13 +1320,9 @@ const forms = {
     const body = {};
     if (on("questdb_on")) {
       body.questdb = { url: d.q_url, table: d.q_table || "opcua_audit", username: d.q_username || null,
-        ca_file: d.q_ca_file || null, interval_secs: Number(d.q_interval) || 5 };
+        ca_pem: d.q_ca_pem || "", interval_secs: Number(d.q_interval) || 5 };
       secret(body.questdb, "password", "q");
       secret(body.questdb, "token", "q");
-    }
-    if (on("syslog_on")) {
-      body.syslog = { address: d.s_address, protocol: d.s_protocol, facility: Number(d.s_facility),
-        ca_file: d.s_ca_file || null, interval_secs: Number(d.s_interval) || 5 };
     }
     await put("/settings/export", body);
     toast("Export settings saved");
@@ -1313,7 +1345,11 @@ const forms = {
     }
   },
   async "audit-filter"(form) {
-    state.audit.filters = formData(form);
+    const f = formData(form);
+    // The event is picked by its label; an unknown text is sent as typed.
+    const label = (f.kind || "").trim().toLowerCase();
+    if (label) f.kind = Object.keys(EVENT_LABELS).find((k) => EVENT_LABELS[k].toLowerCase() === label || k === label) || f.kind.trim();
+    setFilters(f);
     state.audit.selected = null;
     await loadAudit(); renderPage();
   },
