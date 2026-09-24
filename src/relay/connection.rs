@@ -577,17 +577,19 @@ impl Connection {
                     "invalid security mode",
                 );
             }
-            // Offer exactly what the upstream server offers. When the upstream
-            // is unreachable only an insecure channel is accepted, which is
-            // enough to discover that it is down.
-            let known = self.refresh_upstream_endpoints().await.is_ok();
+            // Offer exactly what the upstream server offers. An insecure
+            // channel is always accepted, as OPC UA requires: clients use it
+            // to discover the secure endpoints (GetEndpoints). A session over
+            // it is refused unless the target offers None (see
+            // `ensure_upstream`).
+            let _ = self.refresh_upstream_endpoints().await;
             let offered = gateway_endpoints(&self.upstream_endpoints, &self.target.gateway, "")
                 .iter()
                 .any(|e| {
                     e.security_mode == mode
                         && SecurityPolicy::from_uri(e.security_policy_uri.as_ref()) == policy
                 });
-            if !offered && (known || policy != SecurityPolicy::None) {
+            if !offered && policy != SecurityPolicy::None {
                 return reject(
                     self,
                     StatusCode::BadSecurityPolicyRejected,

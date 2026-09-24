@@ -3,10 +3,13 @@
 //! ```sh
 //! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/            # anonymous
 //! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator
+//! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator --secure
 //! ```
 //!
-//! It connects without security (`None`), writes `Setpoint`, `Running` and
-//! `Recipe` and calls `ResetCounter` every few seconds.
+//! It connects without security (`None`), or with `--secure` with
+//! Basic256Sha256 SignAndEncrypt (its certificate is in `./demo-client-pki`),
+//! writes `Setpoint`, `Running` and `Recipe` and calls `ResetCounter` every
+//! few seconds.
 
 use std::time::Duration;
 
@@ -19,7 +22,9 @@ use opcua::types::{
 
 #[tokio::main]
 async fn main() {
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let secure = all.iter().any(|a| a == "--secure");
+    let mut args = all.into_iter().filter(|a| !a.starts_with("--"));
     let url = args
         .next()
         .unwrap_or_else(|| "opc.tcp://127.0.0.1:4841/".into());
@@ -39,11 +44,19 @@ async fn main() {
         .expect("client configuration");
     let (session, event_loop) = client
         .connect_to_matching_endpoint(
-            (
-                url.as_str(),
-                SecurityPolicy::None.to_uri(),
-                MessageSecurityMode::None,
-            ),
+            if secure {
+                (
+                    url.as_str(),
+                    SecurityPolicy::Basic256Sha256.to_uri(),
+                    MessageSecurityMode::SignAndEncrypt,
+                )
+            } else {
+                (
+                    url.as_str(),
+                    SecurityPolicy::None.to_uri(),
+                    MessageSecurityMode::None,
+                )
+            },
             identity,
         )
         .await

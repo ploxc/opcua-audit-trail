@@ -38,6 +38,22 @@ Open http://127.0.0.1:8080 and log in as `admin` with the password from
 `data/initial-admin-password.txt`. You choose a new password at the first
 login (the file is removed then). Then watch the writes arrive.
 
+To try it locked down, as a PLC should be (only the gateway may connect,
+encrypted, with a login), start the stand-in PLC with `--strict` and the
+client with `--secure`:
+
+```sh
+cargo run --example demo_plc -- --strict           # SignAndEncrypt only, login operator/operator
+# target: add  min_security = "sign_and_encrypt"
+cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator --secure
+```
+
+Then trust, one step at a time: the PLC certificate in the gateway (**Targets
+→ Trust server certificate**), the gateway certificate in the PLC (move it from
+`demo-plc-pki/rejected` to `demo-plc-pki/trusted`), and the client certificate
+in the gateway (**Certificates → Trust**). The same client pointed directly at
+the PLC (`opc.tcp://127.0.0.1:4840/`) stays locked out.
+
 ## Quick start (binary)
 
 ```sh
