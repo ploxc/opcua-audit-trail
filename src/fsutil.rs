@@ -62,16 +62,20 @@ mod tests {
         write_atomic(&path, b"one", None).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"one");
         #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode(&path), 0o600, "new files are private");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-            write_atomic(&path, b"two", None).unwrap();
-            assert_eq!(mode(&path), 0o640, "an existing mode is kept");
-            write_atomic(&path, b"three", Some(0o600)).unwrap();
-            assert_eq!(mode(&path), 0o600);
         }
+        write_atomic(&path, b"two", None).unwrap();
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o640, "an existing mode is kept");
+        write_atomic(&path, b"three", Some(0o600)).unwrap();
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
         assert_eq!(std::fs::read(&path).unwrap(), b"three");
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
