@@ -1,8 +1,7 @@
 name: Release
 
 # Push a tag like v0.2.0 to publish binaries and container images. A manual
-# run on a branch is a dry run (build only). Nothing runs on ordinary pushes:
-# the account's Actions minutes are limited.
+# run on a branch is a dry run (build only).
 on:
   push:
     tags: ["v*"]

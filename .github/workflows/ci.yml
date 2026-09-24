@@ -1,10 +1,17 @@
 name: CI
 
-# Manual only (Actions tab -> CI -> Run workflow): the account's Actions
-# minutes are limited. Run `cargo fmt --check`, `cargo clippy --all-targets
-# -- -D warnings` and `cargo test` locally before pushing.
+# Runs on pushes to main, on pull requests and by hand (Actions tab -> CI ->
+# Run workflow).
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch or PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
