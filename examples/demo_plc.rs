@@ -3,11 +3,18 @@
 //! ```sh
 //! cargo run --example demo_plc              # opc.tcp://127.0.0.1:4840/
 //! cargo run --example demo_plc -- 0.0.0.0 4850
+//! cargo run --example demo_plc -- --strict  # like a locked-down PLC
 //! ```
 //!
 //! Logins: anonymous, or `operator` / `operator`. Security: None and
 //! Basic256Sha256 (Sign, SignAndEncrypt). The server trusts every client
 //! certificate, which a real PLC must not do. Its PKI lives in `./demo-plc-pki`.
+//!
+//! With `--strict` it behaves like a locked-down PLC: only Basic256Sha256
+//! SignAndEncrypt, only `operator` / `operator`, and only clients whose
+//! certificate is in `./demo-plc-pki/trusted`. Unknown certificates
+//! land in `./demo-plc-pki/rejected`; move the gateway's to `trusted` to let
+//! only the gateway in.
 //!
 //! Address space (namespace `urn:demo-plc:line`), under Objects/Line1:
 //! `Setpoint` (Double, writable), `Temperature` (Double, simulated),
@@ -33,12 +40,18 @@ async fn main() {
                 .unwrap_or_else(|_| "info,opcua=warn".into()),
         )
         .init();
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let strict = all.iter().any(|a| a == "--strict");
+    let mut args = all.into_iter().filter(|a| !a.starts_with("--"));
     let host = args.next().unwrap_or_else(|| "127.0.0.1".into());
     let port: u16 = args.next().and_then(|p| p.parse().ok()).unwrap_or(4840);
 
-    let tokens = [ANONYMOUS_USER_TOKEN_ID, "operator"];
-    let (server, handle) = ServerBuilder::new()
+    let tokens: &[&str] = if strict {
+        &["operator"]
+    } else {
+        &[ANONYMOUS_USER_TOKEN_ID, "operator"]
+    };
+    let mut builder = ServerBuilder::new()
         .application_name("Demo PLC")
         .application_uri("urn:demo-plc")
         .product_uri("urn:demo-plc")
@@ -46,29 +59,11 @@ async fn main() {
         .port(port)
         .pki_dir("./demo-plc-pki")
         .create_sample_keypair(true)
-        .trust_client_certs(true)
+        .trust_client_certs(!strict)
         .discovery_urls(vec!["/".into()])
         .add_user_token(
             "operator",
             ServerUserToken::user_pass("operator", "operator"),
-        )
-        .add_endpoint(
-            "none",
-            (
-                "/",
-                SecurityPolicy::None,
-                MessageSecurityMode::None,
-                &tokens as &[&str],
-            ),
-        )
-        .add_endpoint(
-            "sign",
-            (
-                "/",
-                SecurityPolicy::Basic256Sha256,
-                MessageSecurityMode::Sign,
-                &tokens as &[&str],
-            ),
         )
         .add_endpoint(
             "encrypt",
@@ -76,9 +71,26 @@ async fn main() {
                 "/",
                 SecurityPolicy::Basic256Sha256,
                 MessageSecurityMode::SignAndEncrypt,
-                &tokens as &[&str],
+                tokens,
             ),
-        )
+        );
+    if !strict {
+        builder = builder
+            .add_endpoint(
+                "none",
+                ("/", SecurityPolicy::None, MessageSecurityMode::None, tokens),
+            )
+            .add_endpoint(
+                "sign",
+                (
+                    "/",
+                    SecurityPolicy::Basic256Sha256,
+                    MessageSecurityMode::Sign,
+                    tokens,
+                ),
+            );
+    }
+    let (server, handle) = builder
         .with_node_manager(simple_node_manager(
             NamespaceMetadata {
                 namespace_uri: "urn:demo-plc:line".into(),
@@ -163,6 +175,14 @@ async fn main() {
         }
     });
 
-    println!("Demo PLC on opc.tcp://{host}:{port}/  (logins: anonymous, operator/operator)");
+    if strict {
+        println!(
+            "Demo PLC (strict) on opc.tcp://{host}:{port}/  (Basic256Sha256 SignAndEncrypt only, \
+             login operator/operator; unknown client certificates go to ./demo-plc-pki/rejected, \
+             move one to ./demo-plc-pki/trusted to let it in)"
+        );
+    } else {
+        println!("Demo PLC on opc.tcp://{host}:{port}/  (logins: anonymous, operator/operator)");
+    }
     server.run().await.expect("server");
 }

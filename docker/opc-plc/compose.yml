@@ -1,0 +1,41 @@
+# Microsoft OPC PLC (open source simulator) as a locked-down PLC behind the
+# gateway: Basic256Sha256 Sign/SignAndEncrypt only, login operator/operator,
+# and only trusted client certificates. See README.md in this folder.
+#
+#   docker compose -f docker/opc-plc/compose.yml up
+#
+# Endpoint for the gateway: opc.tcp://localhost:50000
+services:
+  opc-plc:
+    image: mcr.microsoft.com/iotedge/opc-plc:latest
+    # On Apple Silicon, if Docker finds no image for your platform:
+    # platform: linux/amd64
+    # Root inside the container, so it can write the certificate folder
+    # mounted from your machine (a simulator, not a production PLC).
+    user: root
+    ports:
+      - "50000:50000"
+    volumes:
+      - ./nodes.json:/config/nodes.json:ro
+      - ./pki:/pki
+    command:
+      - --pn=50000
+      - --ph=localhost               # the address clients (the gateway) use
+      - --daa                        # no anonymous login
+      - --du=operator                # login operator / operator
+      - --dc=operator
+      - --dca                        # no X.509 user logins (the gateway cannot relay them)
+      - --ap=/pki/own                # certificates in ./pki on your machine:
+      - --tp=/pki/trusted            #   trusted clients in ./pki/trusted/certs
+      - --rp=/pki/rejected           #   refused clients land in ./pki/rejected/certs
+      - --ip=/pki/issuer
+      - --nf=/config/nodes.json      # Line1 folder with writable nodes
+      - --sn=5                       # simulated values that keep changing
+      - --sr=10
+      - --st=double
+      - --fn=5
+      - --fr=1
+      - --ft=uint
+      # Not set, so this PLC is strict:
+      #   --ut  (would allow unencrypted connections)
+      #   --aa  (would trust every client certificate)

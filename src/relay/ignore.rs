@@ -190,6 +190,7 @@ mod tests {
         IgnoreRule {
             node_id: node_id.into(),
             client: client.map(Into::into),
+            name: None,
         }
     }
 

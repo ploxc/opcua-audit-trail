@@ -3,10 +3,15 @@
 //! ```sh
 //! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/            # anonymous
 //! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator
+//! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator --secure
+//! cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator --secure \
+//!     --namespace=http://microsoft.com/Opc/OpcPlc/     # OPC PLC with docker/opc-plc/nodes.json
 //! ```
 //!
-//! It connects without security (`None`), writes `Setpoint`, `Running` and
-//! `Recipe` and calls `ResetCounter` every few seconds.
+//! It connects without security (`None`), or with `--secure` with
+//! Basic256Sha256 SignAndEncrypt (its certificate is in `./demo-client-pki`),
+//! writes `Setpoint`, `Running` and `Recipe` and calls `ResetCounter` every
+//! few seconds.
 
 use std::time::Duration;
 
@@ -19,7 +24,21 @@ use opcua::types::{
 
 #[tokio::main]
 async fn main() {
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let secure = all.iter().any(|a| a == "--secure");
+    // With --secure: --policy=aes256 for Aes256-Sha256-RsaPss.
+    let policy = if all.iter().any(|a| a == "--policy=aes256") {
+        SecurityPolicy::Aes256Sha256RsaPss
+    } else {
+        SecurityPolicy::Basic256Sha256
+    };
+    // The namespace of the `Line1.*` nodes.
+    let namespace = all
+        .iter()
+        .find_map(|a| a.strip_prefix("--namespace="))
+        .unwrap_or("urn:demo-plc:line")
+        .to_string();
+    let mut args = all.into_iter().filter(|a| !a.starts_with("--"));
     let url = args
         .next()
         .unwrap_or_else(|| "opc.tcp://127.0.0.1:4841/".into());
@@ -39,11 +58,19 @@ async fn main() {
         .expect("client configuration");
     let (session, event_loop) = client
         .connect_to_matching_endpoint(
-            (
-                url.as_str(),
-                SecurityPolicy::None.to_uri(),
-                MessageSecurityMode::None,
-            ),
+            if secure {
+                (
+                    url.as_str(),
+                    policy.to_uri(),
+                    MessageSecurityMode::SignAndEncrypt,
+                )
+            } else {
+                (
+                    url.as_str(),
+                    SecurityPolicy::None.to_uri(),
+                    MessageSecurityMode::None,
+                )
+            },
             identity,
         )
         .await
@@ -52,10 +79,28 @@ async fn main() {
     session.wait_for_connection().await;
     println!("connected to {url}");
 
-    let ns = session
-        .get_namespace_index("urn:demo-plc:line")
-        .await
-        .expect("the demo PLC's namespace");
+    let ns = match session.get_namespace_index(&namespace).await {
+        Ok(ns) => ns,
+        Err(e) => {
+            let known = session
+                .read(
+                    &[opcua::types::ReadValueId {
+                        node_id: opcua::types::VariableId::Server_NamespaceArray.into(),
+                        attribute_id: AttributeId::Value as u32,
+                        ..Default::default()
+                    }],
+                    opcua::types::TimestampsToReturn::Neither,
+                    0.0,
+                )
+                .await
+                .ok()
+                .and_then(|r| r.into_iter().next())
+                .and_then(|d| d.value);
+            eprintln!("namespace {namespace} not found ({e}); the server has: {known:?}");
+            eprintln!("pick one with --namespace=<uri>");
+            std::process::exit(1);
+        }
+    };
     let node = |name: &str| NodeId::new(ns, format!("Line1.{name}"));
     let write = |name: &str, value: DataValue| WriteValue {
         node_id: node(name),
@@ -70,15 +115,15 @@ async fn main() {
         let setpoint = 60.0 + f64::from(step % 7) * 2.5;
         let result = session
             .write(&[
-                write("Setpoint", DataValue::new_now(setpoint)),
-                write("Running", DataValue::new_now(step.is_multiple_of(2))),
+                write("Setpoint", DataValue::value_only(setpoint)),
+                write("Running", DataValue::value_only(step.is_multiple_of(2))),
             ])
             .await;
         println!("write Setpoint={setpoint}: {result:?}");
         if step.is_multiple_of(3) {
             let recipe = ["Default", "Batch A", "Batch B"][(step / 3 % 3) as usize];
             let result = session
-                .write(&[write("Recipe", DataValue::new_now(recipe))])
+                .write(&[write("Recipe", DataValue::value_only(recipe))])
                 .await;
             println!("write Recipe={recipe}: {result:?}");
         }

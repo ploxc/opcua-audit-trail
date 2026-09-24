@@ -1,6 +1,8 @@
 //! Runs the configured targets and applies changes from the web UI without a
 //! restart: each change is validated, written to the config file (keeping the
 //! file's comments and other sections) and the affected target is restarted.
+//! It also owns the other settings the web UI changes, so the file has one
+//! writer.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -81,7 +83,6 @@ impl TargetManager {
             self.statuses.clone(),
             self.discovery.clone(),
             self.audit.clone(),
-            &config.audit,
         ));
         let listener = relay::bind(&relay)
             .await
@@ -104,6 +105,32 @@ impl TargetManager {
             monitor,
             server,
         })
+    }
+
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
+    /// The configuration as currently applied.
+    pub async fn config(&self) -> Config {
+        self.config.lock().await.clone()
+    }
+
+    /// Changes settings outside the targets (audit, export, gateway host
+    /// names): validates the result, writes it to the config file and
+    /// returns the configuration before and after. Applying it to the
+    /// running parts is up to the caller.
+    pub async fn update_settings(
+        &self,
+        change: impl FnOnce(&mut Config),
+    ) -> anyhow::Result<(Config, Config)> {
+        let mut config = self.config.lock().await;
+        let mut new_config = config.clone();
+        change(&mut new_config);
+        new_config.validate()?;
+        write_settings(&self.config_path, &new_config)?;
+        let old = std::mem::replace(&mut *config, new_config.clone());
+        Ok((old, new_config))
     }
 
     pub async fn targets(&self) -> Vec<TargetConfig> {
@@ -224,6 +251,87 @@ impl TargetManager {
     }
 }
 
+/// Writes the `[audit]` and `[export]` settings and the gateway's
+/// certificate host names into the config file, changing only those keys
+/// (comments and everything else stay as they are).
+fn write_settings(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
+    use toml_edit::{value, Array, Item, Table};
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    fn table<'a>(parent: &'a mut Table, key: &str) -> &'a mut Table {
+        if !parent.get(key).is_some_and(Item::is_table) {
+            let mut t = Table::new();
+            t.set_implicit(key == "export");
+            parent.insert(key, Item::Table(t));
+        }
+        parent[key].as_table_mut().expect("just made a table")
+    }
+    fn set_opt(t: &mut Table, key: &str, v: Option<String>) {
+        match v {
+            Some(v) => t[key] = value(v),
+            None => {
+                t.remove(key);
+            }
+        }
+    }
+
+    let root = doc.as_table_mut();
+    let gateway = table(root, "gateway");
+    if config.gateway.certificate_hostnames.is_empty() {
+        gateway.remove("certificate_hostnames");
+    } else {
+        gateway["certificate_hostnames"] = value(Array::from_iter(
+            config
+                .gateway
+                .certificate_hostnames
+                .iter()
+                .map(String::as_str),
+        ));
+    }
+
+    let a = &config.audit;
+    let audit = table(root, "audit");
+    audit["retention_days"] = value(i64::from(a.retention_days));
+    audit["fail_mode"] = value(match a.fail_mode {
+        crate::config::FailMode::Open => "open",
+        crate::config::FailMode::Closed => "closed",
+    });
+    audit["record_old_value"] = value(a.record_old_value);
+    audit["ignored_summary_secs"] = value(a.ignored_summary_secs as i64);
+
+    let export = table(root, "export");
+    match &config.export.questdb {
+        None => {
+            export.remove("questdb");
+        }
+        Some(q) => {
+            let t = table(export, "questdb");
+            t["url"] = value(q.url.as_str());
+            t["table"] = value(q.table.as_str());
+            set_opt(t, "token", q.token.clone());
+            set_opt(t, "username", q.username.clone());
+            set_opt(t, "password", q.password.clone());
+            set_opt(
+                t,
+                "ca_file",
+                q.ca_file.as_ref().map(|p| p.display().to_string()),
+            );
+            t["interval_secs"] = value(q.interval_secs as i64);
+        }
+    }
+    // Syslog export is no longer supported.
+    export.remove("syslog");
+    if export.is_empty() {
+        root.remove("export");
+    }
+    crate::fsutil::write_atomic(path, doc.to_string().as_bytes(), None)
+        .with_context(|| format!("writing {}", path.display()))
+}
+
 /// Replaces the `[[targets]]` tables in the config file, keeping everything
 /// else (other sections, comments, formatting) as it was.
 fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Result<()> {
@@ -260,6 +368,9 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
                 r["node_id"] = toml_edit::value(rule.node_id.as_str());
                 if let Some(client) = &rule.client {
                     r["client"] = toml_edit::value(client.as_str());
+                }
+                if let Some(name) = &rule.name {
+                    r["name"] = toml_edit::value(name.as_str());
                 }
                 rules.push(r);
             }
@@ -368,10 +479,12 @@ mod tests {
             IgnoreRule {
                 node_id: "ns=3;s=\"DB1\".\"Life\"".into(),
                 client: None,
+                name: Some("Life".into()),
             },
             IgnoreRule {
                 node_id: "ns=3;i=7".into(),
                 client: Some("10.0.0.5".into()),
+                name: None,
             },
         ];
         m.set_ignore("plc1", rules.clone()).await.unwrap();
@@ -387,6 +500,7 @@ mod tests {
         let bad = vec![IgnoreRule {
             node_id: "not a node".into(),
             client: None,
+            name: None,
         }];
         assert!(m.set_ignore("plc1", bad).await.is_err());
         assert_eq!(Config::load(&path).unwrap().targets[0].ignore, rules);

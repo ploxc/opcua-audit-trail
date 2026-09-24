@@ -1,4 +1,4 @@
-//! TLS for the exporters (QuestDB over HTTPS, syslog over TLS).
+//! TLS for the exporter (QuestDB over HTTPS).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,18 +53,6 @@ pub async fn connect(
         .connect(name, tcp)
         .await
         .with_context(|| format!("TLS handshake with {host}:{port}"))
-}
-
-/// Splits `host:port` (also `[v6]:port`).
-pub fn host_port(address: &str) -> anyhow::Result<(String, u16)> {
-    let (host, port) = address
-        .rsplit_once(':')
-        .with_context(|| format!("{address} has no port"))?;
-    Ok((
-        host.to_string(),
-        port.parse()
-            .with_context(|| format!("invalid port in {address}"))?,
-    ))
 }
 
 #[cfg(test)]
@@ -128,12 +116,5 @@ pub mod tests {
             .connect(other, tcp)
             .await
             .is_err());
-    }
-
-    #[test]
-    fn splits_host_and_port() {
-        assert_eq!(host_port("siem:6514").unwrap(), ("siem".into(), 6514));
-        assert_eq!(host_port("[::1]:6514").unwrap(), ("[::1]".into(), 6514));
-        assert!(host_port("siem").is_err());
     }
 }

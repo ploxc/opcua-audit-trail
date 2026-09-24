@@ -294,6 +294,10 @@ pub struct AuditQuery {
     pub until: Option<DateTime<Utc>>,
     /// Only records with a sequence number below this one (for paging backwards).
     pub before_seq: Option<i64>,
+    /// Only records with a sequence number above this one.
+    pub after_seq: Option<i64>,
+    /// Several kinds, comma separated (e.g. the kinds of a severity).
+    pub kinds: Option<String>,
     pub limit: Option<u32>,
 }
 
@@ -377,13 +381,73 @@ pub fn most_written(
     Ok(out)
 }
 
+/// Unacknowledged records of one severity.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlarmCount {
+    pub severity: crate::audit::event::Severity,
+    /// Acknowledged up to and including this record (0: never).
+    pub acknowledged_up_to: i64,
+    pub unacknowledged: i64,
+    /// The event kinds of this severity, for filtering.
+    pub kinds: Vec<&'static str>,
+}
+
+/// For each severity, how many records came after the last acknowledgement.
+pub fn alarms(conn: &Connection) -> anyhow::Result<Vec<AlarmCount>> {
+    use crate::audit::event::{AuditEvent, Severity};
+    let mut marks = std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT body FROM audit WHERE kind = 'alarms_acknowledged' ORDER BY seq DESC LIMIT 100",
+    )?;
+    for body in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        if let Ok(entry) = serde_json::from_str::<AuditEntry>(&body?) {
+            if let AuditEvent::AlarmsAcknowledged {
+                severity,
+                up_to_seq,
+                ..
+            } = entry.event
+            {
+                marks.entry(severity).or_insert(up_to_seq);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for severity in Severity::ALL {
+        let mark = marks.get(&severity).copied().unwrap_or(0);
+        let kinds = severity.kinds();
+        let list = kinds
+            .iter()
+            .map(|k| format!("'{k}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM audit WHERE seq > ?1 AND kind IN ({list})"),
+            [mark],
+            |r| r.get(0),
+        )?;
+        out.push(AlarmCount {
+            severity,
+            acknowledged_up_to: mark,
+            unacknowledged: count,
+            kinds: kinds.to_vec(),
+        });
+    }
+    Ok(out)
+}
+
 /// Newest records first.
 pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredRecord>> {
     let mut sql = String::from("SELECT seq, hash, body, prev_hash FROM audit WHERE 1=1");
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    // `clause` refers to the value as `{v}`.
     let mut add = |clause: &str, value: Box<dyn rusqlite::ToSql>| {
         args.push(value);
-        sql.push_str(&format!(" AND {clause} ?{}", args.len()));
+        let clause = if clause.contains("{v}") {
+            clause.replace("{v}", &format!("?{}", args.len()))
+        } else {
+            format!("{clause} ?{}", args.len())
+        };
+        sql.push_str(&format!(" AND {clause}"));
     };
     if let Some(v) = &q.target {
         add("target =", Box::new(v.clone()));
@@ -391,11 +455,21 @@ pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredReco
     if let Some(v) = &q.kind {
         add("kind =", Box::new(v.clone()));
     }
+    // User and node match on part of the text, ignoring case: the user also
+    // who did something in the web UI, the node also its display name.
     if let Some(v) = &q.user {
-        add("user =", Box::new(v.clone()));
+        add(
+            "instr(lower(coalesce(user, json_extract(body, '$.event.by'), \
+             json_extract(body, '$.event.user'))), lower({v})) > 0",
+            Box::new(v.clone()),
+        );
     }
     if let Some(v) = &q.node_id {
-        add("node_id =", Box::new(v.clone()));
+        add(
+            "(instr(lower(node_id), lower({v})) > 0 \
+             OR instr(lower(json_extract(body, '$.event.display_name')), lower({v})) > 0)",
+            Box::new(v.clone()),
+        );
     }
     if let Some(v) = &q.since {
         add("ts >=", Box::new(ts_column(v)));
@@ -405,6 +479,24 @@ pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredReco
     }
     if let Some(v) = q.before_seq {
         add("seq <", Box::new(v));
+    }
+    if let Some(v) = q.after_seq {
+        add("seq >", Box::new(v));
+    }
+    if let Some(kinds) = &q.kinds {
+        let kinds: Vec<&str> = kinds
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !kinds.is_empty() {
+            let mut marks = Vec::new();
+            for k in kinds {
+                args.push(Box::new(k.to_string()));
+                marks.push(format!("?{}", args.len()));
+            }
+            sql.push_str(&format!(" AND kind IN ({})", marks.join(", ")));
+        }
     }
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     sql.push_str(&format!(" ORDER BY seq DESC LIMIT {limit}"));
@@ -637,7 +729,7 @@ mod tests {
         AuditEntry::new(AuditEvent::Write {
             request_handle: 7,
             node_id: node.into(),
-            display_name: None,
+            display_name: Some(format!("Tag {node}")),
             attribute: "Value".into(),
             index_range: None,
             old_value: None,
@@ -691,6 +783,56 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].seq, 2);
+
+        // User and node match on part of the text, ignoring case.
+        let find = |user: &str, node: &str| {
+            query(
+                &reader,
+                &AuditQuery {
+                    user: Some(user.into()),
+                    node_id: Some(node.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .len()
+        };
+        assert_eq!(find("OPER", "s=b"), 1);
+        assert_eq!(find("oper", "ns=2"), 2);
+        assert_eq!(find("nobody", "ns=2"), 0);
+        assert_eq!(find("", "TAG ns=2;s=A"), 1, "by display name");
+    }
+
+    #[test]
+    fn the_user_filter_finds_web_ui_actions() {
+        let (_dir, mut store, path) = store();
+        store
+            .append(&[
+                write_event("ns=2;s=A", 1.0),
+                AuditEntry::new(AuditEvent::ConfigChanged {
+                    by: "Admin".into(),
+                    summary: "created user 'jan'".into(),
+                }),
+                AuditEntry::new(AuditEvent::UiLoginFailed { user: "jan".into() }),
+            ])
+            .unwrap();
+        let reader = open_reader(&path).unwrap();
+        let find = |user: &str| {
+            query(
+                &reader,
+                &AuditQuery {
+                    user: Some(user.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .iter()
+            .map(|r| r.seq)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(find("adm"), vec![2]);
+        assert_eq!(find("JAN"), vec![3]);
+        assert_eq!(find("oper"), vec![1]);
     }
 
     #[test]

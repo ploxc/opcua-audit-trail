@@ -11,7 +11,7 @@ pub mod event;
 pub mod store;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -45,10 +45,70 @@ enum Command {
     Flush(oneshot::Sender<()>),
 }
 
+/// The audit settings that can change while the gateway runs (from the
+/// web UI). Everything that uses them reads them when it needs them.
+#[derive(Debug)]
+pub struct AuditSettings {
+    fail_closed: AtomicBool,
+    record_old_value: AtomicBool,
+    retention_days: AtomicU32,
+    ignored_summary_secs: AtomicU64,
+    /// Wakes the retention task after a change, so a shorter period applies
+    /// at once.
+    changed: tokio::sync::Notify,
+}
+
+impl AuditSettings {
+    pub fn new(config: &AuditConfig) -> Self {
+        let settings = Self {
+            fail_closed: AtomicBool::new(false),
+            record_old_value: AtomicBool::new(false),
+            retention_days: AtomicU32::new(0),
+            ignored_summary_secs: AtomicU64::new(1),
+            changed: tokio::sync::Notify::new(),
+        };
+        settings.apply(config);
+        settings
+    }
+
+    pub fn apply(&self, config: &AuditConfig) {
+        self.fail_closed
+            .store(config.fail_mode == FailMode::Closed, Ordering::Relaxed);
+        self.record_old_value
+            .store(config.record_old_value, Ordering::Relaxed);
+        self.retention_days
+            .store(config.retention_days, Ordering::Relaxed);
+        self.ignored_summary_secs
+            .store(config.ignored_summary_secs.max(1), Ordering::Relaxed);
+        self.changed.notify_waiters();
+    }
+
+    pub fn fail_mode(&self) -> FailMode {
+        if self.fail_closed.load(Ordering::Relaxed) {
+            FailMode::Closed
+        } else {
+            FailMode::Open
+        }
+    }
+
+    pub fn record_old_value(&self) -> bool {
+        self.record_old_value.load(Ordering::Relaxed)
+    }
+
+    /// `0` keeps everything.
+    pub fn retention_days(&self) -> u32 {
+        self.retention_days.load(Ordering::Relaxed)
+    }
+
+    pub fn ignored_summary(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.ignored_summary_secs.load(Ordering::Relaxed))
+    }
+}
+
 #[derive(Clone)]
 pub struct AuditHandle {
     tx: mpsc::Sender<Command>,
-    fail_mode: FailMode,
+    settings: Arc<AuditSettings>,
     lost: Arc<AtomicU64>,
 }
 
@@ -57,7 +117,7 @@ impl AuditHandle {
     /// the event could not even be counted; in fail-closed mode it returns once
     /// the record is committed.
     pub async fn record(&self, entry: AuditEntry) -> Result<(), AuditError> {
-        match self.fail_mode {
+        match self.settings.fail_mode() {
             FailMode::Open => {
                 let lost = match self.tx.try_send(Command::Append(Box::new(entry), None)) {
                     Ok(()) => false,
@@ -89,7 +149,7 @@ impl AuditHandle {
                 .map_err(AuditError::Store)
         }
         .await;
-        if result.is_err() && self.fail_mode == FailMode::Open {
+        if result.is_err() && self.settings.fail_mode() == FailMode::Open {
             // Callers in fail-open mode carry on; the loss is reported.
             self.lost.fetch_add(1, Ordering::Relaxed);
         }
@@ -115,6 +175,11 @@ impl AuditHandle {
         }
     }
 
+    /// The live audit settings.
+    pub fn settings(&self) -> &AuditSettings {
+        &self.settings
+    }
+
     /// Events lost since the last `EventsLost` record was written.
     pub fn lost_events(&self) -> u64 {
         self.lost.load(Ordering::Relaxed)
@@ -133,7 +198,7 @@ pub fn start(path: &Path, config: &AuditConfig) -> anyhow::Result<AuditHandle> {
         .context("starting audit writer thread")?;
     Ok(AuditHandle {
         tx,
-        fail_mode: config.fail_mode,
+        settings: Arc::new(AuditSettings::new(config)),
         lost,
     })
 }
@@ -260,6 +325,10 @@ impl AuditReader {
             .await
     }
 
+    pub async fn alarms(&self) -> anyhow::Result<Vec<store::AlarmCount>> {
+        self.with_conn(store::alarms).await
+    }
+
     pub async fn head_seq(&self) -> anyhow::Result<i64> {
         self.with_conn(store::head_seq).await
     }
@@ -278,15 +347,17 @@ impl AuditReader {
 /// Periodically applies the retention policy. It trusts the wall clock only
 /// while it keeps pace with the time that really passed: after a jump that
 /// round is skipped and the jump is recorded.
-pub async fn run_retention(handle: AuditHandle, retention_days: u32) {
-    if retention_days == 0 {
-        return;
-    }
+/// The retention period is read every round, so a change applies within the
+/// hour (`0` keeps everything).
+pub async fn run_retention(handle: AuditHandle) {
     let period = std::time::Duration::from_secs(3600);
     let mut tick = tokio::time::interval(period);
     let mut last: Option<(std::time::Instant, DateTime<Utc>)> = None;
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = handle.settings().changed.notified() => {}
+        }
         let now = (std::time::Instant::now(), Utc::now());
         if let Some((mono, wall)) = last {
             let real = chrono::Duration::from_std(now.0 - mono).unwrap_or_default();
@@ -306,6 +377,10 @@ pub async fn run_retention(handle: AuditHandle, retention_days: u32) {
             }
         }
         last = Some(now);
+        let retention_days = handle.settings().retention_days();
+        if retention_days == 0 {
+            continue;
+        }
         let cutoff = now.1 - chrono::Duration::days(i64::from(retention_days));
         loop {
             match handle.prune_before(cutoff).await {

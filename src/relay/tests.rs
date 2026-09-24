@@ -88,6 +88,15 @@ async fn delaying_proxy(plc_port: u16, delay: Duration) -> u16 {
 }
 
 async fn harness_with_latency(fail_mode: FailMode, latency: Option<Duration>) -> Harness {
+    harness_with(fail_mode, latency, "").await
+}
+
+/// `target_options`: extra TOML lines for the target.
+async fn harness_with(
+    fail_mode: FailMode,
+    latency: Option<Duration>,
+    target_options: &str,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let plc = start_test_plc(dir.path()).await;
     let server_port = match latency {
@@ -105,6 +114,7 @@ async fn harness_with_latency(fail_mode: FailMode, latency: Option<Duration>) ->
         name = "plc1"
         listen = "127.0.0.1:{gateway_port}"
         endpoint_url = "opc.tcp://127.0.0.1:{server_port}/"
+        {target_options}
         "#,
         match fail_mode {
             FailMode::Open => "open",
@@ -130,7 +140,6 @@ async fn harness_with_latency(fail_mode: FailMode, latency: Option<Duration>) ->
         statuses,
         client,
         audit.clone(),
-        &config.audit,
     ));
     let listener = bind(&relay).await.unwrap();
     tokio::spawn(serve(relay.clone(), listener));
@@ -791,6 +800,7 @@ async fn ignored_writes_are_summarised() {
     h.relay.ignore.set(&[crate::config::IgnoreRule {
         node_id: h.setpoint.to_string(),
         client: None,
+        name: None,
     }]);
 
     for i in 0..3 {
@@ -857,6 +867,7 @@ async fn ignored_writes_are_summarised() {
     h.relay.ignore.set(&[crate::config::IgnoreRule {
         node_id: h.setpoint.to_string(),
         client: Some("urn:another-hmi".into()),
+        name: None,
     }]);
     session
         .write(&[write_value(&h.setpoint, 8.0)])
@@ -865,4 +876,51 @@ async fn ignored_writes_are_summarised() {
     assert_eq!(h.records("write").await.len(), 2);
     session.disconnect().await.unwrap();
     h.verify_chain().await;
+}
+
+/// With a minimum security above None, clients still discover the secure
+/// endpoints over an insecure channel (OPC UA requires it), but cannot open
+/// a session over it.
+#[tokio::test]
+async fn discovery_works_over_none_when_none_is_not_offered() {
+    let h = harness_with(FailMode::Open, None, r#"min_security = "sign_and_encrypt""#).await;
+    let client = ClientBuilder::new()
+        .application_name("probe")
+        .application_uri("urn:probe")
+        .pki_dir(h.dir.path().join("probe-pki"))
+        .create_sample_keypair(true)
+        .trust_server_certs(true)
+        .session_retry_limit(0)
+        .client()
+        .unwrap();
+    let endpoints = client
+        .get_server_endpoints_from_url(h.gateway_url.as_str())
+        .await
+        .expect("GetEndpoints over an insecure channel");
+    assert!(!endpoints.is_empty());
+    assert!(endpoints
+        .iter()
+        .all(|e| e.security_mode == MessageSecurityMode::SignAndEncrypt));
+
+    let session = h
+        .connect(
+            "a",
+            SecurityPolicy::None,
+            MessageSecurityMode::None,
+            IdentityToken::Anonymous,
+            false,
+        )
+        .await;
+    assert!(session.is_err(), "no session over None");
+    let session = h
+        .connect(
+            "a",
+            SecurityPolicy::Basic256Sha256,
+            MessageSecurityMode::SignAndEncrypt,
+            IdentityToken::Anonymous,
+            true,
+        )
+        .await
+        .expect("a secure session");
+    session.disconnect().await.unwrap();
 }

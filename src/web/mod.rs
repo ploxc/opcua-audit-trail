@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod browser;
+mod settings;
 pub mod tls;
 
 use std::sync::Arc;
@@ -45,7 +46,7 @@ pub struct AppState {
     pub users: Arc<UserStore>,
     pub sessions: Arc<Sessions>,
     pub browser: Arc<BrowserSessions>,
-    pub exports: crate::export::ExportStatuses,
+    pub exports: Arc<crate::export::Exports>,
 }
 
 impl AppState {
@@ -126,6 +127,12 @@ pub fn router(state: AppState) -> Router {
         .route("/audit.csv", get(audit_csv))
         .route("/audit/verify", get(audit_verify))
         .route("/audit/most-written", get(audit_most_written))
+        .route("/alarms", get(alarms))
+        .route("/alarms/acknowledge", post(acknowledge_alarms))
+        .route("/settings", get(settings::get))
+        .route("/settings/audit", put(settings::put_audit))
+        .route("/settings/export", put(settings::put_export))
+        .route("/settings/gateway", put(settings::put_gateway))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{name}", put(update_user).delete(delete_user))
         .route("/browser/{target}/connect", post(browser::connect))
@@ -302,7 +309,7 @@ async fn target_views(s: &AppState) -> Vec<TargetView> {
 async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusResponse> {
     user.require(Role::Auditor)?;
     // Copy out first: the lock must not be held across the awaits below.
-    let exports = s.exports.read().values().cloned().collect();
+    let exports = s.exports.statuses().read().values().cloned().collect();
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
         application_name: s.config.gateway.application_name.clone(),
@@ -313,10 +320,10 @@ async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusRe
             .ok()
             .map(|c| CertificateInfo::from_x509(&c)),
         lost_audit_events: s.audit.lost_events(),
-        fail_mode: s.config.audit.fail_mode,
-        record_old_value: s.config.audit.record_old_value,
-        retention_days: s.config.audit.retention_days,
-        ignored_summary_secs: s.config.audit.ignored_summary_secs,
+        fail_mode: s.audit.settings().fail_mode(),
+        record_old_value: s.audit.settings().record_old_value(),
+        retention_days: s.audit.settings().retention_days(),
+        ignored_summary_secs: s.audit.settings().ignored_summary().as_secs(),
         rejected_certificates: s.pki.rejected_count(),
         exports,
         targets: target_views(&s).await,
@@ -354,11 +361,9 @@ async fn update_target(
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
     // Ignored nodes have their own routes; editing a target keeps them.
-    target.ignore = target_config(&s, &name).await?.ignore;
-    let summary = format!(
-        "changed target '{name}' to '{}' ({} -> {})",
-        target.name, target.listen, target.endpoint_url
-    );
+    let old = target_config(&s, &name).await?;
+    target.ignore = old.ignore.clone();
+    let summary = target_changes(&old, &target);
     s.targets
         .upsert(target, Some(&name))
         .await
@@ -394,9 +399,13 @@ async fn target_config(s: &AppState, name: &str) -> Result<TargetConfig, ApiErro
 }
 
 fn describe_rule(rule: &IgnoreRule) -> String {
-    match &rule.client {
-        Some(client) => format!("{} (only from {client})", rule.node_id),
+    let node = match &rule.name {
+        Some(name) => format!("{name} ({})", rule.node_id),
         None => rule.node_id.clone(),
+    };
+    match &rule.client {
+        Some(client) => format!("{node} from {client}"),
+        None => node,
     }
 }
 
@@ -413,8 +422,12 @@ async fn ignore_node(
         .client
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty());
+    rule.name = rule
+        .name
+        .map(|n| crate::audit::event::clip(n.trim(), crate::audit::event::MAX_NAME))
+        .filter(|n| !n.is_empty());
     let mut rules = target_config(&s, &name).await?.ignore;
-    if rules.contains(&rule) {
+    if rules.iter().any(|r| r.same(&rule)) {
         return Ok(StatusCode::NO_CONTENT);
     }
     let summary = format!(
@@ -439,7 +452,7 @@ async fn unignore_node(
     user.require(Role::Admin)?;
     let mut rules = target_config(&s, &name).await?.ignore;
     let before = rules.len();
-    rules.retain(|r| r != &rule);
+    rules.retain(|r| !r.same(&rule));
     if rules.len() == before {
         return Err(ApiError::not_found(format!(
             "{} is not ignored on '{name}'",
@@ -491,10 +504,14 @@ async fn discover_target(
 ) -> ApiResult<Vec<EndpointInfo>> {
     user.require(Role::Operator)?;
     let url = target_url(&s, &name).await?;
-    discovery::discover(&s.client, &url)
+    let endpoints = discovery::discover(&s.client, &url)
         .await
-        .map(Json)
-        .map_err(ApiError::upstream)
+        .map_err(ApiError::upstream)?;
+    // And whether the target accepts the gateway, so the page shows it now.
+    if let Some(relay) = s.targets.relay(&name).await {
+        relay.check_gateway_trust().await;
+    }
+    Ok(Json(endpoints))
 }
 
 #[derive(Deserialize)]
@@ -539,6 +556,10 @@ async fn trust_server(
         ),
     )
     .await;
+    // Now the gateway can check whether the target accepts it.
+    if let Some(relay) = s.targets.relay(&name).await {
+        relay.check_gateway_trust().await;
+    }
     Ok(Json(info))
 }
 
@@ -640,7 +661,7 @@ async fn import_own(
         .map_err(|e| ApiError::bad_request(anyhow::anyhow!("private key: {e}")))?;
     let cert = s
         .pki
-        .import_own(&cert, &key, &s.config.gateway)
+        .import_own(&cert, &key, &s.targets.config().await.gateway)
         .map_err(ApiError::bad_request)?;
     let info = CertificateInfo::from_x509(&cert);
     s.targets.restart_all().await;
@@ -657,7 +678,7 @@ async fn import_own(
 
 async fn regenerate_own(State(s): State<AppState>, user: AuthUser) -> ApiResult<CertificateInfo> {
     user.require(Role::Admin)?;
-    let cert = s.pki.regenerate_own(&s.config.gateway)?;
+    let cert = s.pki.regenerate_own(&s.targets.config().await.gateway)?;
     let info = CertificateInfo::from_x509(&cert);
     s.targets.restart_all().await;
     s.config_changed(
@@ -738,6 +759,49 @@ async fn audit_query(
     Ok(Json(s.reader.query(q).await?))
 }
 
+/// Warnings and errors that nobody has acknowledged yet, per severity.
+async fn alarms(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Vec<crate::audit::store::AlarmCount>> {
+    user.require(Role::Auditor)?;
+    Ok(Json(s.reader.alarms().await?))
+}
+
+#[derive(Deserialize)]
+struct AcknowledgeRequest {
+    severity: crate::audit::event::Severity,
+}
+
+/// Acknowledges every record of a severity up to now. The acknowledgement
+/// is itself a record in the trail: who, which severity, up to where.
+async fn acknowledge_alarms(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<AcknowledgeRequest>,
+) -> ApiResult<Vec<crate::audit::store::AlarmCount>> {
+    user.require(Role::Operator)?;
+    s.audit.flush().await;
+    let current = s.reader.alarms().await?;
+    let count = current
+        .iter()
+        .find(|a| a.severity == req.severity)
+        .map_or(0, |a| a.unacknowledged);
+    if count > 0 {
+        let up_to_seq = s.reader.head_seq().await?;
+        s.audit
+            .record_committed(AuditEntry::new(AuditEvent::AlarmsAcknowledged {
+                by: user.username.clone(),
+                severity: req.severity,
+                up_to_seq,
+                count: count as u64,
+            }))
+            .await
+            .map_err(|e| ApiError::from(anyhow::anyhow!("{e}")))?;
+    }
+    Ok(Json(s.reader.alarms().await?))
+}
+
 #[derive(Deserialize)]
 struct MostWrittenQuery {
     /// Look back this many hours (default 24, at most a year).
@@ -793,6 +857,66 @@ async fn audit_csv(
         .into_response())
 }
 
+/// What an edit of a target changed, e.g.
+/// `changed target 'plc1': endpoint opc.tcp://a:4840 -> opc.tcp://b:4840`.
+fn target_changes(old: &TargetConfig, new: &TargetConfig) -> String {
+    let mut changes = Vec::new();
+    let mut diff = |what: &str, a: String, b: String| {
+        if a != b {
+            changes.push(format!("{what} {a} -> {b}"));
+        }
+    };
+    diff("name", old.name.clone(), new.name.clone());
+    diff("listen", old.listen.to_string(), new.listen.to_string());
+    diff(
+        "endpoint",
+        old.endpoint_url.clone(),
+        new.endpoint_url.clone(),
+    );
+    diff(
+        "minimum security",
+        format!("{:?}", old.min_security),
+        format!("{:?}", new.min_security),
+    );
+    diff(
+        "discovery every",
+        format!("{} s", old.discovery_interval_secs),
+        format!("{} s", new.discovery_interval_secs),
+    );
+    diff(
+        "max connections",
+        old.max_connections.to_string(),
+        new.max_connections.to_string(),
+    );
+    diff(
+        "max connections per address",
+        old.max_connections_per_address.to_string(),
+        new.max_connections_per_address.to_string(),
+    );
+    if changes.is_empty() {
+        format!("saved target '{}' unchanged", old.name)
+    } else {
+        format!("changed target '{}': {}", old.name, changes.join(", "))
+    }
+}
+
+#[test]
+fn target_changes_name_only_what_changed() {
+    let old: TargetConfig = toml::from_str(
+        r#"name = "plc1"
+listen = "0.0.0.0:4841"
+endpoint_url = "opc.tcp://a:4840""#,
+    )
+    .unwrap();
+    let mut new = old.clone();
+    assert_eq!(target_changes(&old, &new), "saved target 'plc1' unchanged");
+    new.endpoint_url = "opc.tcp://b:4840".into();
+    assert_eq!(
+        target_changes(&old, &new),
+        "changed target 'plc1': endpoint opc.tcp://a:4840 -> opc.tcp://b:4840"
+    );
+}
+
 fn csv_field(value: &str) -> String {
     // Quote everything; neutralise spreadsheet formulas, but leave numbers
     // (-3.5) as they are.
@@ -807,8 +931,8 @@ fn csv_field(value: &str) -> String {
 
 fn csv_row(record: &StoredRecord) -> String {
     let f = crate::export::fields(record);
+    // The sequence number is a plain number; everything else is quoted.
     let fields = [
-        record.seq.to_string(),
         record.entry.ts.to_rfc3339(),
         f.target,
         f.kind.to_string(),
@@ -823,9 +947,8 @@ fn csv_row(record: &StoredRecord) -> String {
         f.event_json,
         record.hash.clone(),
     ];
-    let mut line = fields
-        .iter()
-        .map(|f| csv_field(f))
+    let mut line = std::iter::once(record.seq.to_string())
+        .chain(fields.iter().map(|f| csv_field(f)))
         .collect::<Vec<_>>()
         .join(",");
     line.push('\n');

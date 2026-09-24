@@ -262,6 +262,14 @@ pub enum AuditEvent {
         subscription_ids: Vec<u32>,
         status: String,
     },
+    /// Someone acknowledged the warnings or errors up to and including
+    /// record `up_to_seq`.
+    AlarmsAcknowledged {
+        by: String,
+        severity: Severity,
+        up_to_seq: i64,
+        count: u64,
+    },
     /// Value writes to an ignored node between `first` and `last`, recorded
     /// as one summary instead of one record each.
     IgnoredWrites {
@@ -278,6 +286,41 @@ pub enum AuditEvent {
         /// Address, application and user of each client (at most 20).
         clients: Vec<String>,
     },
+}
+
+/// Records that need someone's attention until they are acknowledged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// Something to look at: a target down, a refused client or login.
+    Warning,
+    /// The audit trail or its copies may be incomplete, or the target's
+    /// security changed.
+    Error,
+}
+
+impl Severity {
+    pub const ALL: [Severity; 2] = [Severity::Warning, Severity::Error];
+
+    /// The event kinds of this severity.
+    pub fn kinds(self) -> &'static [&'static str] {
+        match self {
+            Severity::Error => &[
+                "events_lost",
+                "trail_truncated",
+                "export_gap",
+                "upstream_endpoints_changed",
+            ],
+            Severity::Warning => &[
+                "upstream_unavailable",
+                "certificate_rejected",
+                "authentication_failed",
+                "ui_login_failed",
+                "connections_refused",
+                "clock_jumped",
+            ],
+        }
+    }
 }
 
 impl AuditEvent {
@@ -314,6 +357,7 @@ impl AuditEvent {
             AuditEvent::NodeManagement { .. } => "node_management",
             AuditEvent::SubscriptionsTransferred { .. } => "subscriptions_transferred",
             AuditEvent::IgnoredWrites { .. } => "ignored_writes",
+            AuditEvent::AlarmsAcknowledged { .. } => "alarms_acknowledged",
         }
     }
 

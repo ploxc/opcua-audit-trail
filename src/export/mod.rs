@@ -7,7 +7,6 @@
 //! outside the gateway, the local chain can no longer be rebuilt unnoticed.
 
 pub mod questdb;
-pub mod syslog;
 mod tls;
 
 use std::collections::BTreeMap;
@@ -69,8 +68,15 @@ pub fn fields(record: &StoredRecord) -> RecordFields {
     RecordFields {
         target: entry.target.clone().unwrap_or_default(),
         kind: entry.event.kind(),
+        // A web UI user (who changed settings, logged in, acknowledged)
+        // is in the event itself.
         user: client
             .and_then(|c| c.user.as_ref().map(|u| u.label()))
+            .or_else(|| {
+                let by = text("by");
+                let by = if by.is_empty() { text("user") } else { by };
+                (!by.is_empty() && by != "gateway").then(|| format!("ui:{by}"))
+            })
             .unwrap_or_default(),
         client_address: client.map(|c| c.remote_addr.clone()).unwrap_or_default(),
         client_application: client
@@ -171,8 +177,27 @@ impl ExportState {
         })
     }
 
-    pub fn position(&self, name: &str) -> Position {
-        self.positions.lock().get(name).cloned().unwrap_or_default()
+    #[cfg(test)]
+    pub fn position(&self, key: &str) -> Position {
+        self.positions.lock().get(key).cloned().unwrap_or_default()
+    }
+
+    /// The position of a destination, stored under `key` (kind and address,
+    /// so a new destination starts from the beginning of the trail while the
+    /// old one's position stays as an anchor). State files from before keep
+    /// one position per `kind`; that one is taken over by the destination.
+    pub fn position_for(&self, kind: &str, key: &str) -> Position {
+        let mut positions = self.positions.lock();
+        if let Some(p) = positions.get(key) {
+            return p.clone();
+        }
+        match positions.remove(kind) {
+            Some(p) => {
+                positions.insert(key.to_string(), p.clone());
+                p
+            }
+            None => Position::default(),
+        }
     }
 
     /// The exported records as anchors for `verify`: the trail must still
@@ -216,75 +241,123 @@ pub type ExportStatuses = Arc<RwLock<BTreeMap<String, ExportStatus>>>;
 
 pub enum Sink {
     QuestDb(Box<questdb::QuestDbSink>),
-    Syslog(syslog::SyslogSink),
 }
 
 impl Sink {
     fn name(&self) -> &'static str {
         match self {
             Sink::QuestDb(_) => "questdb",
-            Sink::Syslog(_) => "syslog",
         }
     }
 
     fn destination(&self) -> String {
         match self {
             Sink::QuestDb(s) => s.destination(),
-            Sink::Syslog(s) => s.destination(),
         }
+    }
+
+    /// Where the records go, to tell destinations apart in the state file.
+    fn key(&self) -> String {
+        format!("{} {}", self.name(), self.destination())
     }
 
     fn batch_size(&self) -> u32 {
         match self {
             Sink::QuestDb(_) => 1000,
-            Sink::Syslog(_) => 200,
         }
     }
 
     async fn send(&mut self, records: &[StoredRecord]) -> anyhow::Result<()> {
         match self {
             Sink::QuestDb(s) => s.send(records).await,
-            Sink::Syslog(s) => s.send(records).await,
         }
     }
 }
 
-/// Starts one exporter task per configured destination.
-pub fn start(
-    config: &ExportConfig,
+/// The running exporters. They are replaced as a whole when the export
+/// settings change.
+pub struct Exports {
     reader: AuditReader,
     audit: AuditHandle,
-    state_path: &Path,
-) -> anyhow::Result<ExportStatuses> {
-    let statuses: ExportStatuses = Default::default();
+    state_path: PathBuf,
+    state: Mutex<Option<Arc<ExportState>>>,
+    statuses: ExportStatuses,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Exports {
+    /// Starts one exporter task per configured destination.
+    pub fn start(
+        config: &ExportConfig,
+        reader: AuditReader,
+        audit: AuditHandle,
+        state_path: &Path,
+    ) -> anyhow::Result<Arc<Self>> {
+        let exports = Arc::new(Self {
+            reader,
+            audit,
+            state_path: state_path.to_path_buf(),
+            state: Mutex::new(None),
+            statuses: Default::default(),
+            tasks: Mutex::new(Vec::new()),
+        });
+        exports.apply(config)?;
+        Ok(exports)
+    }
+
+    pub fn statuses(&self) -> ExportStatuses {
+        self.statuses.clone()
+    }
+
+    /// Checks that `config` can be used (URLs, CA files), without applying it.
+    pub fn check(config: &ExportConfig) -> anyhow::Result<()> {
+        sinks(config).map(|_| ())
+    }
+
+    /// Stops the current exporters and starts those of `config`. A
+    /// destination that stays the same continues where it was.
+    pub fn apply(&self, config: &ExportConfig) -> anyhow::Result<()> {
+        let sinks = sinks(config)?;
+        for task in self.tasks.lock().drain(..) {
+            task.abort();
+        }
+        self.statuses.write().clear();
+        if sinks.is_empty() {
+            return Ok(());
+        }
+        let state = {
+            let mut state = self.state.lock();
+            match &*state {
+                Some(s) => s.clone(),
+                None => state
+                    .insert(Arc::new(ExportState::open(&self.state_path)?))
+                    .clone(),
+            }
+        };
+        let mut tasks = self.tasks.lock();
+        for (sink, interval) in sinks {
+            tasks.push(tokio::spawn(run(
+                sink,
+                self.reader.clone(),
+                self.audit.clone(),
+                state.clone(),
+                self.statuses.clone(),
+                interval,
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn sinks(config: &ExportConfig) -> anyhow::Result<Vec<(Sink, Duration)>> {
     let mut sinks = Vec::new();
     if let Some(q) = &config.questdb {
         sinks.push((
             Sink::QuestDb(Box::new(questdb::QuestDbSink::new(q)?)),
-            Duration::from_secs(q.interval_secs),
+            Duration::from_secs(q.interval_secs.max(1)),
         ));
     }
-    if let Some(s) = &config.syslog {
-        sinks.push((
-            Sink::Syslog(syslog::SyslogSink::new(s)?),
-            Duration::from_secs(s.interval_secs),
-        ));
-    }
-    if sinks.is_empty() {
-        return Ok(statuses);
-    }
-    let state = Arc::new(ExportState::open(state_path)?);
-    for (sink, interval) in sinks {
-        tokio::spawn(run(
-            sink,
-            reader.clone(),
-            audit.clone(),
-            state.clone(),
-            statuses.clone(),
-            interval,
-        ));
-    }
-    Ok(statuses)
+    Ok(sinks)
 }
 
 /// Checks that `records` continue exactly after `position`. Returns why not.
@@ -334,7 +407,8 @@ pub async fn run(
     interval: Duration,
 ) {
     let name = sink.name();
-    let mut position = state.position(name);
+    let key = sink.key();
+    let mut position = state.position_for(name, &key);
     statuses.write().insert(
         name.into(),
         ExportStatus {
@@ -378,7 +452,7 @@ pub async fn run(
                 seq: last.seq,
                 hash: last.hash.clone(),
             };
-            state.set(name, next.clone())?;
+            state.set(&key, next.clone())?;
             position = next;
             Ok(records.len())
         }
@@ -460,6 +534,31 @@ mod tests {
     }
 
     #[test]
+    fn web_ui_users_fill_the_user_field() {
+        let record = |event| StoredRecord {
+            entry: AuditEntry::new(event),
+            ..write_record(1)
+        };
+        let user = |event| fields(&record(event)).user;
+        assert_eq!(
+            user(AuditEvent::ConfigChanged {
+                by: "admin".into(),
+                summary: "x".into()
+            }),
+            "ui:admin"
+        );
+        assert_eq!(user(AuditEvent::UiLogin { user: "jan".into() }), "ui:jan");
+        assert_eq!(
+            user(AuditEvent::ConfigChanged {
+                by: "gateway".into(),
+                summary: "x".into()
+            }),
+            ""
+        );
+        assert_eq!(fields(&write_record(1)).user, "operator");
+    }
+
+    #[test]
     fn fields_flatten_a_write() {
         let f = fields(&write_record(7));
         assert_eq!(f.kind, "write");
@@ -471,9 +570,44 @@ mod tests {
         assert_eq!(f.status, "Good");
     }
 
+    /// A QuestDB stand-in that collects the `seq` of every line it gets.
+    async fn questdb_receiver() -> (String, Arc<Mutex<Vec<i64>>>) {
+        use axum::extract::State;
+        let seen: Arc<Mutex<Vec<i64>>> = Default::default();
+        async fn write(State(seen): State<Arc<Mutex<Vec<i64>>>>, body: String) {
+            for line in body.lines() {
+                let seq = line
+                    .split(" seq=")
+                    .nth(1)
+                    .unwrap()
+                    .split('i')
+                    .next()
+                    .unwrap();
+                seen.lock().push(seq.parse().unwrap());
+            }
+        }
+        let app = axum::Router::new()
+            .route("/write", axum::routing::post(write))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (url, seen)
+    }
+
+    async fn wait_for(what: impl Fn() -> bool) {
+        for _ in 0..100 {
+            if what() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out");
+    }
+
     #[tokio::test]
     async fn exporter_ships_everything_once_and_resumes() {
-        use crate::config::{AuditConfig, SyslogConfig, SyslogProtocol};
+        use crate::config::{AuditConfig, QuestDbConfig};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("audit.db");
         let audit = crate::audit::start(&db, &AuditConfig::default()).unwrap();
@@ -483,59 +617,77 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (url, seen) = questdb_receiver().await;
+        let questdb = |url: String| QuestDbConfig {
+            url,
+            ca_file: None,
+            table: "opcua_audit".into(),
+            token: None,
+            username: None,
+            password: None,
+            interval_secs: 1,
+        };
         let export = ExportConfig {
-            questdb: None,
-            syslog: Some(SyslogConfig {
-                address: receiver.local_addr().unwrap().to_string(),
-                protocol: SyslogProtocol::Udp,
-                facility: 16,
-                interval_secs: 1,
-                ca_file: None,
-            }),
+            questdb: Some(questdb(url)),
+            ..Default::default()
         };
         let state_path = dir.path().join("export-state.json");
-        let statuses = start(&export, AuditReader::new(&db), audit.clone(), &state_path).unwrap();
+        let exports =
+            Exports::start(&export, AuditReader::new(&db), audit.clone(), &state_path).unwrap();
+        let statuses = exports.statuses();
 
-        let mut buf = vec![0u8; 16384];
-        let mut seqs = Vec::new();
-        for _ in 0..5 {
-            let n = tokio::time::timeout(Duration::from_secs(5), receiver.recv(&mut buf))
-                .await
-                .unwrap()
-                .unwrap();
-            let m = String::from_utf8_lossy(&buf[..n]).to_string();
-            let seq: i64 = m
-                .split("seq=\"")
-                .nth(1)
-                .unwrap()
-                .split('"')
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
-            seqs.push(seq);
-        }
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
-        for _ in 0..50 {
-            // The status is updated right after the position is saved.
-            if statuses.read()["syslog"].exported_seq == 5 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let status_now = statuses.read()["syslog"].clone();
+        // The status is updated right after the position is saved.
+        wait_for(|| {
+            statuses
+                .read()
+                .get("questdb")
+                .is_some_and(|s| s.exported_seq == 5)
+        })
+        .await;
+        assert_eq!(*seen.lock(), vec![1, 2, 3, 4, 5]);
+        let anchors = ExportState::open(&state_path).unwrap().anchors();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].seq, 5);
+        assert!(statuses.read()["questdb"].last_error.is_none());
+
+        // Another server is a new destination: it gets the whole trail,
+        // and the first one's position stays as an anchor.
+        let (second_url, second) = questdb_receiver().await;
+        exports
+            .apply(&ExportConfig {
+                questdb: Some(questdb(second_url)),
+                ..Default::default()
+            })
+            .unwrap();
+        wait_for(|| second.lock().first() == Some(&1)).await;
+        wait_for(|| ExportState::open(&state_path).unwrap().anchors().len() == 2).await;
+
+        // No destinations: the exporters stop and their status goes.
+        exports.apply(&ExportConfig::default()).unwrap();
+        assert!(statuses.read().is_empty());
+    }
+
+    /// State files from before destinations were told apart keep one
+    /// position per kind; the configured destination takes it over.
+    #[test]
+    fn a_position_per_kind_is_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export-state.json");
+        std::fs::write(&path, r#"{"questdb": {"seq": 12, "hash": "h12"}}"#).unwrap();
+        let state = ExportState::open(&path).unwrap();
         assert_eq!(
-            ExportState::open(&state_path)
-                .unwrap()
-                .position("syslog")
-                .seq,
-            5,
-            "{status_now:?}"
+            state.position_for("questdb", "questdb http://a:9000").seq,
+            12
         );
-        let status = statuses.read()["syslog"].clone();
-        assert_eq!(status.exported_seq, 5);
-        assert!(status.last_error.is_none());
+        assert_eq!(
+            state.position_for("questdb", "questdb http://a:9000").seq,
+            12
+        );
+        // Only one destination can take it over.
+        assert_eq!(
+            state.position_for("questdb", "questdb http://b:9000").seq,
+            0
+        );
     }
 
     #[test]
@@ -561,13 +713,16 @@ mod tests {
     fn unreadable_state_starts_over() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("export-state.json");
-        std::fs::write(&path, "{\"syslog\": 12").unwrap();
+        std::fs::write(&path, "{\"questdb\": 12").unwrap();
         let state = ExportState::open(&path).unwrap();
-        assert_eq!(state.position("syslog").seq, 0);
+        assert_eq!(state.position("questdb").seq, 0);
         assert!(dir.path().join("export-state.json.corrupt").exists());
         // State files from before hashes were kept still load.
-        std::fs::write(&path, "{\"syslog\": 12}").unwrap();
-        assert_eq!(ExportState::open(&path).unwrap().position("syslog").seq, 12);
+        std::fs::write(&path, "{\"questdb\": 12}").unwrap();
+        assert_eq!(
+            ExportState::open(&path).unwrap().position("questdb").seq,
+            12
+        );
     }
 
     fn record_at(seq: i64, prev_hash: &str) -> StoredRecord {

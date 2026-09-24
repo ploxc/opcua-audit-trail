@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::event::ClientContext;
 use crate::audit::AuditHandle;
-use crate::config::{AuditConfig, Config, FailMode, TargetConfig};
+use crate::config::{Config, TargetConfig};
 use crate::discovery::{self, TargetStatuses};
 use transport::Limits;
 
@@ -169,8 +169,6 @@ pub struct RelayTarget {
     pub statuses: TargetStatuses,
     pub discovery: Arc<Client>,
     pub audit: AuditHandle,
-    pub fail_mode: FailMode,
-    pub record_old_value: bool,
     pub names: audit_map::NameCache,
     pub sessions: SessionRegistry,
     pub clients: RwLock<BTreeMap<u64, ClientInfo>>,
@@ -189,7 +187,6 @@ pub struct RelayTarget {
     pub ignore: ignore::IgnoreList,
     /// Ignored writes since the last summary.
     pub ignored: ignore::IgnoredWrites,
-    ignored_summary: Duration,
 }
 
 impl RelayTarget {
@@ -199,7 +196,6 @@ impl RelayTarget {
         statuses: TargetStatuses,
         discovery: Arc<Client>,
         audit: AuditHandle,
-        audit_config: &AuditConfig,
     ) -> Self {
         let limits = Limits::default();
         Self {
@@ -209,8 +205,6 @@ impl RelayTarget {
             statuses,
             discovery,
             audit,
-            fail_mode: audit_config.fail_mode,
-            record_old_value: audit_config.record_old_value,
             names: audit_map::NameCache::default(),
             sessions: SessionRegistry::default(),
             clients: RwLock::new(BTreeMap::new()),
@@ -221,8 +215,149 @@ impl RelayTarget {
             trust_changed: tokio::sync::watch::Sender::new(0),
             ignore: ignore::IgnoreList::new(&config.ignore),
             ignored: ignore::IgnoredWrites::default(),
-            ignored_summary: Duration::from_secs(audit_config.ignored_summary_secs),
             config,
+        }
+    }
+
+    /// Opens a secure channel to the target with the gateway's certificate
+    /// (no session) and records whether the target accepts the gateway, so
+    /// a missing trust shows on the target before any client connects.
+    pub async fn check_gateway_trust(&self) {
+        use crate::discovery::GatewayTrust;
+        let result = match self.upstream_endpoints().await {
+            Err(status) => GatewayTrust::Failed {
+                detail: format!("target not reachable ({status})"),
+            },
+            Ok(endpoints) => {
+                let secure = endpoints
+                    .into_iter()
+                    .filter(|e| {
+                        SecurityPolicy::from_uri(e.security_policy_uri.as_ref())
+                            != SecurityPolicy::None
+                    })
+                    .max_by_key(|e| e.security_level);
+                match secure {
+                    None => GatewayTrust::NoSecureEndpoint,
+                    Some(endpoint) => {
+                        let policy =
+                            SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref());
+                        let connect = upstream::Upstream::connect(
+                            &self.gateway,
+                            &self.config.endpoint_url,
+                            endpoint,
+                            &self.limits,
+                            self.decoding.clone(),
+                        );
+                        match tokio::time::timeout(Duration::from_secs(15), connect).await {
+                            Err(_) => GatewayTrust::Failed {
+                                detail: "no answer within 15 s".into(),
+                            },
+                            // Some servers check the gateway's certificate
+                            // only when a session is created: create one
+                            // (without logging in) and close it again.
+                            Ok(Ok(upstream)) => {
+                                let result = self.probe_session(&upstream, policy).await;
+                                upstream.close().await;
+                                result
+                            }
+                            Ok(Err(upstream::UpstreamError::Untrusted { .. })) => {
+                                GatewayTrust::TargetNotTrusted
+                            }
+                            Ok(Err(upstream::UpstreamError::Other(e))) => {
+                                let detail = e.to_string();
+                                if detail.contains("BadSecurityChecksFailed")
+                                    || detail.contains("BadCertificateUntrusted")
+                                {
+                                    GatewayTrust::Refused { detail }
+                                } else {
+                                    GatewayTrust::Failed { detail }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let mut statuses = self.statuses.write().await;
+        if let Some(status) = statuses.get_mut(&self.config.name) {
+            if status.gateway_trust != result {
+                tracing::info!(target = %self.config.name, "gateway trust: {result:?}");
+            }
+            status.gateway_trust = result;
+        }
+    }
+
+    async fn probe_session(
+        &self,
+        upstream: &upstream::Upstream,
+        policy: SecurityPolicy,
+    ) -> crate::discovery::GatewayTrust {
+        use crate::discovery::GatewayTrust;
+        use opcua::core::{RequestMessage, ResponseMessage};
+        use opcua::types::{CloseSessionRequest, CreateSessionRequest, DateTime, RequestHeader};
+        let header = || RequestHeader {
+            timestamp: DateTime::now(),
+            request_handle: self.next_request_handle(),
+            timeout_hint: 10_000,
+            ..Default::default()
+        };
+        let request = CreateSessionRequest {
+            request_header: header(),
+            client_description: endpoints::client_description(&self.gateway),
+            server_uri: Default::default(),
+            endpoint_url: self.config.endpoint_url.as_str().into(),
+            session_name: format!("{} trust check", self.gateway.application_name).into(),
+            client_nonce: opcua::crypto::random::byte_string(32),
+            client_certificate: self.gateway.certificate_bytes.clone(),
+            requested_session_timeout: 10_000.0,
+            max_response_message_size: 0,
+        };
+        let refused = |status: StatusCode| {
+            matches!(
+                status,
+                StatusCode::BadSecurityChecksFailed
+                    | StatusCode::BadCertificateUntrusted
+                    | StatusCode::BadCertificateInvalid
+                    | StatusCode::BadCertificateUriInvalid
+            )
+        };
+        match upstream
+            .send(RequestMessage::from(request), Duration::from_secs(10))
+            .await
+        {
+            Ok(ResponseMessage::CreateSession(r)) if r.response_header.service_result.is_good() => {
+                let close = CloseSessionRequest {
+                    request_header: RequestHeader {
+                        authentication_token: r.authentication_token.clone(),
+                        ..header()
+                    },
+                    delete_subscriptions: true,
+                };
+                let _ = upstream
+                    .send(RequestMessage::from(close), Duration::from_secs(5))
+                    .await;
+                GatewayTrust::Trusted {
+                    policy: policy.to_str().to_string(),
+                }
+            }
+            Ok(other) => {
+                let status = other.response_header().service_result;
+                if refused(status) {
+                    GatewayTrust::Refused {
+                        detail: status.to_string(),
+                    }
+                } else {
+                    GatewayTrust::Failed {
+                        detail: format!("CreateSession: {status}"),
+                    }
+                }
+            }
+            Err(e) if refused(e.status()) => GatewayTrust::Refused {
+                detail: e.status().to_string(),
+            },
+            Err(e) => GatewayTrust::Failed {
+                detail: format!("CreateSession: {}", e.status()),
+            },
         }
     }
 
@@ -366,12 +501,27 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
     }));
     // Refused connections are recorded as one summary per address.
     let mut report = tokio::time::interval(Duration::from_secs(10));
-    let mut summarise = tokio::time::interval(target.ignored_summary);
-    summarise.tick().await;
+    // The summary interval is read each time: it can change while running.
+    let mut next_summary = Instant::now() + target.audit.settings().ignored_summary();
+    // Whether the target accepts the gateway: soon after start, then with
+    // every discovery interval, and at once when trust changes.
+    let mut next_trust_check = Instant::now() + Duration::from_secs(2);
+    let mut trust = target.trust_changed.subscribe();
     loop {
         tokio::select! {
             _ = target.shutdown.cancelled() => break,
-            _ = summarise.tick() => target.record_ignored().await,
+            _ = tokio::time::sleep_until(next_trust_check.into()) => {
+                target.check_gateway_trust().await;
+                next_trust_check = Instant::now()
+                    + Duration::from_secs(target.config.discovery_interval_secs.max(10));
+            }
+            Ok(()) = trust.changed() => {
+                next_trust_check = Instant::now();
+            }
+            _ = tokio::time::sleep_until(next_summary.into()) => {
+                target.record_ignored().await;
+                next_summary = Instant::now() + target.audit.settings().ignored_summary();
+            }
             _ = report.tick() => {
                 let refused = admission.lock().take_refused();
                 for (ip, count, reason) in refused {

@@ -59,6 +59,13 @@ async fn web() -> Web {
         client.clone(),
         audit.clone(),
     ));
+    let exports = crate::export::Exports::start(
+        &Default::default(),
+        AuditReader::new(&db),
+        audit.clone(),
+        &config.gateway.data_dir.join("export-state.json"),
+    )
+    .unwrap();
     let state = AppState {
         config: Arc::new(config.clone()),
         targets,
@@ -70,7 +77,7 @@ async fn web() -> Web {
         users: Arc::new(users),
         sessions: Default::default(),
         browser: Default::default(),
-        exports: Default::default(),
+        exports,
     };
     Web {
         app: router(state),
@@ -522,4 +529,263 @@ async fn ignore_list_is_admin_only_audited_and_kept_on_edit() {
     let (status, top) = w.get("/api/audit/most-written?hours=1", &operator).await;
     assert_eq!(status, StatusCode::OK);
     assert!(top.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn settings_are_saved_applied_and_keep_secrets() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let auditor = w.login("auditor").await;
+
+    let (status, settings) = w.get("/api/settings", &auditor).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settings["audit"]["retention_days"], 365);
+    assert!(settings["export"]["questdb"].is_null());
+
+    let audit = json!({
+        "retention_days": 30,
+        "fail_mode": "closed",
+        "record_old_value": false,
+        "ignored_summary_secs": 600
+    });
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/audit",
+            Some(&auditor),
+            Some(audit.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/audit",
+            Some(&admin),
+            Some(audit),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Applied at once, saved, and the rest of the file is untouched.
+    let (_, status_view) = w.get("/api/status", &auditor).await;
+    assert_eq!(status_view["retention_days"], 30);
+    assert_eq!(status_view["fail_mode"], "closed");
+    assert_eq!(status_view["ignored_summary_secs"], 600);
+    let saved = Config::load(&w.config_path).unwrap();
+    assert_eq!(saved.audit.retention_days, 30);
+    assert!(!saved.audit.record_old_value);
+    assert!(std::fs::read_to_string(&w.config_path)
+        .unwrap()
+        .contains("# OPC UA Audit Gateway configuration."));
+
+    // Export: the token is stored but never shown; an absent secret keeps
+    // it, an empty one removes it.
+    let questdb = |token: Option<&str>| {
+        let mut q = json!({
+            "url": "http://127.0.0.1:1/",
+            "table": "audit",
+            "interval_secs": 5
+        });
+        if let Some(t) = token {
+            q["token"] = json!(t);
+        }
+        json!({ "questdb": q })
+    };
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/export",
+            Some(&admin),
+            Some(questdb(Some("s3cret"))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, settings) = w.get("/api/settings", &auditor).await;
+    assert_eq!(settings["export"]["questdb"]["url"], "http://127.0.0.1:1");
+    assert_eq!(settings["export"]["questdb"]["token_set"], true);
+    assert!(!settings.to_string().contains("s3cret"));
+    let (_, status_view) = w.get("/api/status", &auditor).await;
+    assert_eq!(status_view["exports"][0]["name"], "questdb");
+
+    w.send(
+        Method::PUT,
+        "/api/settings/export",
+        Some(&admin),
+        Some(questdb(None)),
+    )
+    .await;
+    let saved = Config::load(&w.config_path).unwrap();
+    assert_eq!(
+        saved.export.questdb.unwrap().token.as_deref(),
+        Some("s3cret")
+    );
+    w.send(
+        Method::PUT,
+        "/api/settings/export",
+        Some(&admin),
+        Some(questdb(Some(""))),
+    )
+    .await;
+    assert!(Config::load(&w.config_path)
+        .unwrap()
+        .export
+        .questdb
+        .unwrap()
+        .token
+        .is_none());
+
+    // A bad destination changes nothing.
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/export",
+            Some(&admin),
+            Some(json!({ "questdb": { "url": "ftp://x", "table": "t", "interval_secs": 5 } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(Config::load(&w.config_path)
+        .unwrap()
+        .export
+        .questdb
+        .is_some());
+
+    // Turning export off stops the exporter.
+    w.send(
+        Method::PUT,
+        "/api/settings/export",
+        Some(&admin),
+        Some(json!({})),
+    )
+    .await;
+    assert!(Config::load(&w.config_path)
+        .unwrap()
+        .export
+        .questdb
+        .is_none());
+    let (_, status_view) = w.get("/api/status", &auditor).await;
+    assert!(status_view["exports"].as_array().unwrap().is_empty());
+
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/gateway",
+            Some(&admin),
+            Some(json!({ "certificate_hostnames": ["gw.local", " 10.0.0.2 ", ""] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        Config::load(&w.config_path)
+            .unwrap()
+            .gateway
+            .certificate_hostnames,
+        ["gw.local", "10.0.0.2"]
+    );
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/gateway",
+            Some(&admin),
+            Some(json!({ "certificate_hostnames": ["not a host"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Every change is audited, without the secret.
+    let (_, changes) = w.get("/api/audit?kind=config_changed", &admin).await;
+    let text = changes.to_string();
+    assert!(text.contains("retention 365 days -> 30 days"), "{text}");
+    assert!(text.contains("QuestDB export to http://127.0.0.1:1 (table audit) turned on"));
+    assert!(text.contains("certificate host names: gw.local, 10.0.0.2"));
+    assert!(!text.contains("s3cret"));
+}
+
+#[tokio::test]
+async fn warnings_and_errors_until_acknowledged() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let auditor = w.login("auditor").await;
+    let operator = w.login("operator").await;
+    // Two failed logins: warnings.
+    for _ in 0..2 {
+        w.send(
+            Method::POST,
+            "/api/login",
+            None,
+            Some(json!({ "username": "admin", "password": "wrong" })),
+        )
+        .await;
+    }
+    let count = |alarms: &Value, severity: &str| {
+        alarms
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["severity"] == severity)
+            .unwrap()["unacknowledged"]
+            .as_i64()
+            .unwrap()
+    };
+    let (_, alarms) = w.get("/api/alarms", &auditor).await;
+    assert_eq!(count(&alarms, "warning"), 2);
+    assert_eq!(count(&alarms, "error"), 0);
+
+    // "Show": the unacknowledged warnings, by their kinds and position.
+    let warning = alarms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["severity"] == "warning")
+        .unwrap();
+    let kinds: Vec<&str> = warning["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    let (_, rows) = w
+        .get(
+            &format!(
+                "/api/audit?kinds={}&after_seq={}",
+                kinds.join(","),
+                warning["acknowledged_up_to"]
+            ),
+            &auditor,
+        )
+        .await;
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+
+    // Auditors only look; operators acknowledge, and that is recorded.
+    let (status, _) = w
+        .post(
+            "/api/alarms/acknowledge",
+            &auditor,
+            json!({ "severity": "warning" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, alarms) = w
+        .post(
+            "/api/alarms/acknowledge",
+            &operator,
+            json!({ "severity": "warning" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count(&alarms, "warning"), 0);
+    let (_, acks) = w.get("/api/audit?kind=alarms_acknowledged", &admin).await;
+    assert_eq!(acks[0]["event"]["by"], "operator");
+    assert_eq!(acks[0]["event"]["count"], 2);
+
+    // A new warning after that counts again.
+    w.send(
+        Method::POST,
+        "/api/login",
+        None,
+        Some(json!({ "username": "admin", "password": "wrong" })),
+    )
+    .await;
+    let (_, alarms) = w.get("/api/alarms", &auditor).await;
+    assert_eq!(count(&alarms, "warning"), 1);
 }

@@ -14,7 +14,7 @@ in Docker.
 > calls, history updates, node management, sessions and connections are
 > audited, with old value → new value and the node's display name. The web UI
 > covers status, the audit trail, targets, certificates, an OPC UA browser and
-> users. Audit records can be exported to QuestDB and syslog. It installs as
+> users. Audit records can be exported to QuestDB. It installs as
 > a systemd or Windows service or runs as a container, with optional HTTPS.
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap, and
 > [docs/audit](docs/audit/) for the security audit and its independent
@@ -37,6 +37,26 @@ cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/
 Open http://127.0.0.1:8080 and log in as `admin` with the password from
 `data/initial-admin-password.txt`. You choose a new password at the first
 login (the file is removed then). Then watch the writes arrive.
+
+To try it locked down, as a PLC should be (only the gateway may connect,
+encrypted, with a login), start the stand-in PLC with `--strict` and the
+client with `--secure`:
+
+```sh
+cargo run --example demo_plc -- --strict           # SignAndEncrypt only, login operator/operator
+# target: add  min_security = "sign_and_encrypt"
+cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator --secure
+```
+
+Then trust, one step at a time: the PLC certificate in the gateway (**Targets
+→ Trust server certificate**), the gateway certificate in the PLC (move it from
+`demo-plc-pki/rejected` to `demo-plc-pki/trusted`), and the client certificate
+in the gateway (**Certificates → Trust**). The same client pointed directly at
+the PLC (`opc.tcp://127.0.0.1:4840/`) stays locked out.
+
+For a simulated PLC closer to the real thing (many changing values, several
+security policies), [`docker/opc-plc`](docker/opc-plc/README.md) starts
+Microsoft's open source OPC PLC, locked down the same way.
 
 ## Quick start (binary)
 
@@ -182,13 +202,11 @@ url = "http://questdb:9000"   # ILP over HTTP(S); each batch is acknowledged
 table = "opcua_audit"         # created on first write
 # token = "…"  or  username = "…" / password = "…"  (use https off-host)
 # ca_file = "questdb-ca.pem"  # https with a private CA; default: public roots
-
-[export.syslog]               # SIEM: Graylog, Splunk, Wazuh, rsyslog, …
-address = "siem.local:6514"
-protocol = "tls"              # RFC 5425; "tcp" is RFC 6587 framing; "udp" is fire-and-forget
-# ca_file = "siem-ca.pem"
-facility = 16                 # local0
 ```
+
+In the web UI (Settings), a private CA is pasted as PEM text; the gateway
+keeps it in `data/questdb-ca.pem`. Syslog export is not supported (any more):
+see [docs/export/SYSLOG.md](docs/export/SYSLOG.md).
 
 Every exported record carries its sequence number, its hash and the previous
 record's hash. Once records are outside the gateway, rewriting the local
@@ -217,23 +235,27 @@ failed), from which clients, from when to when, and the last value. A write
 to such a node therefore never goes unnoticed entirely.
 
 In the web UI (admin): **Audit trail → Most written** lists the nodes written
-most in the last 24 hours, each with **Summarise** (every client) or **Only
-from …** (just that client; the same node written by anyone else stays
-recorded one by one). The same buttons are in a write record's details and on
-a variable in the Browser. **Record again** undoes it. Changes apply at once,
-without disconnecting clients, and are audited (`config_changed`).
+most in the last 24 hours. **Summarise…** opens a dialog that explains what
+happens and asks whose writes to summarise: every client's, or only one
+client's (the same node written by anyone else stays recorded one by one).
+The same button is in a write record's details and on a variable in the
+Browser. Summarised nodes carry a *summarised* label in the audit trail and the
+Browser, and each target lists them under **Summarised nodes**, with **Record
+every write again** to undo it. Changes apply at once, without disconnecting
+clients, and are audited (`config_changed`).
 
 In `config.toml`:
 
 ```toml
 [audit]
-ignored_summary_secs = 3600         # one summary per node per hour (default)
+ignored_summary_secs = 3600         # one summary per node per hour (default; also in Settings)
 
 [[targets]]
 name = "line1"
 # …
 [[targets.ignore]]
 node_id = 'ns=3;s="DB1"."Life"'     # as shown in the audit trail
+name = "Life bit"                   # optional, shown in the web UI
 [[targets.ignore]]
 node_id = "ns=3;i=1234"
 client = "10.0.0.5"                 # only from this address or application URI
@@ -255,10 +277,20 @@ not been written yet is lost if the gateway crashes.
 | Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
 | Users | admin | Users and roles |
+| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB export, certificate host names; web server and paths shown read-only |
+
+Settings are saved in `config.toml` (comments are kept) and applied at once,
+without a restart or disconnecting clients. Passwords and tokens are never
+shown again once saved. Shortening the retention deletes older records right
+away. The web server's address, HTTPS and the data paths take effect only at
+start, and a wrong value could lock you out, so they are changed in the file.
 
 Roles are cumulative: auditor < operator < admin. Manage users from the
 command line with `opcua-audit-gateway user add|passwd|role|delete|list`
-(also to reset a lost admin password: `user passwd admin`). Changing a
+(also to reset a lost admin password: `user passwd admin`, which also creates
+the admin if the gateway has not run yet). A user that does not exist is
+reported before any password is asked, with the path of the user database, so
+a command run against the wrong config is noticed at once. Changing a
 password, a role or removing a user ends that user's sessions; sessions also
 expire after 8 hours idle and 24 hours in total. Failed logins are rate
 limited per address and per user.

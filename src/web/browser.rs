@@ -453,10 +453,21 @@ pub async fn browse(
 #[derive(Serialize)]
 pub struct AttributeItem {
     attribute: String,
-    value: AuditValue,
+    /// Absent when the server returned only a status.
+    value: Option<AuditValue>,
+    /// Not Good: the status code, e.g. `BadWaitingForInitialData (0x80320000)`.
+    status: Option<String>,
+    status_description: Option<String>,
+    /// For the Value attribute.
+    source_timestamp: Option<String>,
+    server_timestamp: Option<String>,
+    /// A readable form, e.g. the name of a standard data type.
+    note: Option<String>,
 }
 
-/// All readable attributes of a node.
+/// All attributes of a node, including those the server answers with a bad
+/// status (e.g. a value it has not received yet); attributes the node does
+/// not have are left out.
 pub async fn attributes(
     State(s): State<AppState>,
     user: AuthUser,
@@ -475,21 +486,65 @@ pub async fn attributes(
         })
         .collect();
     let values = session
-        .read(&reads, TimestampsToReturn::Neither, 0.0)
+        .read(&reads, TimestampsToReturn::Both, 0.0)
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(
         ids.iter()
             .zip(values)
-            .filter(|(_, v)| v.status.is_none_or(|s| s.is_good()) && v.value.is_some())
-            .map(|(&id, v)| AttributeItem {
-                attribute: AttributeId::from_u32(id)
-                    .map(|a| format!("{a:?}"))
-                    .unwrap_or_else(|_| id.to_string()),
-                value: audit_value(v.value.as_ref().expect("filtered")),
-            })
+            .filter_map(|(&id, v)| attribute_item(id, v))
             .collect(),
     ))
+}
+
+fn attribute_item(id: u32, v: DataValue) -> Option<AttributeItem> {
+    let status = v.status.unwrap_or_default();
+    if status == opcua::types::StatusCode::BadAttributeIdInvalid
+        || (status.is_good() && v.value.is_none())
+    {
+        return None;
+    }
+    let attribute = AttributeId::from_u32(id).ok();
+    let time = |t: Option<opcua::types::DateTime>| {
+        t.filter(|t| !t.is_null())
+            .map(|t| t.as_chrono().to_rfc3339())
+    };
+    let is_value = attribute == Some(AttributeId::Value);
+    let note = match (&attribute, &v.value) {
+        (Some(AttributeId::DataType), Some(opcua::types::Variant::NodeId(n)))
+            if n.namespace == 0 =>
+        {
+            match &n.identifier {
+                opcua::types::Identifier::Numeric(i) => {
+                    opcua::types::DataTypeId::try_from(i.to_owned())
+                        .ok()
+                        .map(|t| format!("{t:?}"))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Some(AttributeItem {
+        attribute: attribute
+            .map(|a| format!("{a:?}"))
+            .unwrap_or_else(|| id.to_string()),
+        value: v.value.as_ref().map(audit_value),
+        status: (!status.is_good()).then(|| format!("{status} (0x{:08X})", status.bits())),
+        status_description: (!status.is_good())
+            .then(|| status.sub_code().description().to_string()),
+        source_timestamp: if is_value {
+            time(v.source_timestamp)
+        } else {
+            None
+        },
+        server_timestamp: if is_value {
+            time(v.server_timestamp)
+        } else {
+            None
+        },
+        note,
+    })
 }
 
 #[derive(Deserialize)]
@@ -547,4 +602,40 @@ pub async fn values(
             })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use opcua::types::{DataTypeId, NodeId, StatusCode as Status, Variant};
+
+    use super::*;
+
+    fn with_status(status: Status) -> DataValue {
+        DataValue {
+            status: Some(status),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bad_statuses_are_shown_and_missing_attributes_left_out() {
+        let value = AttributeId::Value as u32;
+        let item = attribute_item(value, with_status(Status::BadWaitingForInitialData)).unwrap();
+        assert!(item.value.is_none());
+        assert_eq!(
+            item.status.as_deref(),
+            Some("BadWaitingForInitialData (0x80320000)")
+        );
+        assert!(item.status_description.unwrap().contains("Waiting"));
+
+        assert!(attribute_item(value, with_status(Status::BadAttributeIdInvalid)).is_none());
+
+        let data_type = attribute_item(
+            AttributeId::DataType as u32,
+            DataValue::new_now(Variant::NodeId(Box::new(NodeId::from(DataTypeId::Double)))),
+        )
+        .unwrap();
+        assert_eq!(data_type.note.as_deref(), Some("Double"));
+        assert!(data_type.status.is_none() && data_type.source_timestamp.is_none());
+    }
 }

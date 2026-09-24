@@ -22,10 +22,6 @@ record_old_value = true
 # Copies of the audit trail outside the gateway (see README "Audit export").
 # [export.questdb]
 # url = "http://questdb:9000"      # with: docker compose --profile questdb up -d
-#
-# [export.syslog]
-# address = "siem.local:514"
-# protocol = "tcp"                  # or "tls" (with ca_file = …), or "udp"
 
 # [[targets]]
 # name = "plc1"

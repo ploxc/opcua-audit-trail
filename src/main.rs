@@ -288,13 +288,44 @@ fn read_new_password() -> anyhow::Result<String> {
 fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
     let config = Config::load(path)?;
     let users = user_store(&config)?;
+    let db = config.gateway.data_dir.join("gateway.db");
+    let db = std::path::absolute(&db).unwrap_or(db);
+    let existing: Vec<String> = users.list()?.into_iter().map(|u| u.username).collect();
+    // Checked before asking for a password, not after.
+    let must_exist = |username: &str| -> anyhow::Result<()> {
+        if existing.iter().any(|u| u == username) {
+            return Ok(());
+        }
+        if existing.is_empty() {
+            anyhow::bail!(
+                "there are no users yet in {} (is this the config the gateway runs with?)",
+                db.display()
+            );
+        }
+        anyhow::bail!(
+            "no user '{username}' in {}; the users are: {}. Add one with: user add {username}",
+            db.display(),
+            existing.join(", ")
+        )
+    };
     match cmd {
         UserCommand::Add { username, role } => {
             let role = Role::parse(&role)?;
+            if existing.contains(&username) {
+                anyhow::bail!("user '{username}' already exists; change the password with: user passwd {username}");
+            }
             users.create(&username, &read_new_password()?, role)?;
             println!("added {username} ({})", role.as_str());
         }
+        // Without any users yet (the gateway never ran with this data
+        // directory), `passwd admin` creates the admin with that password.
+        UserCommand::Passwd { username } if username == "admin" && existing.is_empty() => {
+            users.create_with("admin", &read_new_password()?, Role::Admin, false)?;
+            let _ = std::fs::remove_file(users::initial_password_file(&config));
+            println!("created admin in {} with this password", db.display());
+        }
         UserCommand::Passwd { username } => {
+            must_exist(&username)?;
             users.set_password(&username, &read_new_password()?)?;
             if username == "admin" {
                 let _ = std::fs::remove_file(users::initial_password_file(&config));
@@ -302,10 +333,12 @@ fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
             println!("password of {username} changed; their web sessions have ended");
         }
         UserCommand::Role { username, role } => {
+            must_exist(&username)?;
             users.set_role(&username, Role::parse(&role)?)?;
             println!("role of {username} changed");
         }
         UserCommand::Delete { username } => {
+            must_exist(&username)?;
             users.delete(&username)?;
             println!("deleted {username}");
         }
@@ -348,10 +381,7 @@ async fn run(
         .await
         .context("writing the first audit record")?;
     tracing::info!("audit trail at {}", db.display());
-    tokio::spawn(audit::run_retention(
-        audit.clone(),
-        config.audit.retention_days,
-    ));
+    tokio::spawn(audit::run_retention(audit.clone()));
 
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
@@ -385,7 +415,7 @@ async fn run(
     ));
     targets.start_all().await;
 
-    let exports = export::start(
+    let exports = export::Exports::start(
         &config.export,
         AuditReader::new(&db),
         audit.clone(),
