@@ -300,6 +300,36 @@ Targets can be changed at runtime: they are written back to `config.toml`
 with the file's comments preserved (atomically, readable by the service
 only).
 
+### Web UI code
+
+The frontend lives in `src/web/ui/`: `index.html`, `style.css` (grouped in
+commented sections: tokens and theme, layout, sidebar, forms, tables, badges,
+alerts, dialogs, then per page), the Inter fonts and native ES modules in
+`js/`. There is no build step and no npm dependency at runtime; the gateway
+embeds every file with `include_str!` and serves the modules under `/js/`
+(`SCRIPTS` in `src/web/mod.rs`, which a new module must be added to; a test
+checks that every file in `js/` is served).
+
+| Module | Contents |
+| --- | --- |
+| `js/main.js` | Start-up, routing (the page list), rendering of the sidebar and the page, periodic refresh, event delegation; merges the pages' actions and forms |
+| `js/html.js` | The escaping `html` template tag, `Html`, `when`, `flag` |
+| `js/api.js` | `fetch` helpers for `/api` (`get`, `post`, `put`, `del`) |
+| `js/state.js` | The shared `state`, the role check `can`, and the `render`/`renderPage`/`load`/`schedule` hooks that main.js implements |
+| `js/format.js` | Times, values, user labels, event labels and groups |
+| `js/components.js` | Icons, logos, header buttons, badges, foldable sections, dialog, toast, form helpers |
+| `js/ignore.js` | Summarised (ignored) nodes: badge, controls and their actions |
+| `js/alarms.js` | Unacknowledged warning and error counts in the sidebar |
+| `js/pages/*.js` | One module per page (dashboard, audit, targets, certificates, browser, users, settings, account with the login screens): its view, and its `actions` and `forms` |
+
+Rendering replaces `innerHTML` with the output of `html` templates; events
+are handled by delegation on `data-action` (clicks, and changes of selects
+and checkboxes) and `data-form` (submits), because the CSP forbids inline
+handlers. Page modules never import main.js: they redraw through the hooks in
+`state.js`, which keeps the import graph free of cycles. The code is
+formatted with Prettier (`src/web/ui/.prettierrc.json`: width 100, markup in
+templates left as written).
+
 ## Build and deployment
 
 * One binary per platform: Linux x86_64 / ARM64 / ARMv7 (static musl; ARMv7
