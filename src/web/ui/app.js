@@ -561,12 +561,12 @@ function alarmBar() {
 function auditTable(rows, { compact = false, selectable = false } = {}) {
   if (!rows.length) return html`<p class="empty">No records.</p>`;
   return html`<div class="table-wrap"><table>
-    <thead><tr>${when(!compact, html`<th>#</th>`)}<th>Time</th><th>Target</th><th>Event</th><th>Client / user</th><th>Details</th><th>Result</th></tr></thead>
+    <thead><tr>${when(!compact, html`<th>#</th>`)}<th>Time</th><th>Event</th><th>Target</th><th>Client / user</th><th>Details</th><th>Result</th></tr></thead>
     <tbody>${rows.map((r) => html`<tr class="${selectable ? "clickable" : ""} ${state.audit.selected === r.seq ? "selected" : ""}" ${new Html(selectable ? `data-action="select-record" data-seq="${r.seq}"` : "")}>
       ${when(!compact, html`<td class="num muted">${r.seq}</td>`)}
       <td class="nowrap">${time(r.ts)}</td>
-      <td class="target">${r.target || ""}</td>
       <td>${eventBadge(r.event.type)}</td>
+      <td class="target">${r.target || ""}</td>
       <td class="client">${r.client ? html`<div>${userLabel(r.client)}</div><div class="muted small" title="${r.client.application_uri || ""}">${r.client.application_name || ""} <span class="nowrap">${r.client.remote_addr}</span></div>` : ""}</td>
       <td>${eventSummary(r.event, r.target)}</td>
       <td>${statusBadge(r.event.status)}</td>
