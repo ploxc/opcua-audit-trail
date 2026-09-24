@@ -43,8 +43,12 @@ is ignored with a warning, and saving settings in the web UI removes it.
 
 ## Bringing it back
 
-The code is in the git history as `src/export/syslog.rs`: the commit before
-"Remove syslog export" has it. Restoring it takes:
+The code is in the git history as `src/export/syslog.rs`. The last commit
+that has it is `901f428`:
+
+```sh
+git show 901f428:src/export/syslog.rs
+``` Restoring it takes:
 
 - the file itself;
 - the `Syslog` sink in `src/export/mod.rs`;
