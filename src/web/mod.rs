@@ -361,11 +361,9 @@ async fn update_target(
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
     // Ignored nodes have their own routes; editing a target keeps them.
-    target.ignore = target_config(&s, &name).await?.ignore;
-    let summary = format!(
-        "changed target '{name}' to '{}' ({} -> {})",
-        target.name, target.listen, target.endpoint_url
-    );
+    let old = target_config(&s, &name).await?;
+    target.ignore = old.ignore.clone();
+    let summary = target_changes(&old, &target);
     s.targets
         .upsert(target, Some(&name))
         .await
@@ -859,6 +857,66 @@ async fn audit_csv(
         .into_response())
 }
 
+/// What an edit of a target changed, e.g.
+/// `changed target 'plc1': endpoint opc.tcp://a:4840 -> opc.tcp://b:4840`.
+fn target_changes(old: &TargetConfig, new: &TargetConfig) -> String {
+    let mut changes = Vec::new();
+    let mut diff = |what: &str, a: String, b: String| {
+        if a != b {
+            changes.push(format!("{what} {a} -> {b}"));
+        }
+    };
+    diff("name", old.name.clone(), new.name.clone());
+    diff("listen", old.listen.to_string(), new.listen.to_string());
+    diff(
+        "endpoint",
+        old.endpoint_url.clone(),
+        new.endpoint_url.clone(),
+    );
+    diff(
+        "minimum security",
+        format!("{:?}", old.min_security),
+        format!("{:?}", new.min_security),
+    );
+    diff(
+        "discovery every",
+        format!("{} s", old.discovery_interval_secs),
+        format!("{} s", new.discovery_interval_secs),
+    );
+    diff(
+        "max connections",
+        old.max_connections.to_string(),
+        new.max_connections.to_string(),
+    );
+    diff(
+        "max connections per address",
+        old.max_connections_per_address.to_string(),
+        new.max_connections_per_address.to_string(),
+    );
+    if changes.is_empty() {
+        format!("saved target '{}' unchanged", old.name)
+    } else {
+        format!("changed target '{}': {}", old.name, changes.join(", "))
+    }
+}
+
+#[test]
+fn target_changes_name_only_what_changed() {
+    let old: TargetConfig = toml::from_str(
+        r#"name = "plc1"
+listen = "0.0.0.0:4841"
+endpoint_url = "opc.tcp://a:4840""#,
+    )
+    .unwrap();
+    let mut new = old.clone();
+    assert_eq!(target_changes(&old, &new), "saved target 'plc1' unchanged");
+    new.endpoint_url = "opc.tcp://b:4840".into();
+    assert_eq!(
+        target_changes(&old, &new),
+        "changed target 'plc1': endpoint opc.tcp://a:4840 -> opc.tcp://b:4840"
+    );
+}
+
 fn csv_field(value: &str) -> String {
     // Quote everything; neutralise spreadsheet formulas, but leave numbers
     // (-3.5) as they are.
@@ -873,8 +931,8 @@ fn csv_field(value: &str) -> String {
 
 fn csv_row(record: &StoredRecord) -> String {
     let f = crate::export::fields(record);
+    // The sequence number is a plain number; everything else is quoted.
     let fields = [
-        record.seq.to_string(),
         record.entry.ts.to_rfc3339(),
         f.target,
         f.kind.to_string(),
@@ -889,9 +947,8 @@ fn csv_row(record: &StoredRecord) -> String {
         f.event_json,
         record.hash.clone(),
     ];
-    let mut line = fields
-        .iter()
-        .map(|f| csv_field(f))
+    let mut line = std::iter::once(record.seq.to_string())
+        .chain(fields.iter().map(|f| csv_field(f)))
         .collect::<Vec<_>>()
         .join(",");
     line.push('\n');

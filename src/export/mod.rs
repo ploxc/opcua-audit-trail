@@ -68,8 +68,15 @@ pub fn fields(record: &StoredRecord) -> RecordFields {
     RecordFields {
         target: entry.target.clone().unwrap_or_default(),
         kind: entry.event.kind(),
+        // A web UI user (who changed settings, logged in, acknowledged)
+        // is in the event itself.
         user: client
             .and_then(|c| c.user.as_ref().map(|u| u.label()))
+            .or_else(|| {
+                let by = text("by");
+                let by = if by.is_empty() { text("user") } else { by };
+                (!by.is_empty() && by != "gateway").then(|| format!("ui:{by}"))
+            })
             .unwrap_or_default(),
         client_address: client.map(|c| c.remote_addr.clone()).unwrap_or_default(),
         client_application: client
@@ -524,6 +531,31 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn web_ui_users_fill_the_user_field() {
+        let record = |event| StoredRecord {
+            entry: AuditEntry::new(event),
+            ..write_record(1)
+        };
+        let user = |event| fields(&record(event)).user;
+        assert_eq!(
+            user(AuditEvent::ConfigChanged {
+                by: "admin".into(),
+                summary: "x".into()
+            }),
+            "ui:admin"
+        );
+        assert_eq!(user(AuditEvent::UiLogin { user: "jan".into() }), "ui:jan");
+        assert_eq!(
+            user(AuditEvent::ConfigChanged {
+                by: "gateway".into(),
+                summary: "x".into()
+            }),
+            ""
+        );
+        assert_eq!(fields(&write_record(1)).user, "operator");
     }
 
     #[test]
