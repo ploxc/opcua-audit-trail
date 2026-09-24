@@ -117,7 +117,9 @@ impl UserStore {
                 |r| r.get(0),
             )?;
             if !exists {
-                conn.execute_batch(&format!("ALTER TABLE users ADD COLUMN {column} {definition}"))?;
+                conn.execute_batch(&format!(
+                    "ALTER TABLE users ADD COLUMN {column} {definition}"
+                ))?;
             }
         }
         Ok(Self {
@@ -249,7 +251,8 @@ impl UserStore {
 
     /// Sets the user's own new password. Ends the user's sessions.
     pub fn set_password(&self, username: &str, password: &str) -> anyhow::Result<()> {
-        self.update(username, None, Some(password), false).map(|_| ())
+        self.update(username, None, Some(password), false)
+            .map(|_| ())
     }
 
     /// Changes the role. Ends the user's sessions.
@@ -442,7 +445,13 @@ mod tests {
         assert!(state.epoch > epoch, "sessions end");
         assert!(state.must_change_password);
         users.set_password("a", "third-password").unwrap();
-        assert!(!users.session_state("a").unwrap().unwrap().must_change_password);
+        assert!(
+            !users
+                .session_state("a")
+                .unwrap()
+                .unwrap()
+                .must_change_password
+        );
     }
 
     #[test]

@@ -160,12 +160,33 @@ fn main() -> ExitCode {
                         .log_dir
                         .clone()
                         .unwrap_or_else(|| config.parent().unwrap_or(Path::new(".")).join("logs"));
-                    service::install(&config, &log_dir)?;
+                    let loaded = Config::load(&config)?;
+                    let mut dirs = vec![
+                        config.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                        loaded.gateway.data_dir.clone(),
+                        loaded.gateway.pki_dir.clone(),
+                        log_dir.clone(),
+                    ];
+                    // A directory inside another one is covered by it.
+                    dirs.sort();
+                    dirs.dedup();
+                    let nested: Vec<_> = dirs
+                        .iter()
+                        .filter(|d| dirs.iter().any(|p| p != *d && d.starts_with(p)))
+                        .cloned()
+                        .collect();
+                    dirs.retain(|d| !nested.contains(d));
+                    service::install(&config, &log_dir, &dirs)?;
                     println!(
-                        "installed service {} (config {}, logs in {}); start it with: sc start {}",
+                        "installed service {} (config {}, logs in {}); only the service and \
+                         administrators can access {}. Start it with: sc start {}",
                         service::NAME,
                         config.display(),
                         log_dir.display(),
+                        dirs.iter()
+                            .map(|d| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         service::NAME
                     );
                     Ok(())

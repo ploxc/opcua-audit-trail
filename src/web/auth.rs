@@ -117,8 +117,7 @@ impl Sessions {
     fn get(&self, token: &str) -> Option<(String, i64)> {
         let mut map = self.map.lock();
         let session = map.get_mut(token)?;
-        if session.last_seen.elapsed() >= IDLE_TIMEOUT
-            || session.created.elapsed() >= MAX_LIFETIME
+        if session.last_seen.elapsed() >= IDLE_TIMEOUT || session.created.elapsed() >= MAX_LIFETIME
         {
             map.remove(token);
             return None;

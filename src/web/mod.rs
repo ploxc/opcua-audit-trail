@@ -694,13 +694,12 @@ async fn audit_csv(
 fn csv_field(value: &str) -> String {
     // Quote everything; neutralise spreadsheet formulas, but leave numbers
     // (-3.5) as they are.
-    let value = if value.starts_with(['=', '+', '-', '@', '\t', '\r'])
-        && value.parse::<f64>().is_err()
-    {
-        format!("'{value}")
-    } else {
-        value.to_string()
-    };
+    let value =
+        if value.starts_with(['=', '+', '-', '@', '\t', '\r']) && value.parse::<f64>().is_err() {
+            format!("'{value}")
+        } else {
+            value.to_string()
+        };
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
@@ -762,9 +761,9 @@ async fn create_user(
     tokio::task::spawn_blocking(move || {
         users.create_with(&req.username, &req.password, req.role, true)
     })
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?
-        .map_err(ApiError::bad_request)?;
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?
+    .map_err(ApiError::bad_request)?;
     s.config_changed(&user, format!("created user '{name}' ({})", role.as_str()))
         .await;
     Ok(StatusCode::CREATED)

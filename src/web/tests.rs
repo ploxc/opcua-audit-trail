@@ -229,7 +229,8 @@ async fn ui_assets_are_embedded() {
     ] {
         let request = Request::get(uri)
             .header(header::HOST, "localhost:8080")
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let response = w.app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), status, "{uri}");
         assert_eq!(

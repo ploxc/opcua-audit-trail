@@ -31,7 +31,8 @@ const MAX_REJECTED: usize = 200;
 pub fn safe_file_name(cert: &X509) -> bool {
     let name = cert.common_name().unwrap_or_default();
     !name.chars().any(|c| {
-        c.is_control() || (cfg!(windows) && matches!(c, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+        c.is_control()
+            || (cfg!(windows) && matches!(c, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'))
     })
 }
 
@@ -112,18 +113,17 @@ impl Pki {
     pub fn ensure_own_certificate(&self, gateway: &GatewayConfig) -> anyhow::Result<(X509, bool)> {
         // async-opcua writes the key with the default mode; also fixes keys
         // written by earlier versions.
-        let result = if let (Ok(cert), Ok(_)) =
-            (self.store.read_own_cert(), self.store.read_own_pkey())
-        {
-            (cert, false)
-        } else {
-            let args = certificate_request(gateway);
-            let (cert, _key) = self
-                .store
-                .create_and_store_application_instance_cert(&args, false)
-                .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
-            (cert, true)
-        };
+        let result =
+            if let (Ok(cert), Ok(_)) = (self.store.read_own_cert(), self.store.read_own_pkey()) {
+                (cert, false)
+            } else {
+                let args = certificate_request(gateway);
+                let (cert, _key) = self
+                    .store
+                    .create_and_store_application_instance_cert(&args, false)
+                    .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
+                (cert, true)
+            };
         protect_private_key(&self.store);
         Ok(result)
     }
