@@ -8,17 +8,53 @@ audit trail of every write, method call and client session. It is a single Rust
 binary that runs standalone (Linux, Windows, macOS, ARM PLCs such as PLCnext) or
 in Docker.
 
-> **Status: all 7 roadmap milestones done; tested against Siemens PLCSIM Advanced, not yet in production.** The relay works for security `None`, `Sign`
-> and `SignAndEncrypt` (all RSA policies), anonymous and user name logins, and
-> every service (reads, writes, subscriptions, method calls, …). Writes, method
-> calls, history updates, node management, sessions and connections are
-> audited, with old value → new value and the node's display name. The web UI
-> covers status, the audit trail, targets, certificates, an OPC UA browser and
-> users. Audit records can be exported to QuestDB. It installs as
-> a systemd or Windows service or runs as a container, with optional HTTPS.
-> See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap, and
-> [docs/audit](docs/audit/) for the security audit and its independent
-> verification.
+> **Status: a working concept, not production ready.** The code was written
+> with Claude (Anthropic), from my idea and OPC UA/PLC domain knowledge, and
+> tested as described in [What is tested](#what-is-tested). If there is
+> interest, I'm open to developing it further.
+
+What it does today:
+
+- **Relay:** works for security `None`, `Sign` and `SignAndEncrypt` (all RSA
+  policies), anonymous and user name logins, and every service (reads, writes,
+  subscriptions, method calls, …).
+- **Audit trail:** writes, method calls, history updates, node management,
+  sessions and connections are recorded, with old value → new value and the
+  node's display name, in a hash chain that shows any tampering.
+- **Web UI:** status, the audit trail, targets, certificates, an OPC UA
+  browser, users and settings.
+- **Export:** audit records to QuestDB.
+- **Installation:** packaging for a systemd or Windows service and for a
+  container, with optional HTTPS.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design, and
+[docs/audit](docs/audit/) for the security audit and its independent
+verification.
+
+## What is tested
+
+Tested:
+
+- About 90 automated tests: relay, audit store and hash chain, export, web API
+  and certificates. The end-to-end tests run a real OPC UA client and server
+  through the gateway.
+- The web UI, in a browser (Chromium), page by page.
+- By hand against [OPC PLC](docker/opc-plc/) (Microsoft's simulator, in
+  Docker) with the Prosys OPC UA Browser as client:
+  - encrypted connections up to `Aes256-Sha256-RsaPss`;
+  - certificate trust in both directions;
+  - user name logins and writes.
+- Against Siemens PLCSIM Advanced.
+
+Not tested yet (the code and files are there, but nobody has run them for
+real):
+
+- The Docker image and `docker-compose.yml` of the gateway itself.
+- The Linux service installation (systemd, `packaging/linux`) and the Windows
+  service.
+- The release workflow (binaries and multi-arch images).
+- Export to a real QuestDB (tested against a stand-in only).
+- Real PLCs on a real network, over longer periods and under load.
 
 ## Try it without a PLC
 
