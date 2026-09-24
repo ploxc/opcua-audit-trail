@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use opcua::core::comms::buffer::SendBuffer;
 use opcua::core::comms::chunker::Chunker;
-use opcua::core::comms::message_chunk::{MessageChunk, MessageIsFinalType};
+use opcua::core::comms::message_chunk::{MessageChunk, MessageChunkHeader, MessageIsFinalType};
 use opcua::core::comms::secure_channel::SecureChannel;
 use opcua::core::comms::security_header::SecurityHeader;
 use opcua::core::comms::sequence_number::SequenceNumberHandle;
@@ -17,7 +17,8 @@ use opcua::core::comms::tcp_codec::{Message, TcpCodec};
 use opcua::core::comms::tcp_types::{AcknowledgeMessage, ErrorMessage};
 use opcua::core::{RequestMessage, ResponseMessage};
 use opcua::types::{
-    DecodingOptions, Error, ResponseHeader, ServiceFault, SimpleBinaryEncodable, StatusCode,
+    ByteString, DecodingOptions, Error, ResponseHeader, ServiceFault, SimpleBinaryDecodable,
+    SimpleBinaryEncodable, StatusCode,
 };
 use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
@@ -76,6 +77,14 @@ pub enum PollResult {
     Closed,
 }
 
+/// The security of an issued secure channel. Every later OpenSecureChannel
+/// (a renewal) must present exactly this policy and certificate.
+#[derive(Debug, Clone)]
+pub struct ChannelBinding {
+    pub policy_uri: String,
+    pub certificate: ByteString,
+}
+
 pub struct Downstream {
     read: FramedRead<ReadHalf<TcpStream>, TcpCodec>,
     write: WriteHalf<TcpStream>,
@@ -83,6 +92,8 @@ pub struct Downstream {
     pending_chunks: Vec<MessageChunk>,
     sequence_numbers: SequenceNumberHandle,
     closing: bool,
+    /// Set once the channel is issued.
+    pub binding: Option<ChannelBinding>,
     /// Endpoint URL the client used in its Hello.
     pub endpoint_url: String,
     pub protocol_version: u32,
@@ -177,6 +188,7 @@ impl Downstream {
             pending_chunks: Vec::new(),
             sequence_numbers: SequenceNumberHandle::new(true),
             closing: false,
+            binding: None,
             endpoint_url: hello.endpoint_url.as_ref().to_string(),
             protocol_version: hello.protocol_version,
         })
@@ -221,12 +233,23 @@ impl Downstream {
         }
     }
 
-    /// Makes progress on sending and receiving. Cancellation safe.
+    /// Makes progress on sending and receiving. Cancellation safe. Once the
+    /// connection is closing, nothing more is read: only queued data is sent.
     pub async fn poll(&mut self, channel: &mut SecureChannel) -> PollResult {
         if self.send_buffer.should_encode_chunks() {
             if let Err(e) = self.send_buffer.encode_next_chunk(channel) {
                 return PollResult::Error(e);
             }
+        }
+        if self.closing {
+            if self.send_buffer.can_read() {
+                return match self.send_buffer.read_into_async(&mut self.write).await {
+                    Ok(()) => PollResult::Sent,
+                    Err(_) => PollResult::Closed,
+                };
+            }
+            let _ = self.write.shutdown().await;
+            return PollResult::Closed;
         }
         if self.send_buffer.can_read() {
             tokio::select! {
@@ -236,9 +259,6 @@ impl Downstream {
                 },
                 incoming = self.read.next() => self.handle_incoming(incoming, channel),
             }
-        } else if self.closing {
-            let _ = self.write.shutdown().await;
-            PollResult::Closed
         } else {
             let incoming = self.read.next().await;
             self.handle_incoming(incoming, channel)
@@ -288,6 +308,13 @@ impl Downstream {
             ));
         };
         let header = chunk.message_header(&channel.decoding_options())?;
+        if header.message_type.is_open_secure_channel() {
+            if let Some(binding) = &self.binding {
+                // Checked before the library sees the chunk: parsing an
+                // OpenSecureChannel switches the channel to its policy.
+                check_renewal(&chunk, binding, &channel.decoding_options())?;
+            }
+        }
         if header.is_final == MessageIsFinalType::FinalError {
             // The client aborted a multi-chunk request.
             self.pending_chunks.clear();
@@ -322,6 +349,35 @@ impl Downstream {
     }
 }
 
+/// A renewal must keep the issued channel's security policy and certificate.
+/// Otherwise anyone on the network path could re-key the channel with their
+/// own certificate, or downgrade it to SecurityPolicy None.
+fn check_renewal(
+    chunk: &MessageChunk,
+    binding: &ChannelBinding,
+    options: &DecodingOptions,
+) -> Result<(), Error> {
+    let mut stream = std::io::Cursor::new(&chunk.data[..]);
+    MessageChunkHeader::decode(&mut stream, options)?;
+    let SecurityHeader::Asymmetric(header) =
+        SecurityHeader::decode_from_stream(&mut stream, true, options)?
+    else {
+        return Err(Error::new(
+            StatusCode::BadSecurityChecksFailed,
+            "OpenSecureChannel without asymmetric security header",
+        ));
+    };
+    if header.security_policy_uri.as_ref() != binding.policy_uri
+        || header.sender_certificate != binding.certificate
+    {
+        return Err(Error::new(
+            StatusCode::BadSecurityChecksFailed,
+            "secure channel renewal with a different security policy or certificate",
+        ));
+    }
+    Ok(())
+}
+
 async fn send_error(
     write: &mut WriteHalf<TcpStream>,
     status: StatusCode,
@@ -333,4 +389,75 @@ async fn send_error(
         let _ = write.write_all(&buf).await;
     }
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use opcua::core::comms::chunker::Chunker;
+    use opcua::core::comms::secure_channel::Role;
+    use opcua::crypto::{CertificateStore, SecurityPolicy};
+    use opcua::types::{
+        ContextOwned, MessageSecurityMode, NamespaceMap, OpenSecureChannelRequest,
+        SecurityTokenRequestType,
+    };
+
+    use super::*;
+
+    /// An OpenSecureChannel renewal as a client with SecurityPolicy None sends it.
+    fn none_renewal() -> MessageChunk {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = SecureChannel::new(
+            Arc::new(parking_lot::RwLock::new(CertificateStore::new(dir.path()))),
+            Role::Client,
+            Arc::new(parking_lot::RwLock::new(ContextOwned::new_default(
+                NamespaceMap::new(),
+                DecodingOptions::default(),
+            ))),
+        );
+        let request = OpenSecureChannelRequest {
+            request_type: SecurityTokenRequestType::Renew,
+            security_mode: MessageSecurityMode::None,
+            requested_lifetime: 60_000,
+            ..Default::default()
+        };
+        let mut chunks = Chunker::encode(
+            SequenceNumberHandle::new(true),
+            1,
+            0,
+            0,
+            &channel,
+            &RequestMessage::from(request),
+        )
+        .unwrap();
+        chunks.remove(0)
+    }
+
+    /// Audit finding R2: a renewal may not switch policy or certificate.
+    #[test]
+    fn renewal_must_keep_policy_and_certificate() {
+        let chunk = none_renewal();
+        let options = DecodingOptions::default();
+        let same = ChannelBinding {
+            policy_uri: SecurityPolicy::None.to_uri().to_string(),
+            certificate: ByteString::null(),
+        };
+        assert!(check_renewal(&chunk, &same, &options).is_ok());
+
+        // Issued as Basic256Sha256: a None renewal is a downgrade.
+        let secure = ChannelBinding {
+            policy_uri: SecurityPolicy::Basic256Sha256.to_uri().to_string(),
+            certificate: ByteString::null(),
+        };
+        let err = check_renewal(&chunk, &secure, &options).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BadSecurityChecksFailed);
+
+        // Same policy, other certificate.
+        let other_cert = ChannelBinding {
+            policy_uri: SecurityPolicy::None.to_uri().to_string(),
+            certificate: ByteString::from(vec![1u8, 2, 3]),
+        };
+        assert!(check_renewal(&chunk, &other_cert, &options).is_err());
+    }
 }

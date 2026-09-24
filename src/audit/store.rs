@@ -392,6 +392,9 @@ mod tests {
                 data_type: "Double".into(),
                 value: value.into(),
             },
+            written_status: None,
+            source_timestamp: None,
+            server_timestamp: None,
             status: "Good".into(),
         })
         .target("plc1")

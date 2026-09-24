@@ -32,6 +32,9 @@ pub struct WriteItem {
     attribute: String,
     index_range: Option<String>,
     new_value: AuditValue,
+    written_status: Option<String>,
+    source_timestamp: Option<String>,
+    server_timestamp: Option<String>,
     old_value: Option<AuditValue>,
     display_name: Option<String>,
 }
@@ -85,6 +88,23 @@ pub enum AuditPlan {
     Call(u32, Vec<CallItem>),
     HistoryUpdate(u32, Vec<HistoryItem>),
     NodeManagement(u32, &'static str, Vec<String>),
+    TransferSubscriptions(u32, Vec<u32>),
+}
+
+/// Whether a request is audited. Such requests are also seen through to the
+/// end when the client disconnects, so their outcome is always recorded.
+pub fn is_audited(request: &RequestMessage) -> bool {
+    matches!(
+        request,
+        RequestMessage::Write(_)
+            | RequestMessage::Call(_)
+            | RequestMessage::HistoryUpdate(_)
+            | RequestMessage::AddNodes(_)
+            | RequestMessage::DeleteNodes(_)
+            | RequestMessage::AddReferences(_)
+            | RequestMessage::DeleteReferences(_)
+            | RequestMessage::TransferSubscriptions(_)
+    )
 }
 
 /// Returns a plan for requests that change the server, `None` for all others.
@@ -111,6 +131,9 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
                         .as_ref()
                         .map(audit_value)
                         .unwrap_or_else(|| audit_value(&Variant::Empty)),
+                    written_status: w.value.status.map(|s| s.to_string()),
+                    source_timestamp: w.value.source_timestamp.map(|t| t.to_string()),
+                    server_timestamp: w.value.server_timestamp.map(|t| t.to_string()),
                 })
                 .collect(),
         )),
@@ -177,6 +200,10 @@ pub fn plan(request: &RequestMessage) -> Option<AuditPlan> {
                 .map(|n| format!("{} -> {}", n.source_node_id, n.target_node_id))
                 .collect(),
         )),
+        RequestMessage::TransferSubscriptions(r) => Some(AuditPlan::TransferSubscriptions(
+            handle,
+            r.subscription_ids.clone().unwrap_or_default(),
+        )),
         _ => None,
     }
 }
@@ -223,7 +250,9 @@ impl AuditPlan {
                     want_name(&mut pre, i, &item.method, &mut item.display_name);
                 }
             }
-            AuditPlan::HistoryUpdate(..) | AuditPlan::NodeManagement(..) => {}
+            AuditPlan::HistoryUpdate(..)
+            | AuditPlan::NodeManagement(..)
+            | AuditPlan::TransferSubscriptions(..) => {}
         }
         (!pre.nodes_to_read.is_empty()).then_some(pre)
     }
@@ -273,31 +302,70 @@ impl AuditPlan {
             AuditPlan::Call(..) => "Call",
             AuditPlan::HistoryUpdate(..) => "HistoryUpdate",
             AuditPlan::NodeManagement(_, service, _) => service,
+            AuditPlan::TransferSubscriptions(..) => "TransferSubscriptions",
         }
     }
 
     /// The record committed before forwarding in fail-closed mode.
     pub fn intent(&self) -> AuditEvent {
-        let (request_handle, node_ids) = match self {
-            AuditPlan::Write(h, items) => (*h, items.iter().map(|i| i.node_id.clone()).collect()),
-            AuditPlan::Call(h, items) => (*h, items.iter().map(|i| i.method_id.clone()).collect()),
-            AuditPlan::HistoryUpdate(h, items) => {
-                (*h, items.iter().map(|i| i.node_id.clone()).collect())
+        let (request_handle, node_ids, details): (u32, Vec<String>, Vec<Value>) = match self {
+            AuditPlan::Write(h, items) => (
+                *h,
+                items.iter().map(|i| i.node_id.clone()).collect(),
+                items
+                    .iter()
+                    .map(|i| json!({ "attribute": i.attribute, "new_value": i.new_value }))
+                    .collect(),
+            ),
+            AuditPlan::Call(h, items) => (
+                *h,
+                items.iter().map(|i| i.method_id.clone()).collect(),
+                items
+                    .iter()
+                    .map(|i| json!({ "object_id": i.object_id, "input_arguments": i.input_arguments }))
+                    .collect(),
+            ),
+            AuditPlan::HistoryUpdate(h, items) => (
+                *h,
+                items.iter().map(|i| i.node_id.clone()).collect(),
+                items.iter().map(|i| json!({ "details": i.details })).collect(),
+            ),
+            AuditPlan::NodeManagement(h, _, nodes) => (*h, nodes.clone(), Vec::new()),
+            AuditPlan::TransferSubscriptions(h, ids) => {
+                (*h, ids.iter().map(|id| id.to_string()).collect(), Vec::new())
             }
-            AuditPlan::NodeManagement(h, _, nodes) => (*h, nodes.clone()),
         };
         AuditEvent::ChangeIntent {
             request_handle,
             service: self.service().into(),
             node_ids,
+            details,
         }
     }
 
     /// Events for the outcome. A service-level failure (ServiceFault or a bad
     /// service result) applies to every item.
     pub fn events(self, response: &ResponseMessage) -> Vec<AuditEvent> {
+        self.events_with(response, None)
+    }
+
+    /// Events for a request that was sent, but whose response never arrived:
+    /// the server may or may not have applied it.
+    pub fn events_unknown(self, response: &ResponseMessage, status: StatusCode) -> Vec<AuditEvent> {
+        self.events_with(
+            response,
+            Some(format!(
+                "Uncertain: no response ({status}); the server may have applied it"
+            )),
+        )
+    }
+
+    fn events_with(self, response: &ResponseMessage, unknown: Option<String>) -> Vec<AuditEvent> {
         let service_result = response.response_header().service_result;
         let item_status = |results: Option<Vec<StatusCode>>, i: usize| -> String {
+            if let Some(unknown) = &unknown {
+                return unknown.clone();
+            }
             if service_result.is_bad() {
                 return service_result.to_string();
             }
@@ -324,6 +392,9 @@ impl AuditPlan {
                         index_range: w.index_range,
                         old_value: w.old_value,
                         new_value: w.new_value,
+                        written_status: w.written_status,
+                        source_timestamp: w.source_timestamp,
+                        server_timestamp: w.server_timestamp,
                         status: item_status(results.clone(), i),
                     })
                     .collect()
@@ -389,6 +460,36 @@ impl AuditPlan {
                         status: item_status(results.clone(), i),
                     })
                     .collect()
+            }
+            AuditPlan::TransferSubscriptions(request_handle, subscription_ids) => {
+                // One record for the request; the per-subscription results
+                // are summarised in the status.
+                let results: Option<Vec<StatusCode>> = match response {
+                    ResponseMessage::TransferSubscriptions(r) => r
+                        .results
+                        .as_ref()
+                        .map(|r| r.iter().map(|t| t.status_code).collect()),
+                    _ => None,
+                };
+                let status = if unknown.is_some() || service_result.is_bad() {
+                    item_status(None, 0)
+                } else {
+                    let results = results.unwrap_or_default();
+                    if results.iter().all(|s| s.is_good()) && !results.is_empty() {
+                        "Good".to_string()
+                    } else {
+                        results
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                };
+                vec![AuditEvent::SubscriptionsTransferred {
+                    request_handle,
+                    subscription_ids,
+                    status,
+                }]
             }
         }
     }

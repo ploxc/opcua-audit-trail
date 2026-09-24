@@ -566,6 +566,7 @@ async fn untrust(
 ) -> ApiResult<CertificateInfo> {
     user.require(Role::Admin)?;
     let info = s.pki.untrust(&thumbprint).map_err(ApiError::bad_request)?;
+    s.targets.recheck_trust().await;
     s.config_changed(
         &user,
         format!(

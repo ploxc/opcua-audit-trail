@@ -125,6 +125,14 @@ pub enum AuditEvent {
         endpoint_url: String,
         reason: String,
     },
+    /// The security the upstream server offers changed (policy, mode,
+    /// certificate or login types). The gateway follows it, so this also
+    /// changes what clients are offered.
+    UpstreamEndpointsChanged {
+        endpoint_url: String,
+        before: Vec<String>,
+        after: Vec<String>,
+    },
 
     // Client connections and sessions
     ClientConnected,
@@ -157,6 +165,9 @@ pub enum AuditEvent {
         request_handle: u32,
         service: String,
         node_ids: Vec<String>,
+        /// Per node: what is about to be written or called with.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<serde_json::Value>,
     },
     Write {
         request_handle: u32,
@@ -169,6 +180,14 @@ pub enum AuditEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         old_value: Option<AuditValue>,
         new_value: AuditValue,
+        /// Status code, source and server timestamp written along with the
+        /// value, when the client set them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        written_status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_timestamp: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_timestamp: Option<String>,
         status: String,
     },
     Call {
@@ -192,6 +211,12 @@ pub enum AuditEvent {
         node_id: String,
         status: String,
     },
+    /// A client took over subscriptions, possibly those of another session.
+    SubscriptionsTransferred {
+        request_handle: u32,
+        subscription_ids: Vec<u32>,
+        status: String,
+    },
 }
 
 impl AuditEvent {
@@ -207,6 +232,7 @@ impl AuditEvent {
             AuditEvent::EventsLost { .. } => "events_lost",
             AuditEvent::UpstreamAvailable { .. } => "upstream_available",
             AuditEvent::UpstreamUnavailable { .. } => "upstream_unavailable",
+            AuditEvent::UpstreamEndpointsChanged { .. } => "upstream_endpoints_changed",
             AuditEvent::ClientConnected => "client_connected",
             AuditEvent::ClientDisconnected { .. } => "client_disconnected",
             AuditEvent::SecureChannelOpened { .. } => "secure_channel_opened",
@@ -220,6 +246,7 @@ impl AuditEvent {
             AuditEvent::Call { .. } => "call",
             AuditEvent::HistoryUpdate { .. } => "history_update",
             AuditEvent::NodeManagement { .. } => "node_management",
+            AuditEvent::SubscriptionsTransferred { .. } => "subscriptions_transferred",
         }
     }
 
@@ -255,6 +282,9 @@ mod tests {
                     data_type: "Double".into(),
                     value: 12.5.into(),
                 },
+                written_status: None,
+                source_timestamp: None,
+                server_timestamp: None,
                 status: "Good".into(),
             },
         ];

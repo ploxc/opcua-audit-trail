@@ -8,6 +8,7 @@ use opcua::types::{
 };
 
 use super::GatewayIdentity;
+use crate::config::MinSecurity;
 
 pub const PRODUCT_URI: &str = "urn:opcua-audit-gateway";
 
@@ -76,6 +77,76 @@ pub fn gateway_endpoints(
             security_level: e.security_level,
         })
         .collect()
+}
+
+/// The security level of an endpoint, comparable with [`MinSecurity`].
+pub fn security_of(endpoint: &EndpointDescription) -> MinSecurity {
+    match (
+        SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref()),
+        endpoint.security_mode,
+    ) {
+        (SecurityPolicy::None, _) => MinSecurity::None,
+        (_, MessageSecurityMode::SignAndEncrypt) => MinSecurity::SignAndEncrypt,
+        (_, MessageSecurityMode::Sign) => MinSecurity::Sign,
+        _ => MinSecurity::None,
+    }
+}
+
+/// Drops the endpoints below the target's minimum security.
+pub fn at_least(endpoints: Vec<EndpointDescription>, min: MinSecurity) -> Vec<EndpointDescription> {
+    endpoints
+        .into_iter()
+        .filter(|e| security_of(e) >= min)
+        .collect()
+}
+
+/// Security settings the server lists in its CreateSession response (which
+/// arrives over the secured channel) that discovery did not return. Anything
+/// here means the unauthenticated discovery answer was tampered with.
+pub fn missing_from_discovery(
+    server: &[EndpointDescription],
+    discovered: &[EndpointDescription],
+    min: MinSecurity,
+) -> Option<String> {
+    let missing: Vec<String> = server
+        .iter()
+        .filter(|s| security_of(s) >= min)
+        .filter(|s| {
+            !discovered.iter().any(|d| {
+                d.security_mode == s.security_mode && d.security_policy_uri == s.security_policy_uri
+            })
+        })
+        .map(|s| {
+            format!(
+                "{} {:?}",
+                SecurityPolicy::from_uri(s.security_policy_uri.as_ref()).to_str(),
+                s.security_mode
+            )
+        })
+        .collect();
+    (!missing.is_empty()).then(|| missing.join(", "))
+}
+
+/// A one-line summary of an endpoint's security, to notice changes.
+pub fn summary(endpoint: &EndpointDescription) -> String {
+    let thumbprint = opcua::crypto::X509::from_byte_string(&endpoint.server_certificate)
+        .map(|c| c.thumbprint().as_hex_string())
+        .unwrap_or_else(|_| "no certificate".into());
+    let mut tokens: Vec<String> = endpoint
+        .user_identity_tokens
+        .iter()
+        .flatten()
+        .map(|t| format!("{:?}", t.token_type))
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    format!(
+        "{} {:?} [{}] {}",
+        SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref()).to_str(),
+        endpoint.security_mode,
+        thumbprint,
+        tokens.join("+")
+    )
 }
 
 /// The upstream endpoint to use for a client channel with this policy and mode.

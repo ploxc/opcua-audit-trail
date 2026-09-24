@@ -38,6 +38,20 @@ impl From<Error> for UpstreamError {
     }
 }
 
+/// A request that got no response.
+#[derive(Debug)]
+pub struct SendError {
+    pub error: Error,
+    /// The request may have reached the server (and been applied).
+    pub maybe_sent: bool,
+}
+
+impl SendError {
+    pub fn status(&self) -> StatusCode {
+        self.error.status()
+    }
+}
+
 pub struct Upstream {
     channel: AsyncSecureChannel,
     pub endpoint: EndpointDescription,
@@ -140,14 +154,25 @@ impl Upstream {
         &self,
         request: RequestMessage,
         timeout: Duration,
-    ) -> Result<ResponseMessage, Error> {
+    ) -> Result<ResponseMessage, SendError> {
         if self.closed.is_cancelled() {
-            return Err(Error::new(
-                StatusCode::BadServerNotConnected,
-                "upstream connection closed",
-            ));
+            return Err(SendError {
+                error: Error::new(
+                    StatusCode::BadServerNotConnected,
+                    "upstream connection closed",
+                ),
+                maybe_sent: false,
+            });
         }
-        self.channel.send(request, timeout).await
+        self.channel
+            .send(request, timeout)
+            .await
+            .map_err(|error| SendError {
+                // Only "not connected" proves the request never left; any
+                // other failure may have happened after the server got it.
+                maybe_sent: error.status() != StatusCode::BadNotConnected,
+                error,
+            })
     }
 
     /// Closes the channel politely (CloseSecureChannel), then stops the event loop.

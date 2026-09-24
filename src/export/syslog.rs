@@ -147,9 +147,16 @@ fn severity(kind: &str) -> u8 {
         | "certificate_rejected"
         | "ui_login_failed"
         | "upstream_unavailable"
+        | "upstream_endpoints_changed"
         | "events_lost" => 4,
-        "write" | "call" | "history_update" | "node_management" | "change_intent"
-        | "config_changed" | "retention_pruned" => 5,
+        "write"
+        | "call"
+        | "history_update"
+        | "node_management"
+        | "change_intent"
+        | "subscriptions_transferred"
+        | "config_changed"
+        | "retention_pruned" => 5,
         _ => 6,
     }
 }

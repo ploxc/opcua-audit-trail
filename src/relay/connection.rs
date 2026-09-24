@@ -6,9 +6,17 @@
 //! as futures in a `FuturesUnordered`, so slow requests (Publish) never block
 //! others. Newly pushed futures are first polled in push order, so requests
 //! reach the upstream channel in the order the client sent them.
+//!
+//! Audited requests (changes and session services) are seen through to the
+//! end when the client disconnects: once a change may have reached the
+//! server, its outcome is recorded.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
@@ -34,7 +42,7 @@ use tokio::net::TcpStream;
 
 use super::audit_map;
 use super::endpoints::{self, gateway_endpoints, matching_upstream};
-use super::transport::{Downstream, PollResult, Request};
+use super::transport::{ChannelBinding, Downstream, PollResult, Request};
 use super::upstream::{Upstream, UpstreamError};
 use super::{ClientInfo, RelayTarget, SessionEntry};
 use crate::audit::event::{AuditEntry, AuditEvent, ClientContext, UserIdentity};
@@ -45,8 +53,35 @@ const MAX_TOKEN_LIFETIME_MS: u32 = 3_600_000;
 const MIN_TOKEN_LIFETIME_MS: u32 = 10_000;
 const NONCE_LENGTH: usize = 32;
 const PRE_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long audited requests may take to finish after the client is gone.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a closing connection may take to flush its last messages.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Pending = BoxFuture<'static, (u32, ResponseMessage)>;
+/// A request in progress.
+struct Pending {
+    /// Seen through to the end when the client disconnects.
+    audited: bool,
+    future: BoxFuture<'static, (u32, ResponseMessage)>,
+}
+
+impl Future for Pending {
+    type Output = (u32, ResponseMessage);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.future.as_mut().poll(cx)
+    }
+}
+
+/// Orders security settings: None < Sign < SignAndEncrypt.
+fn security_rank(policy: SecurityPolicy, mode: MessageSecurityMode) -> u8 {
+    match (policy, mode) {
+        (SecurityPolicy::None, _) => 0,
+        (_, MessageSecurityMode::Sign) => 1,
+        (_, MessageSecurityMode::SignAndEncrypt) => 2,
+        _ => 0,
+    }
+}
 
 fn fault(request_handle: u32, status: StatusCode) -> ResponseMessage {
     ServiceFault::new(request_handle, status).into()
@@ -68,6 +103,7 @@ struct Ctx {
     connection_id: u64,
     /// Security of the downstream channel.
     policy: SecurityPolicy,
+    mode: MessageSecurityMode,
     client_certificate: Option<X509>,
     client: ClientContext,
     /// Upstream endpoints (to build the endpoint list for CreateSession).
@@ -123,9 +159,16 @@ pub async fn run(target: Arc<RelayTarget>, stream: TcpStream, peer: SocketAddr, 
         upstream: None,
         pending: FuturesUnordered::new(),
         close_reason: None,
+        trust: target.trust_changed.subscribe(),
     };
-    let reason = connection.run().await;
-
+    let reason = match AssertUnwindSafe(connection.run()).catch_unwind().await {
+        Ok(reason) => reason,
+        Err(_) => {
+            tracing::error!(%peer, "connection handler failed unexpectedly");
+            "internal error".into()
+        }
+    };
+    connection.finish_audited().await;
     if let Some(upstream) = connection.upstream.take() {
         upstream.close().await;
     }
@@ -158,12 +201,41 @@ struct Connection {
     pending: FuturesUnordered<Pending>,
     deadline: Instant,
     close_reason: Option<String>,
+    trust: tokio::sync::watch::Receiver<u64>,
 }
 
 impl Connection {
     fn close(&mut self, status: StatusCode, reason: &str) {
-        self.close_reason.get_or_insert_with(|| reason.to_string());
+        if self.close_reason.is_none() {
+            self.close_reason = Some(reason.to_string());
+            self.deadline = Instant::now() + CLOSE_TIMEOUT;
+        }
         self.transport.enqueue_error(status, reason);
+    }
+
+    /// Lets audited requests that may already have reached the server finish,
+    /// so their outcome is recorded even though the client is gone.
+    async fn finish_audited(&mut self) {
+        let mut audited: FuturesUnordered<Pending> = std::mem::take(&mut self.pending)
+            .into_iter()
+            .filter(|p| p.audited)
+            .collect();
+        if audited.is_empty() {
+            return;
+        }
+        let drain = async { while audited.next().await.is_some() {} };
+        if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_ok() {
+            return;
+        }
+        // Still no response: closing the upstream channel makes the remaining
+        // requests fail, and they are recorded with an unknown outcome.
+        if let Some(upstream) = self.upstream.take() {
+            upstream.close().await;
+        }
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, async {
+            while audited.next().await.is_some() {}
+        })
+        .await;
     }
 
     fn transport_closing(&self) -> bool {
@@ -185,12 +257,22 @@ impl Connection {
                 }
             };
             let shutdown = self.target.shutdown.clone();
+            let mut trust = self.trust.clone();
             tokio::select! {
                 _ = shutdown.cancelled(), if !self.transport_closing() => {
                     self.close(StatusCode::BadServerHalted, "target stopped or reconfigured");
                 }
+                Ok(()) = trust.changed(), if !self.transport_closing() => {
+                    self.trust.mark_unchanged();
+                    if let Err(reason) = self.still_trusted() {
+                        self.close(StatusCode::BadCertificateUntrusted, &reason);
+                    }
+                }
                 _ = tokio::time::sleep_until(self.deadline.into()) => {
-                    self.deadline = Instant::now() + Duration::from_secs(3600);
+                    if self.transport_closing() {
+                        // The client does not take its last messages.
+                        break;
+                    }
                     self.close(StatusCode::BadTimeout, "secure channel expired");
                 }
                 Some((request_id, response)) = self.pending.next(), if !self.pending.is_empty() => {
@@ -219,6 +301,10 @@ impl Connection {
     }
 
     async fn handle(&mut self, request: Request) {
+        if self.transport_closing() {
+            // Nothing new is started on a connection that is going away.
+            return;
+        }
         let request_id = request.request_id;
         let handle = request.message.request_handle_value();
         if !self.issued && !matches!(request.message, RequestMessage::OpenSecureChannel(_)) {
@@ -235,6 +321,7 @@ impl Connection {
             }
             RequestMessage::CloseSecureChannel(_) => {
                 self.close_reason = Some("client closed the secure channel".into());
+                self.deadline = Instant::now() + CLOSE_TIMEOUT;
                 self.transport.set_closing();
             }
             RequestMessage::GetEndpoints(r) => {
@@ -270,6 +357,13 @@ impl Connection {
                 self.respond(request_id, fault(handle, StatusCode::BadServiceUnsupported));
             }
             message => {
+                let audited = audit_map::is_audited(&message)
+                    || matches!(
+                        message,
+                        RequestMessage::CreateSession(_)
+                            | RequestMessage::ActivateSession(_)
+                            | RequestMessage::CloseSession(_)
+                    );
                 let ctx = match self.ctx().await {
                     Ok(ctx) => ctx,
                     Err(status) => {
@@ -285,8 +379,10 @@ impl Connection {
                     }
                     other => forward(ctx, other).boxed(),
                 };
-                self.pending
-                    .push(async move { (request_id, future.await) }.boxed());
+                self.pending.push(Pending {
+                    audited,
+                    future: async move { (request_id, future.await) }.boxed(),
+                });
             }
         }
     }
@@ -319,6 +415,7 @@ impl Connection {
             upstream,
             connection_id: self.id,
             policy,
+            mode: self.channel.security_mode(),
             client_certificate: if policy == SecurityPolicy::None {
                 None
             } else {
@@ -368,7 +465,7 @@ impl Connection {
                 );
                 record(
                     target,
-                    &ClientContext::default(),
+                    &self.client,
                     AuditEvent::CertificateRejected {
                         subject,
                         thumbprint,
@@ -432,10 +529,28 @@ impl Connection {
                     "renew before issue",
                 );
             }
+            // The transport already checked that policy and certificate are
+            // the issued ones; the mode must not change either.
+            if mode != self.channel.security_mode() {
+                return reject(
+                    self,
+                    StatusCode::BadSecurityModeRejected,
+                    "renewal with a different security mode",
+                );
+            }
             if policy != SecurityPolicy::None
                 && request.client_nonce.as_ref() == self.channel.remote_nonce()
             {
                 return reject(self, StatusCode::BadNonceInvalid, "nonce reused on renew");
+            }
+            if policy != SecurityPolicy::None {
+                // Trust may have been revoked since the channel was issued.
+                if let Err(status) = self
+                    .check_client_certificate(&header.sender_certificate)
+                    .await
+                {
+                    return reject(self, status, "client certificate no longer trusted");
+                }
             }
             self.channel.secure_channel_id()
         } else {
@@ -520,10 +635,17 @@ impl Connection {
             server_nonce: self.channel.local_nonce_as_byte_string(),
         };
         self.respond(request_id, response.into());
-        self.deadline = self.channel.token_renewal_deadline();
+        // The token expires after its lifetime; allow a quarter more for a
+        // late renewal. (async-opcua's `token_renewal_deadline` reads the
+        // lifetime, in milliseconds, as seconds.)
+        self.deadline = Instant::now() + Duration::from_millis(u64::from(revised_lifetime) * 4 / 3);
 
         if !renew {
             self.issued = true;
+            self.transport.binding = Some(ChannelBinding {
+                policy_uri: header.security_policy_uri.as_ref().to_string(),
+                certificate: header.sender_certificate.clone(),
+            });
             self.target.clients.write().insert(
                 self.id,
                 ClientInfo {
@@ -546,6 +668,31 @@ impl Connection {
             )
             .await;
         }
+    }
+
+    /// Whether the client's and the upstream server's certificates are still
+    /// trusted (after an administrator revoked trust in one).
+    fn still_trusted(&self) -> Result<(), String> {
+        let store = self.target.gateway.certificate_store.read();
+        let policy = self.channel.security_policy();
+        if policy != SecurityPolicy::None {
+            if let Some(cert) = self.channel.remote_cert() {
+                store
+                    .validate_or_reject_application_instance_cert(&cert, policy, None, None)
+                    .map_err(|_| "client certificate is no longer trusted".to_string())?;
+            }
+        }
+        if let Some(upstream) = &self.upstream {
+            let policy = upstream.security_policy();
+            if let (true, Some(cert)) =
+                (policy != SecurityPolicy::None, &upstream.server_certificate)
+            {
+                store
+                    .validate_or_reject_application_instance_cert(cert, policy, None, None)
+                    .map_err(|_| "upstream server certificate is no longer trusted".to_string())?;
+            }
+        }
+        Ok(())
     }
 
     /// Checks the client's application instance certificate against the trust
@@ -685,6 +832,30 @@ async fn create_session(ctx: Ctx, request: Box<CreateSessionRequest>) -> Respons
             tracing::error!("upstream CreateSession signature invalid");
             return fault(handle, StatusCode::BadApplicationSignatureInvalid);
         }
+        // The endpoints the server lists here come over the secured channel;
+        // discovery did not. Anything missing from discovery means it was
+        // tampered with, e.g. to hide the more secure endpoints.
+        if let Some(missing) = endpoints::missing_from_discovery(
+            upstream.server_endpoints.as_deref().unwrap_or_default(),
+            &ctx.upstream_endpoints,
+            ctx.target.config.min_security,
+        ) {
+            tracing::error!(
+                target = %ctx.target.config.name,
+                "the upstream server offers {missing}, which discovery did not return"
+            );
+            ctx.audit(
+                &ctx.client,
+                AuditEvent::AuthenticationFailed {
+                    status: format!(
+                        "BadSecurityChecksFailed: the upstream server offers {missing}, \
+                         which discovery did not return"
+                    ),
+                },
+            )
+            .await;
+            return fault(handle, StatusCode::BadSecurityChecksFailed);
+        }
     }
 
     let server_signature = if ctx.policy == SecurityPolicy::None {
@@ -730,6 +901,9 @@ async fn create_session(ctx: Ctx, request: Box<CreateSessionRequest>) -> Respons
             upstream_nonce: upstream.server_nonce.clone(),
             timeout: Duration::from_millis(upstream.revised_session_timeout.max(0.0) as u64),
             last_used: Instant::now(),
+            security_policy: ctx.policy,
+            security_mode: ctx.mode,
+            connection_id: ctx.connection_id,
         },
     );
     if let Some(info) = ctx.target.clients.write().get_mut(&ctx.connection_id) {
@@ -770,6 +944,24 @@ struct Identity {
     upstream_token: ExtensionObject,
 }
 
+/// The password of a user name token, decrypted with the gateway's key.
+fn decrypt_password(
+    token: &UserNameIdentityToken,
+    nonce: &[u8],
+    key: &opcua::crypto::PrivateKey,
+) -> Result<ByteString, StatusCode> {
+    if token.encryption_algorithm.is_empty() {
+        return Ok(token.password.clone());
+    }
+    // async-opcua panics on some malformed secrets (a length underflow); a
+    // client must not be able to crash its connection with one.
+    std::panic::catch_unwind(AssertUnwindSafe(|| {
+        legacy_decrypt_secret(token, nonce, key)
+    }))
+    .map_err(|_| StatusCode::BadIdentityTokenInvalid)?
+    .map_err(|e| e.status())
+}
+
 fn translate_identity(
     ctx: &Ctx,
     token: &ExtensionObject,
@@ -799,16 +991,12 @@ fn translate_identity(
             name: t.user_name.as_ref().to_string(),
         };
         let fail = |status: StatusCode| (status, user.clone());
-        let password = if t.encryption_algorithm.is_empty() {
-            t.password.clone()
-        } else {
-            legacy_decrypt_secret(
-                t,
-                downstream_nonce.as_ref(),
-                &ctx.target.gateway.private_key,
-            )
-            .map_err(|e| fail(e.status()))?
-        };
+        let password = decrypt_password(
+            t,
+            downstream_nonce.as_ref(),
+            &ctx.target.gateway.private_key,
+        )
+        .map_err(fail)?;
         let policy = endpoints::token_policy(upstream_endpoint, &t.policy_id)
             .or_else(|| endpoints::token_policy_of_type(upstream_endpoint, UserTokenType::UserName))
             .ok_or_else(|| fail(StatusCode::BadIdentityTokenRejected))?;
@@ -858,13 +1046,14 @@ async fn activate_session(ctx: Ctx, request: Box<ActivateSessionRequest>) -> Res
     let handle = request.request_header.request_handle;
     let token = request.request_header.authentication_token.clone();
     let gateway = &ctx.target.gateway;
-    let Some((client, session_cert, downstream_nonce, upstream_nonce)) =
+    let Some((client, session_cert, downstream_nonce, upstream_nonce, session_security)) =
         ctx.target.sessions.with(&token, |s| {
             (
                 s.client.clone(),
                 s.client_certificate.clone(),
                 s.downstream_nonce.clone(),
                 s.upstream_nonce.clone(),
+                security_rank(s.security_policy, s.security_mode),
             )
         })
     else {
@@ -875,6 +1064,22 @@ async fn activate_session(ctx: Ctx, request: Box<ActivateSessionRequest>) -> Res
         remote_addr: ctx.client.remote_addr.clone(),
         ..client
     };
+
+    // A session keeps the security it was created with: re-activating it
+    // over a weaker channel would skip the proof of the client's key.
+    if security_rank(ctx.policy, ctx.mode) < session_security {
+        ctx.audit(
+            &client,
+            AuditEvent::AuthenticationFailed {
+                status: format!(
+                    "{}: session re-activation over a less secure channel",
+                    StatusCode::BadSecurityModeInsufficient
+                ),
+            },
+        )
+        .await;
+        return fault(handle, StatusCode::BadSecurityModeInsufficient);
+    }
 
     if ctx.policy != SecurityPolicy::None {
         let same_client = matches!(
@@ -968,6 +1173,8 @@ async fn activate_session(ctx: Ctx, request: Box<ActivateSessionRequest>) -> Res
                 s.downstream_nonce = server_nonce.clone();
                 s.upstream_nonce = upstream.server_nonce.clone();
                 s.client = client.clone();
+                // From now on the session belongs to this connection.
+                s.connection_id = ctx.connection_id;
             });
             if let Some(info) = ctx.target.clients.write().get_mut(&ctx.connection_id) {
                 info.user = Some(identity.user.label());
@@ -998,12 +1205,13 @@ async fn activate_session(ctx: Ctx, request: Box<ActivateSessionRequest>) -> Res
 
 async fn close_session(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
     let token = request.request_header().authentication_token.clone();
-    let client = ctx.target.sessions.client(&token);
     let response = forward(ctx.clone(), request).await;
-    if let Some(entry) = ctx.target.sessions.remove(&token) {
+    // Only the connection the session belongs to can end it here; another
+    // connection presenting its token must not erase it.
+    if let Some(entry) = ctx.target.sessions.remove_owned(&token, ctx.connection_id) {
         let client = ClientContext {
             remote_addr: ctx.client.remote_addr.clone(),
-            ..client.unwrap_or(entry.client)
+            ..entry.client
         };
         ctx.audit(&client, AuditEvent::SessionClosed).await;
     }
@@ -1015,10 +1223,12 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
     let header = request.request_header();
     let handle = header.request_handle;
     let timeout = upstream_timeout(header.timeout_hint);
+    // Attribute the request to the session's user only if the session
+    // belongs to this connection; a borrowed token proves nothing.
     let client = ctx
         .target
         .sessions
-        .client(&header.authentication_token)
+        .client_of(&header.authentication_token, ctx.connection_id)
         .map(|c| ClientContext {
             remote_addr: ctx.client.remote_addr.clone(),
             ..c
@@ -1077,10 +1287,17 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
             response
         }
     };
-    let response = response.unwrap_or_else(|e| fault(handle, e.status()));
+    let (response, unknown) = match response {
+        Ok(response) => (response, None),
+        Err(e) => (fault(handle, e.status()), e.maybe_sent.then(|| e.status())),
+    };
 
     if let Some(plan) = plan {
-        for event in plan.events(&response) {
+        let events = match unknown {
+            Some(status) => plan.events_unknown(&response, status),
+            None => plan.events(&response),
+        };
+        for event in events {
             let entry = AuditEntry::new(event)
                 .target(ctx.target.config.name.clone())
                 .client(client.clone());
@@ -1094,4 +1311,61 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
         }
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use opcua::crypto::{legacy_encrypt_secret, X509Data};
+    use opcua::types::UserTokenPolicy;
+
+    use super::*;
+
+    /// Audit finding N2: a secret whose decrypted length is shorter than the
+    /// nonce made async-opcua panic.
+    #[test]
+    fn malformed_password_secret_is_rejected_not_panicking() {
+        let (cert, key) = X509::cert_and_pkey(&X509Data::sample_cert()).unwrap();
+        let policy = UserTokenPolicy {
+            policy_id: "user".into(),
+            token_type: UserTokenType::UserName,
+            security_policy_uri: SecurityPolicy::Basic256Sha256.to_uri().into(),
+            ..Default::default()
+        };
+        // Encrypted with an empty nonce and password: the length prefix is 0.
+        let secret = legacy_encrypt_secret(
+            SecurityPolicy::None,
+            MessageSecurityMode::None,
+            &policy,
+            &[],
+            &Some(cert),
+            b"",
+        )
+        .unwrap();
+        let token = UserNameIdentityToken {
+            policy_id: "user".into(),
+            user_name: "operator".into(),
+            password: secret.secret,
+            encryption_algorithm: secret.encryption_algorithm,
+        };
+        assert_eq!(
+            decrypt_password(&token, &[7u8; 32], &key),
+            Err(StatusCode::BadIdentityTokenInvalid)
+        );
+    }
+
+    #[test]
+    fn security_is_ordered() {
+        let none = security_rank(SecurityPolicy::None, MessageSecurityMode::None);
+        let sign = security_rank(SecurityPolicy::Basic256Sha256, MessageSecurityMode::Sign);
+        let encrypt = security_rank(
+            SecurityPolicy::Basic256Sha256,
+            MessageSecurityMode::SignAndEncrypt,
+        );
+        assert!(none < sign && sign < encrypt);
+        // A None policy is None whatever the mode says.
+        assert_eq!(
+            security_rank(SecurityPolicy::None, MessageSecurityMode::SignAndEncrypt),
+            none
+        );
+    }
 }

@@ -176,6 +176,14 @@ impl TargetManager {
         Ok(())
     }
 
+    /// Makes every connection re-check its certificates (after trust in one
+    /// was revoked), closing those that are no longer trusted.
+    pub async fn recheck_trust(&self) {
+        for running in self.running.lock().await.values() {
+            running.relay.recheck_trust();
+        }
+    }
+
     /// Restarts every target, e.g. after the gateway certificate changed.
     pub async fn restart_all(&self) {
         self.stop_all().await;
@@ -206,6 +214,9 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
         table["listen"] = toml_edit::value(t.listen.to_string());
         table["endpoint_url"] = toml_edit::value(t.endpoint_url.as_str());
         table["discovery_interval_secs"] = toml_edit::value(t.discovery_interval_secs as i64);
+        if t.min_security != crate::config::MinSecurity::None {
+            table["min_security"] = toml_edit::value(t.min_security.as_str());
+        }
         array.push(table);
     }
     if targets.is_empty() {
@@ -231,6 +242,7 @@ mod tests {
             listen: ([127, 0, 0, 1], port).into(),
             endpoint_url: "opc.tcp://127.0.0.1:1/".into(),
             discovery_interval_secs: 60,
+            min_security: Default::default(),
         }
     }
 

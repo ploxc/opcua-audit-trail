@@ -168,11 +168,12 @@ const EVENT_LABELS = {
   upstream_available: "Target reachable", upstream_unavailable: "Target unreachable", gateway_started: "Gateway started",
   gateway_stopped: "Gateway stopped", config_changed: "Configuration changed", ui_login: "UI login",
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
+  upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
 };
-const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management"]);
+const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred"]);
 const eventBadge = (type) => {
   const kind = CHANGE_EVENTS.has(type) ? "accent"
-    : /failed|rejected|unavailable|lost/.test(type) ? "bad"
+    : /failed|rejected|unavailable|lost|changed$/.test(type) && type !== "config_changed" ? "bad"
     : type === "change_intent" ? "warn" : "neutral";
   return html`<span class="badge plain ${kind}">${EVENT_LABELS[type] || type}</span>`;
 };
@@ -180,7 +181,7 @@ function eventSummary(e) {
   switch (e.type) {
     case "write":
       return html`<div>${e.display_name || e.node_id}${when(e.display_name, html` <span class="muted mono">${e.node_id}</span>`)}${when(e.attribute !== "Value", html` <span class="muted">(${e.attribute})</span>`)}</div>
-        <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span></div>`;
+        <div class="change">${when(e.old_value, html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`)}${valueText(e.new_value)} <span class="muted">${e.new_value.data_type}</span>${when(e.written_status, html` <span class="muted">status ${e.written_status}</span>`)}${when(e.source_timestamp, html` <span class="muted">source time ${e.source_timestamp}</span>`)}</div>`;
     case "call":
       return html`<div>${e.display_name || e.method_id} <span class="muted mono">${e.object_id}</span></div>
         <div class="change">(${e.input_arguments.map(valueText).join(", ")})</div>`;
@@ -193,6 +194,8 @@ function eventSummary(e) {
     case "certificate_rejected": return html`${e.subject} <span class="muted">${e.reason}</span>`;
     case "client_disconnected": return e.reason;
     case "upstream_available": return `${e.endpoint_url} (${e.endpoints} endpoints)`;
+    case "upstream_endpoints_changed": return html`<div>${e.endpoint_url}</div><div class="small muted">before: ${e.before.join("; ")}</div><div class="small">now: ${e.after.join("; ")}</div>`;
+    case "subscriptions_transferred": return `subscriptions ${e.subscription_ids.join(", ")}`;
     case "upstream_unavailable": return e.reason;
     case "config_changed": return html`<b>${e.by}</b>: ${e.summary}`;
     case "ui_login": case "ui_login_failed": return e.user;
@@ -484,11 +487,14 @@ function targetsView() {
       <dl class="kv"><dt>Clients connect to</dt><dd class="mono">${clientUrl(t.listen)} <span class="muted">(listening on ${t.listen})</span></dd>
         <dt>Target server</dt><dd class="mono">${t.endpoint_url}</dd>
         <dt>Discovery every</dt><dd>${t.discovery_interval_secs} s</dd>
+        <dt>Minimum security</dt><dd>${MIN_SECURITY[t.min_security || "none"]}</dd>
         ${when(t.status?.last_error, html`<dt>Error</dt><dd class="small">${t.status?.last_error}</dd>`)}</dl>
       <h3 class="mt">Endpoints offered to clients</h3>
       ${endpointsTable(state.targets.discovery[t.name] || t.status?.endpoints, trusted)}
     </div>`)}`;
 }
+
+const MIN_SECURITY = { none: "Follow the target (incl. None)", sign: "Sign or better", sign_and_encrypt: "Sign & encrypt only" };
 
 function targetForm(t) {
   const isNew = t.original === null;
@@ -500,6 +506,7 @@ function targetForm(t) {
       <div><label>Listen address (for clients)</label><input name="listen" value="${t.listen}" required placeholder="0.0.0.0:4841"></div>
       <div><label>Target endpoint URL</label><input name="endpoint_url" value="${t.endpoint_url}" required placeholder="opc.tcp://192.168.0.10:4840"></div>
       <div><label>Discovery interval (s)</label><input name="discovery_interval_secs" type="number" min="1" value="${t.discovery_interval_secs}"></div>
+      <div><label>Minimum security</label><select name="min_security">${Object.entries(MIN_SECURITY).map(([k, v]) => html`<option value="${k}" ${new Html((t.min_security || "none") === k ? "selected" : "")}>${v}</option>`)}</select></div>
     </div>
     <p class="hint">On the PLC itself, use another port than the PLC's own server (e.g. 4841) and let the PLC's server accept only the gateway.</p>
     <div class="inline"><button class="primary" type="submit">${isNew ? "Add" : "Save"}</button>
@@ -706,10 +713,10 @@ const actions = {
   async "clear-filter"() { state.audit.filters = {}; await loadAudit(); renderPage(); },
   live(el) { state.audit.live = el.checked; schedule("audit"); },
   // targets
-  "new-target"() { state.targets.editing = { original: null, name: "", listen: "0.0.0.0:4841", endpoint_url: "opc.tcp://", discovery_interval_secs: 60 }; renderPage(); },
+  "new-target"() { state.targets.editing = { original: null, name: "", listen: "0.0.0.0:4841", endpoint_url: "opc.tcp://", discovery_interval_secs: 60, min_security: "none" }; renderPage(); },
   "edit-target"(el) {
     const t = state.status.targets.find((x) => x.name === el.dataset.name);
-    state.targets.editing = { original: t.name, name: t.name, listen: t.listen, endpoint_url: t.endpoint_url, discovery_interval_secs: t.discovery_interval_secs };
+    state.targets.editing = { original: t.name, name: t.name, listen: t.listen, endpoint_url: t.endpoint_url, discovery_interval_secs: t.discovery_interval_secs, min_security: t.min_security || "none" };
     renderPage();
   },
   "cancel-target"() { state.targets.editing = null; renderPage(); },
@@ -808,7 +815,7 @@ const forms = {
   async target(form) {
     const t = state.targets.editing;
     const data = formData(form);
-    const body = { name: data.name, listen: data.listen, endpoint_url: data.endpoint_url, discovery_interval_secs: Number(data.discovery_interval_secs) || 60 };
+    const body = { name: data.name, listen: data.listen, endpoint_url: data.endpoint_url, discovery_interval_secs: Number(data.discovery_interval_secs) || 60, min_security: data.min_security || "none" };
     if (t.original === null) await post("/targets", body);
     else await put(`/targets/${encodeURIComponent(t.original)}`, body);
     toast(t.original === null ? "Target added" : "Target saved");

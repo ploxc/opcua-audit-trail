@@ -197,6 +197,31 @@ pub struct TargetConfig {
     /// How often the upstream endpoints are re-discovered.
     #[serde(default = "default_discovery_interval")]
     pub discovery_interval_secs: u64,
+    /// Endpoints below this security are neither offered to clients nor used
+    /// upstream, whatever the server advertises. Discovery is not
+    /// authenticated, so this is the defence against a stripped endpoint list.
+    #[serde(default)]
+    pub min_security: MinSecurity,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MinSecurity {
+    /// Follow the server, including SecurityPolicy None.
+    #[default]
+    None,
+    Sign,
+    SignAndEncrypt,
+}
+
+impl MinSecurity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MinSecurity::None => "none",
+            MinSecurity::Sign => "sign",
+            MinSecurity::SignAndEncrypt => "sign_and_encrypt",
+        }
+    }
 }
 
 fn default_discovery_interval() -> u64 {
