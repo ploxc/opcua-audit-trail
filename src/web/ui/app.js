@@ -256,6 +256,11 @@ function render() {
     app.querySelector("input[name=username]")?.focus();
     return;
   }
+  if (state.user.must_change_password) {
+    app.innerHTML = mustChangeView().s;
+    app.querySelector("input[name=current]")?.focus();
+    return;
+  }
   const page = currentPage();
   const rejected = state.status?.rejected_certificates || 0;
   app.innerHTML = html`<div class="shell">
@@ -673,6 +678,19 @@ function usersView() {
       <p class="hint">Auditor: dashboard and audit trail. Operator: also the browser. Admin: also targets, certificates and users.</p></form>`;
 }
 
+/// A password someone else chose (first start, reset by an admin) is
+/// replaced before anything else.
+function mustChangeView() {
+  return html`<div class="login">${logo("login-backdrop")}<form class="card" data-form="password">
+    <div class="brand">${logo()}<div>Choose a new password<small>${state.user.username}</small></div></div>
+    <p class="section-note">Your password was set by someone else. Choose your own to continue.</p>
+    <div class="field"><label for="c">Current password</label><input id="c" name="current" type="password" required autocomplete="current-password"></div>
+    <div class="field"><label for="n">New password (min. 8)</label><input id="n" name="new" type="password" minlength="8" required autocomplete="new-password"></div>
+    <button class="primary" type="submit">Continue</button>
+    <p class="mt"><button type="button" class="link small" data-action="logout">Log out</button></p>
+  </form></div>`;
+}
+
 function accountView() {
   return html`<div class="page-head"><div class="inline">${menuButton}<h1>Account</h1></div></div>
     <form class="card" data-form="password"><h2>Change password</h2><div class="form-grid">
@@ -733,7 +751,12 @@ const readFile = (file) => new Promise((resolve, reject) => {
 });
 
 const actions = {
-  async logout() { await post("/logout"); state.user = null; render(); },
+  async logout() {
+    await post("/logout");
+    // Start from a clean page: nothing of this user's session stays behind.
+    location.hash = "";
+    location.reload();
+  },
   theme() {
     // Like ploxc.com: follow the system until the user picks a mode.
     const root = document.documentElement;
@@ -765,7 +788,12 @@ const actions = {
   },
   async "discover-target"(el) { state.targets.discovery[el.dataset.name] = await post(`/targets/${encodeURIComponent(el.dataset.name)}/discover`); toast("Discovery done"); renderPage(); },
   async "trust-server"(el) {
-    const cert = await post(`/targets/${encodeURIComponent(el.dataset.name)}/trust-server`);
+    const t = (state.status?.targets || []).find((x) => x.name === el.dataset.name);
+    const endpoints = state.targets.discovery[el.dataset.name] || t?.status?.endpoints || [];
+    const shown = endpoints.find((e) => e.server_certificate)?.server_certificate;
+    if (!shown) { toast("No certificate known yet: discover the target first.", "bad"); return; }
+    if (!confirm(`Trust this server certificate?\n\n${shown.subject}\nThumbprint ${shown.thumbprint}\n\nCompare the thumbprint with the one shown on the PLC first.`)) return;
+    const cert = await post(`/targets/${encodeURIComponent(el.dataset.name)}/trust-server`, { thumbprint: shown.thumbprint });
     toast(`Trusted ${cert.subject}`);
     state.certificates = await get("/certificates");
     renderPage();
@@ -875,7 +903,13 @@ const forms = {
     renderPage();
   },
   async "new-user"(form) { await post("/users", formData(form)); form.reset(); toast("User added"); await load(); },
-  async password(form) { await post("/me/password", formData(form)); form.reset(); toast("Password changed"); },
+  async password(form) {
+    const wasForced = state.user.must_change_password;
+    await post("/me/password", formData(form));
+    form.reset(); toast("Password changed");
+    state.user = await get("/me");
+    if (wasForced) { render(); await load(); }
+  },
 };
 
 document.addEventListener("click", async (event) => {

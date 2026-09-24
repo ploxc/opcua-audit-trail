@@ -139,16 +139,56 @@ pub fn router(state: AppState) -> Router {
         .route("/fonts/{file}", get(font))
         .nest("/api", api)
         .layer(axum::middleware::from_fn(auth::csrf))
-        .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .with_state(state)
 }
 
+/// Whether a Host header names this machine's loopback interface.
+fn is_loopback_host(host: &str) -> bool {
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) && !name.ends_with(':') => {
+            name
+        }
+        _ => host,
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+}
+
 async fn security_headers(
+    State(s): State<AppState>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    // A UI on loopback only answers to loopback names: a web page on
+    // another site cannot reach it through a DNS name that resolves to
+    // 127.0.0.1 (DNS rebinding).
+    if s.config.web.listen.ip().is_loopback() {
+        let host = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        if !is_loopback_host(host) {
+            return ApiError(StatusCode::MISDIRECTED_REQUEST, "unknown host name".into())
+                .into_response();
+        }
+    }
+    let api = request.uri().path().starts_with("/api/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    if api {
+        // Audit records, users and certificates must not stay in caches.
+        headers.insert(header::CACHE_CONTROL, "no-store".parse().expect("valid"));
+    }
+    if s.config.web.tls {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            "max-age=31536000".parse().expect("valid"),
+        );
+    }
     headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().expect("valid"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -160,7 +200,8 @@ async fn security_headers(
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+        "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
+         base-uri 'none'; form-action 'self'"
             .parse()
             .expect("valid"),
     );
@@ -271,7 +312,7 @@ async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusRe
         fail_mode: s.config.audit.fail_mode,
         record_old_value: s.config.audit.record_old_value,
         retention_days: s.config.audit.retention_days,
-        rejected_certificates: s.pki.rejected().len(),
+        rejected_certificates: s.pki.rejected_count(),
         exports,
         targets: target_views(&s).await,
     }))
@@ -315,6 +356,7 @@ async fn update_target(
         .upsert(target, Some(&name))
         .await
         .map_err(ApiError::bad_request)?;
+    s.browser.close_target(&s, &name).await;
     s.config_changed(&user, summary).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -329,6 +371,7 @@ async fn delete_target(
         .remove(&name)
         .await
         .map_err(ApiError::bad_request)?;
+    s.browser.close_target(&s, &name).await;
     s.config_changed(&user, format!("removed target '{name}'"))
         .await;
     Ok(StatusCode::NO_CONTENT)
@@ -370,11 +413,19 @@ async fn discover_target(
         .map_err(ApiError::upstream)
 }
 
-/// Trusts the certificate the target presents in GetEndpoints.
+#[derive(Deserialize)]
+struct TrustServerRequest {
+    /// The thumbprint the admin reviewed: only that certificate is trusted.
+    thumbprint: String,
+}
+
+/// Trusts the certificate the target presents in GetEndpoints, if it is the
+/// one with the reviewed thumbprint.
 async fn trust_server(
     State(s): State<AppState>,
     user: AuthUser,
     Path(name): Path<String>,
+    Json(req): Json<TrustServerRequest>,
 ) -> ApiResult<CertificateInfo> {
     user.require(Role::Admin)?;
     let url = target_url(&s, &name).await?;
@@ -383,9 +434,17 @@ async fn trust_server(
         .map_err(ApiError::upstream)?;
     let cert = endpoints
         .iter()
-        .find_map(|e| X509::from_byte_string(&e.server_certificate).ok())
+        .filter_map(|e| X509::from_byte_string(&e.server_certificate).ok())
+        .find(|c| {
+            c.thumbprint()
+                .as_hex_string()
+                .eq_ignore_ascii_case(req.thumbprint.trim())
+        })
         .ok_or_else(|| {
-            ApiError::bad_request(anyhow::anyhow!("the target presents no certificate"))
+            ApiError::bad_request(anyhow::anyhow!(
+                "the target does not present the certificate {} (any more); discover it again",
+                req.thumbprint
+            ))
         })?;
     let info = s.pki.trust(&cert)?;
     s.config_changed(
@@ -405,18 +464,26 @@ struct DiscoverRequest {
 }
 
 /// Discovery of any URL, so the UI can inspect a server before adding it.
+/// Admins only, and recorded: it makes the gateway connect anywhere.
 async fn discover_url(
     State(s): State<AppState>,
     user: AuthUser,
     Json(req): Json<DiscoverRequest>,
 ) -> ApiResult<Vec<EndpointInfo>> {
-    user.require(Role::Operator)?;
+    user.require(Role::Admin)?;
     if !req.endpoint_url.starts_with("opc.tcp://") {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "endpoint_url must start with opc.tcp://".into(),
         ));
     }
+    let _ = s
+        .audit
+        .record_committed(AuditEntry::new(AuditEvent::Discovery {
+            by: user.username.clone(),
+            endpoint_url: crate::audit::event::clip(&req.endpoint_url, 1024),
+        }))
+        .await;
     discovery::discover(&s.client, &req.endpoint_url)
         .await
         .map(Json)
@@ -489,7 +556,7 @@ async fn import_own(
         .map_err(|e| ApiError::bad_request(anyhow::anyhow!("private key: {e}")))?;
     let cert = s
         .pki
-        .import_own(&cert, &key)
+        .import_own(&cert, &key, &s.config.gateway)
         .map_err(ApiError::bad_request)?;
     let info = CertificateInfo::from_x509(&cert);
     s.targets.restart_all().await;
@@ -625,8 +692,11 @@ async fn audit_csv(
 }
 
 fn csv_field(value: &str) -> String {
-    // Quote everything; neutralise spreadsheet formulas.
-    let value = if value.starts_with(['=', '+', '-', '@']) {
+    // Quote everything; neutralise spreadsheet formulas, but leave numbers
+    // (-3.5) as they are.
+    let value = if value.starts_with(['=', '+', '-', '@', '\t', '\r'])
+        && value.parse::<f64>().is_err()
+    {
         format!("'{value}")
     } else {
         value.to_string()
@@ -688,7 +758,10 @@ async fn create_user(
     user.require(Role::Admin)?;
     let users = s.users.clone();
     let (name, role) = (req.username.clone(), req.role);
-    tokio::task::spawn_blocking(move || users.create(&req.username, &req.password, req.role))
+    // The admin chose the password: the user replaces it at the first login.
+    tokio::task::spawn_blocking(move || {
+        users.create_with(&req.username, &req.password, req.role, true)
+    })
         .await
         .map_err(|e| anyhow::anyhow!(e))?
         .map_err(ApiError::bad_request)?;
@@ -710,23 +783,19 @@ async fn update_user(
     Json(req): Json<UserUpdate>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
-    let mut changes = Vec::new();
-    if let Some(role) = req.role {
-        s.users
-            .set_role(&name, role)
-            .map_err(ApiError::bad_request)?;
-        changes.push(format!("role {}", role.as_str()));
-    }
-    if let Some(password) = req.password {
-        let users = s.users.clone();
-        let n = name.clone();
-        tokio::task::spawn_blocking(move || users.set_password(&n, &password))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?
-            .map_err(ApiError::bad_request)?;
-        changes.push("password reset".into());
-    }
+    // All or nothing; a reset password must be replaced at the next login.
+    let users = s.users.clone();
+    let n = name.clone();
+    let changes = tokio::task::spawn_blocking(move || {
+        users.update(&n, req.role, req.password.as_deref(), true)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?
+    .map_err(ApiError::bad_request)?;
     s.sessions.remove_user(&name);
+    if req.role.is_some_and(|r| r < Role::Operator) {
+        s.browser.close_user(&s, &name).await;
+    }
     s.config_changed(
         &user,
         format!("changed user '{name}': {}", changes.join(", ")),
@@ -743,6 +812,7 @@ async fn delete_user(
     user.require(Role::Admin)?;
     s.users.delete(&name).map_err(ApiError::bad_request)?;
     s.sessions.remove_user(&name);
+    s.browser.close_user(&s, &name).await;
     s.config_changed(&user, format!("deleted user '{name}'"))
         .await;
     Ok(StatusCode::NO_CONTENT)

@@ -140,23 +140,30 @@ impl TargetManager {
             }
             None => None,
         };
-        match self.start(&new_config, &target).await {
-            Ok(r) => {
-                running.insert(target.name.clone(), r);
-            }
-            Err(e) => {
-                // Put the old target back as it was.
-                if let Some(old_target) = old {
-                    if let Ok(r) = self.start(&config, &old_target).await {
-                        running.insert(old_target.name.clone(), r);
-                    }
+        let started = self.start(&new_config, &target).await;
+        // Only a change that is running and saved counts; otherwise the old
+        // target is put back as it was.
+        let result = match started {
+            Ok(r) => match write_targets(&self.config_path, &new_config.targets) {
+                Ok(()) => {
+                    running.insert(target.name.clone(), r);
+                    *config = new_config;
+                    return Ok(());
                 }
-                return Err(e);
+                Err(e) => {
+                    r.stop().await;
+                    self.statuses.write().await.remove(&target.name);
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        };
+        if let Some(old_target) = old {
+            if let Ok(r) = self.start(&config, &old_target).await {
+                running.insert(old_target.name.clone(), r);
             }
         }
-        write_targets(&self.config_path, &new_config.targets)?;
-        *config = new_config;
-        Ok(())
+        result
     }
 
     pub async fn remove(&self, name: &str) -> anyhow::Result<()> {
@@ -235,11 +242,10 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
     } else {
         doc["targets"] = toml_edit::Item::ArrayOfTables(array);
     }
-    // Write atomically, so a crash never leaves a half-written config.
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, doc.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
+    // Atomic and durable, keeping the file's permissions (it may hold
+    // export credentials).
+    crate::fsutil::write_atomic(path, doc.to_string().as_bytes(), None)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

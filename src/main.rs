@@ -275,7 +275,10 @@ fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
         }
         UserCommand::Passwd { username } => {
             users.set_password(&username, &read_new_password()?)?;
-            println!("password of {username} changed");
+            if username == "admin" {
+                let _ = std::fs::remove_file(users::initial_password_file(&config));
+            }
+            println!("password of {username} changed; their web sessions have ended");
         }
         UserCommand::Role { username, role } => {
             users.set_role(&username, Role::parse(&role)?)?;
@@ -332,10 +335,15 @@ async fn run(
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
         let password = users::random_password();
-        users.create("admin", &password, Role::Admin)?;
+        users.create_with("admin", &password, Role::Admin, true)?;
+        // Into a file only the service can read, not into the logs.
+        let file = users::initial_password_file(&config);
+        fsutil::write_atomic(&file, format!("{password}\n").as_bytes(), Some(0o600))
+            .with_context(|| format!("writing {}", file.display()))?;
         tracing::warn!(
-            "created web UI user 'admin' with password '{password}'. \
-             Log in and change it (or: opcua-audit-gateway user passwd admin)"
+            "created web UI user 'admin'; its password is in {} and must be changed at \
+             the first login (or: opcua-audit-gateway user passwd admin)",
+            file.display()
         );
         let _ = audit
             .record(AuditEntry::new(AuditEvent::ConfigChanged {
@@ -394,16 +402,19 @@ async fn run(
         tracing::info!("web UI on https://{}", config.web.listen);
         axum_server::from_tcp_rustls(listener, tls)?
             .handle(handle)
-            .serve(router.into_make_service())
+            .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(config.web.listen)
             .await
             .with_context(|| format!("binding web UI to {}", config.web.listen))?;
         tracing::info!("web UI on http://{}", config.web.listen);
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await?;
     }
 
     tracing::info!("shutting down");

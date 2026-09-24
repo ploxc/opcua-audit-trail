@@ -116,6 +116,11 @@ pub enum AuditEvent {
     UiLoginFailed {
         user: String,
     },
+    /// Discovery of a server that is not (yet) a target, from the web UI.
+    Discovery {
+        by: String,
+        endpoint_url: String,
+    },
     /// Records that audit records up to and including `last_seq` were deleted by
     /// retention. `last_hash` is the hash of that record, so the remaining chain
     /// stays verifiable from this point on.
@@ -268,6 +273,7 @@ impl AuditEvent {
             AuditEvent::ConfigChanged { .. } => "config_changed",
             AuditEvent::UiLogin { .. } => "ui_login",
             AuditEvent::UiLoginFailed { .. } => "ui_login_failed",
+            AuditEvent::Discovery { .. } => "discovery",
             AuditEvent::RetentionPruned { .. } => "retention_pruned",
             AuditEvent::EventsLost { .. } => "events_lost",
             AuditEvent::TrailTruncated { .. } => "trail_truncated",

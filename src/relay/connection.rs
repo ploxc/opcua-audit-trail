@@ -705,6 +705,20 @@ impl Connection {
     ) -> Result<(), StatusCode> {
         let cert = X509::from_byte_string(certificate).map_err(|e| e.status())?;
         self.client.certificate_thumbprint = Some(cert.thumbprint().as_hex_string());
+        if !crate::pki::safe_file_name(&cert) {
+            // The library would file it under a path derived from this name.
+            record(
+                &self.target,
+                &self.client,
+                AuditEvent::CertificateRejected {
+                    subject: clip(&cert.subject_name(), MAX_TEXT),
+                    thumbprint: cert.thumbprint().as_hex_string(),
+                    reason: "common name not usable as a file name".into(),
+                },
+            )
+            .await;
+            return Err(StatusCode::BadCertificateInvalid);
+        }
         let policy = self.channel.security_policy();
         let result = self
             .target
@@ -713,6 +727,14 @@ impl Connection {
             .read()
             .validate_or_reject_application_instance_cert(&cert, policy, None, None);
         if let Err(e) = result {
+            crate::pki::cap_rejected(
+                &self
+                    .target
+                    .gateway
+                    .certificate_store
+                    .read()
+                    .rejected_certs_dir(),
+            );
             record(
                 &self.target,
                 &self.client,

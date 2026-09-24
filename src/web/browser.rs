@@ -63,6 +63,30 @@ impl BrowserSessions {
         Some(entry.session.clone())
     }
 
+    /// Ends every browser session of a UI user (deleted, lost the role).
+    pub async fn close_user(&self, state: &AppState, user: &str) {
+        let entries: Vec<Entry> = {
+            let mut map = self.map.lock();
+            let keys: Vec<_> = map.keys().filter(|(u, _)| u == user).cloned().collect();
+            keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+        };
+        for entry in entries {
+            close(state, entry).await;
+        }
+    }
+
+    /// Ends every browser session on a target (removed or changed).
+    pub async fn close_target(&self, state: &AppState, target: &str) {
+        let entries: Vec<Entry> = {
+            let mut map = self.map.lock();
+            let keys: Vec<_> = map.keys().filter(|(_, t)| t == target).cloned().collect();
+            keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+        };
+        for entry in entries {
+            close(state, entry).await;
+        }
+    }
+
     fn take(&self, user: &str, target: &str) -> Option<Entry> {
         self.map
             .lock()
@@ -123,7 +147,10 @@ pub struct ConnectResponse {
     user: String,
 }
 
-/// The most secure endpoint that supports the requested login type.
+/// The most secure endpoint that supports the requested login type, by the
+/// gateway's own ranking (the server's `security_level` comes from an
+/// unauthenticated answer). A password is never sent in the clear: a user
+/// name login needs a secured channel or an encrypting token policy.
 fn pick_endpoint(
     endpoints: &[EndpointDescription],
     token: UserTokenType,
@@ -134,13 +161,21 @@ fn pick_endpoint(
             let policy = SecurityPolicy::from_uri(e.security_policy_uri.as_ref());
             policy != SecurityPolicy::Unknown
                 && policy.is_supported()
-                && e.user_identity_tokens
-                    .iter()
-                    .flatten()
-                    .any(|t| t.token_type == token && is_relayable_token(t))
+                && e.user_identity_tokens.iter().flatten().any(|t| {
+                    t.token_type == token
+                        && is_relayable_token(t)
+                        && (token != UserTokenType::UserName
+                            || policy != SecurityPolicy::None
+                            || !matches!(
+                                SecurityPolicy::from_uri(t.security_policy_uri.as_ref()),
+                                SecurityPolicy::None | SecurityPolicy::Unknown
+                            ))
+                })
         })
         .collect();
-    candidates.sort_by_key(|e| std::cmp::Reverse(e.security_level));
+    candidates.sort_by_key(|e| {
+        std::cmp::Reverse((crate::relay::endpoints::security_of(e), e.security_level))
+    });
     candidates.first().map(|e| (*e).clone())
 }
 
@@ -181,17 +216,29 @@ pub async fn connect(
     })?;
     let mut endpoint = pick_endpoint(&endpoints, token_type).ok_or_else(|| {
         ApiError::bad_request(anyhow::anyhow!(
-            "the target offers no endpoint for this kind of login"
+            "the target offers no endpoint for this kind of login (a password is only sent \
+             over a secured channel or encrypted)"
         ))
     })?;
+    // Trust is checked on connect, but not the validity dates (see below).
+    if SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref()) != SecurityPolicy::None {
+        let cert = opcua::crypto::X509::from_byte_string(&endpoint.server_certificate)
+            .map_err(|e| ApiError::bad_request(anyhow::anyhow!("server certificate: {e}")))?;
+        if cert.is_time_valid(&chrono::Utc::now()).is_err() {
+            return Err(ApiError::bad_request(anyhow::anyhow!(
+                "the target's certificate is expired or not yet valid"
+            )));
+        }
+    }
     // Connect to the configured URL, not the (possibly unreachable) host name
     // the server advertises.
     endpoint.endpoint_url = relay.config.endpoint_url.as_str().into();
 
     let pki_dir = s.config.gateway.pki_dir.clone();
     let mut store = CertificateStore::new(&pki_dir);
-    // Trust is still checked; only host name and URI checks are skipped, as
-    // PLC certificates often lack the address they are reached by.
+    // Trust is still checked. Skipped are the host name and application URI
+    // checks (PLC certificates often lack the address they are reached by)
+    // and, by async-opcua, the validity dates, which are checked above.
     store.set_skip_verify_certs(true);
     let client = ClientBuilder::new()
         .application_name(s.config.gateway.application_name.clone())
@@ -231,7 +278,7 @@ pub async fn connect(
     .target(target_name.clone())
     .client(browser_client(&user.username));
     let _ = s.audit.record_committed(entry).await;
-    s.browser.map.lock().insert(
+    let replaced = s.browser.map.lock().insert(
         (user.username.clone(), target_name.clone()),
         Entry {
             session,
@@ -241,6 +288,10 @@ pub async fn connect(
             target: target_name,
         },
     );
+    // Two connects at once: close the session that lost, not leak it.
+    if let Some(old) = replaced {
+        close(&s, old).await;
+    }
     let policy = SecurityPolicy::from_uri(endpoint.security_policy_uri.as_ref());
     Ok(Json(ConnectResponse {
         security_policy: policy.to_str().into(),

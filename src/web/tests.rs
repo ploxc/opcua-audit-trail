@@ -92,6 +92,7 @@ impl Web {
         let mut request = Request::builder()
             .method(method)
             .uri(uri)
+            .header(header::HOST, "127.0.0.1:8080")
             .header(CSRF_HEADER, CSRF_VALUE);
         if let Some(c) = cookie {
             request = request.header(header::COOKIE, c);
@@ -209,6 +210,7 @@ async fn state_changes_need_the_csrf_header() {
     let request = Request::builder()
         .method(Method::POST)
         .uri("/api/logout")
+        .header(header::HOST, "127.0.0.1")
         .header(header::COOKIE, &admin)
         .body(Body::empty())
         .unwrap();
@@ -225,7 +227,9 @@ async fn ui_assets_are_embedded() {
         ("/fonts/inter-latin.woff2", StatusCode::OK, "font/woff2"),
         ("/fonts/inter-latin-ext.woff2", StatusCode::OK, "font/woff2"),
     ] {
-        let request = Request::get(uri).body(Body::empty()).unwrap();
+        let request = Request::get(uri)
+            .header(header::HOST, "localhost:8080")
+            .body(Body::empty()).unwrap();
         let response = w.app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), status, "{uri}");
         assert_eq!(
@@ -235,6 +239,7 @@ async fn ui_assets_are_embedded() {
         );
     }
     let request = Request::get("/fonts/other.woff2")
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .unwrap();
     let response = w.app.clone().oneshot(request).await.unwrap();
@@ -294,9 +299,30 @@ async fn browser_needs_operator_and_reads_the_address_space() {
     let w = web().await;
     let admin = w.login("admin").await;
     assert_eq!(w.add_target(&admin).await, StatusCode::CREATED);
-    // Trust the PLC straight from discovery.
+    // Trust the PLC straight from discovery: only the certificate with the
+    // thumbprint the admin reviewed (audit finding W5).
+    let (status, endpoints) = w
+        .post("/api/targets/plc1/discover", &admin, json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{endpoints}");
+    let thumbprint = endpoints[0]["server_certificate"]["thumbprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = w
+        .post(
+            "/api/targets/plc1/trust-server",
+            &admin,
+            json!({ "thumbprint": "00".repeat(20) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, cert) = w
-        .post("/api/targets/plc1/trust-server", &admin, json!({}))
+        .post(
+            "/api/targets/plc1/trust-server",
+            &admin,
+            json!({ "thumbprint": thumbprint }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{cert}");
 

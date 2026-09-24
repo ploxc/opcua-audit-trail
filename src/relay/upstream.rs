@@ -81,6 +81,12 @@ impl Upstream {
                     "upstream endpoint has no valid certificate",
                 )
             })?;
+            if !crate::pki::safe_file_name(cert) {
+                return Err(UpstreamError::Other(Error::new(
+                    StatusCode::BadCertificateInvalid,
+                    "the server certificate's common name is not usable as a file name",
+                )));
+            }
             gateway
                 .certificate_store
                 .read()

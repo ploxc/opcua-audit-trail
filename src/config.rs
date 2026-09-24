@@ -329,8 +329,18 @@ impl Config {
         let mut names = std::collections::HashSet::new();
         let mut listens = std::collections::HashSet::new();
         for t in &self.targets {
-            if t.name.trim().is_empty() {
-                bail!("target name must not be empty");
+            // The name ends up in logs, audit records and URLs.
+            if t.name.is_empty()
+                || t.name.len() > 64
+                || !t
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+            {
+                bail!(
+                    "target name '{}' must be 1-64 letters, digits, '.', '_' or '-'",
+                    t.name.escape_debug()
+                );
             }
             if !names.insert(&t.name) {
                 bail!("duplicate target name '{}'", t.name);
