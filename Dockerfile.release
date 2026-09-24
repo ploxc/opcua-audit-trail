@@ -1,0 +1,15 @@
+# Release image built from the static musl binaries of the release workflow
+# (no compiler, no RUN steps: multi-arch builds need no emulation).
+# Expects docker-dist/linux-{amd64,arm64,armv7}/opcua-audit-gateway and an
+# empty docker-dist/data directory.
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETARCH
+ARG TARGETVARIANT
+COPY docker-dist/linux-${TARGETARCH}${TARGETVARIANT}/opcua-audit-gateway /usr/local/bin/opcua-audit-gateway
+COPY docker/config.toml /etc/opcua-audit-gateway/config.toml
+COPY --chown=65532:65532 docker-dist/data /data
+ENV OPCUA_GATEWAY_CONFIG=/data/config.toml
+VOLUME ["/data"]
+EXPOSE 8080 4841
+ENTRYPOINT ["/usr/local/bin/opcua-audit-gateway"]
+CMD ["run", "--create-config-from", "/etc/opcua-audit-gateway/config.toml"]

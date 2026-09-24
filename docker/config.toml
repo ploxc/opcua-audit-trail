@@ -1,0 +1,33 @@
+# Template for /data/config.toml: copied there on the container's first start.
+# After that, /data/config.toml is the live configuration (targets can be
+# managed in the web UI).
+
+[gateway]
+application_name = "OPC UA Audit Gateway"
+pki_dir = "/data/pki"
+data_dir = "/data"
+# The container cannot see the host's name or IP: list what clients use.
+# certificate_hostnames = ["gateway.local", "192.168.0.20"]
+
+[web]
+# Plain HTTP: publish this port on the host's loopback only (see
+# docker-compose.yml) or put a TLS reverse proxy in front.
+listen = "0.0.0.0:8080"
+
+[audit]
+retention_days = 365
+fail_mode = "open"
+record_old_value = true
+
+# Copies of the audit trail outside the gateway (see README "Audit export").
+# [export.questdb]
+# url = "http://questdb:9000"      # with: docker compose --profile questdb up -d
+#
+# [export.syslog]
+# address = "siem.local:514"
+# protocol = "tcp"
+
+# [[targets]]
+# name = "plc1"
+# listen = "0.0.0.0:4841"
+# endpoint_url = "opc.tcp://192.168.0.10:4840"

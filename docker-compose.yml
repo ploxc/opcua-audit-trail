@@ -1,0 +1,33 @@
+services:
+  gateway:
+    build: .
+    image: opcua-audit-gateway:dev
+    restart: unless-stopped
+    ports:
+      # Web UI: loopback only (plain HTTP); use a TLS proxy for remote access.
+      - "127.0.0.1:8080:8080"
+      # One port per target (OPC UA clients connect here).
+      - "4841:4841"
+    # Config, certificates, users and the audit trail live in /data. On the
+    # first start /data/config.toml is created from docker/config.toml (baked
+    # into the image). Targets are managed in the web UI; to edit other
+    # settings: docker compose cp gateway:/data/config.toml . (edit),
+    # docker compose cp config.toml gateway:/data/config.toml, restart.
+    volumes:
+      - gateway-data:/data
+
+  # Optional long-term store: `docker compose --profile questdb up -d`, then set
+  # [export.questdb] url = "http://questdb:9000" in docker/config.toml.
+  # QuestDB's console is on http://127.0.0.1:9000.
+  questdb:
+    image: questdb/questdb:latest   # pin a version for production
+    profiles: ["questdb"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - questdb-data:/var/lib/questdb
+
+volumes:
+  gateway-data:
+  questdb-data:

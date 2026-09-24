@@ -1,0 +1,315 @@
+//! Web UI users: stored in `<data_dir>/gateway.db` with argon2 password hashes.
+
+use std::path::Path;
+
+use anyhow::{bail, Context};
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
+use chrono::Utc;
+use parking_lot::Mutex;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+
+/// Roles are cumulative: an admin can do everything an operator can, and an
+/// operator everything an auditor can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Read the dashboard and the audit trail.
+    Auditor,
+    /// Also use the OPC UA browser.
+    Operator,
+    /// Also change configuration, certificates and users.
+    Admin,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Auditor => "auditor",
+            Role::Operator => "operator",
+            Role::Admin => "admin",
+        }
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        Ok(match s {
+            "auditor" => Role::Auditor,
+            "operator" => Role::Operator,
+            "admin" => Role::Admin,
+            other => bail!("unknown role '{other}' (use admin, operator or auditor)"),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct User {
+    pub username: String,
+    pub role: Role,
+    pub created_at: String,
+}
+
+pub struct UserStore {
+    conn: Mutex<Connection>,
+}
+
+const MIN_PASSWORD_LENGTH: usize = 8;
+
+fn hash(password: &str) -> anyhow::Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| anyhow::anyhow!("hashing password: {e}"))
+}
+
+fn validate(username: &str, password: &str) -> anyhow::Result<()> {
+    if username.is_empty()
+        || username.len() > 64
+        || !username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-@".contains(c))
+    {
+        bail!("user names use letters, digits and . _ - @ (max. 64)");
+    }
+    if password.chars().count() < MIN_PASSWORD_LENGTH {
+        bail!("passwords need at least {MIN_PASSWORD_LENGTH} characters");
+    }
+    Ok(())
+}
+
+impl UserStore {
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let conn = Connection::open(path)
+            .with_context(|| format!("opening user database {}", path.display()))?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS users (
+                username      TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL,
+                created_at    TEXT NOT NULL
+            );",
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    pub fn count(&self) -> anyhow::Result<u64> {
+        let n: i64 = self
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    pub fn create(&self, username: &str, password: &str, role: Role) -> anyhow::Result<()> {
+        validate(username, password)?;
+        let hash = hash(password)?;
+        let inserted = self.conn.lock().execute(
+            "INSERT OR IGNORE INTO users (username, password_hash, role, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![username, hash, role.as_str(), Utc::now().to_rfc3339()],
+        )?;
+        if inserted == 0 {
+            bail!("user '{username}' already exists");
+        }
+        Ok(())
+    }
+
+    /// Returns the user if the password is right. Always runs a hash
+    /// verification, so response time does not reveal whether a user exists.
+    pub fn verify(&self, username: &str, password: &str) -> anyhow::Result<Option<User>> {
+        let row: Option<(String, String, String)> = self
+            .conn
+            .lock()
+            .query_row(
+                "SELECT password_hash, role, created_at FROM users WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        // Verifying against a dummy hash keeps the timing the same for
+        // unknown users.
+        static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let dummy = DUMMY.get_or_init(|| hash(&random_password()).unwrap_or_default());
+        let stored = row.as_ref().map_or(dummy.as_str(), |r| r.0.as_str());
+        let ok = PasswordHash::new(stored)
+            .map(|h| {
+                Argon2::default()
+                    .verify_password(password.as_bytes(), &h)
+                    .is_ok()
+            })
+            .unwrap_or(false);
+        match row {
+            Some((_, role, created_at)) if ok => Ok(Some(User {
+                username: username.to_string(),
+                role: Role::parse(&role)?,
+                created_at,
+            })),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn list(&self) -> anyhow::Result<Vec<User>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT username, role, created_at FROM users ORDER BY username")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (username, role, created_at) = r?;
+            Ok(User {
+                username,
+                role: Role::parse(&role)?,
+                created_at,
+            })
+        })
+        .collect()
+    }
+
+    pub fn set_password(&self, username: &str, password: &str) -> anyhow::Result<()> {
+        validate(username, password)?;
+        let hash = hash(password)?;
+        let n = self.conn.lock().execute(
+            "UPDATE users SET password_hash = ?2 WHERE username = ?1",
+            params![username, hash],
+        )?;
+        if n == 0 {
+            bail!("no user '{username}'");
+        }
+        Ok(())
+    }
+
+    pub fn set_role(&self, username: &str, role: Role) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        self.ensure_admin_remains(&conn, username, Some(role))?;
+        let n = conn.execute(
+            "UPDATE users SET role = ?2 WHERE username = ?1",
+            params![username, role.as_str()],
+        )?;
+        if n == 0 {
+            bail!("no user '{username}'");
+        }
+        Ok(())
+    }
+
+    pub fn delete(&self, username: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        self.ensure_admin_remains(&conn, username, None)?;
+        let n = conn.execute("DELETE FROM users WHERE username = ?1", [username])?;
+        if n == 0 {
+            bail!("no user '{username}'");
+        }
+        Ok(())
+    }
+
+    /// Refuses changes that would leave nobody able to administer the gateway.
+    fn ensure_admin_remains(
+        &self,
+        conn: &Connection,
+        username: &str,
+        new_role: Option<Role>,
+    ) -> anyhow::Result<()> {
+        if new_role == Some(Role::Admin) {
+            return Ok(());
+        }
+        let other_admins: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND username != ?1",
+            [username],
+            |r| r.get(0),
+        )?;
+        let is_admin: bool = conn
+            .query_row(
+                "SELECT role = 'admin' FROM users WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if is_admin && other_admins == 0 {
+            bail!("'{username}' is the last admin");
+        }
+        Ok(())
+    }
+}
+
+/// A random password for the first admin account.
+pub fn random_password() -> String {
+    use argon2::password_hash::rand_core::RngCore;
+    const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut bytes = [0u8; 20];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
+        .iter()
+        .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, UserStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserStore::open(&dir.path().join("gateway.db")).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn create_and_verify() {
+        let (_dir, users) = store();
+        users.create("jens", "correct horse", Role::Admin).unwrap();
+        assert!(users.create("jens", "another pass", Role::Auditor).is_err());
+        assert_eq!(
+            users.verify("jens", "correct horse").unwrap().unwrap().role,
+            Role::Admin
+        );
+        assert!(users.verify("jens", "wrong").unwrap().is_none());
+        assert!(users.verify("nobody", "correct horse").unwrap().is_none());
+        assert!(users.create("x", "short", Role::Auditor).is_err());
+        assert!(users
+            .create("bad name", "long enough", Role::Auditor)
+            .is_err());
+    }
+
+    #[test]
+    fn last_admin_is_protected() {
+        let (_dir, users) = store();
+        users
+            .create("admin", "admin-password", Role::Admin)
+            .unwrap();
+        users
+            .create("op", "operator-password", Role::Operator)
+            .unwrap();
+        assert!(users.delete("admin").is_err());
+        assert!(users.set_role("admin", Role::Auditor).is_err());
+        users.set_role("op", Role::Admin).unwrap();
+        users.delete("admin").unwrap();
+        assert_eq!(users.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn password_change() {
+        let (_dir, users) = store();
+        users.create("a", "first-password", Role::Auditor).unwrap();
+        users.set_password("a", "second-password").unwrap();
+        assert!(users.verify("a", "first-password").unwrap().is_none());
+        assert!(users.verify("a", "second-password").unwrap().is_some());
+    }
+
+    #[test]
+    fn random_passwords_differ() {
+        assert_ne!(random_password(), random_password());
+        assert_eq!(random_password().len(), 20);
+    }
+}
