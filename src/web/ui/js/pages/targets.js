@@ -324,8 +324,9 @@ function targetCard(t, editing) {
       <div class="inline">
         ${when(
           can("operator"),
-          html`<button class="small" data-action="discover-target" data-name="${t.name}">
-            Discover
+          html`<button class="small" data-action="discover-target" data-name="${t.name}"
+            title="Check the target, its endpoints and whether it accepts the gateway now">
+            Check now
           </button>`,
         )}
         ${when(
@@ -457,13 +458,23 @@ export const actions = {
     renderPage();
   },
 
-  /** Discovers a saved target again. */
+  /** "Check now": discovers a saved target again and checks whether it
+   * accepts the gateway, instead of waiting for the next interval. */
   async "discover-target"(el) {
-    state.targets.discovery[el.dataset.name] = await post(
-      `/targets/${encodeURIComponent(el.dataset.name)}/discover`,
-    );
-    toast("Discovery done");
-    renderPage();
+    const name = el.dataset.name;
+    el.disabled = true;
+    try {
+      state.targets.discovery[name] = await post(`/targets/${encodeURIComponent(name)}/discover`);
+    } finally {
+      // Also after a failure: the card shows why.
+      state.status = await get("/status");
+      renderPage();
+    }
+    const t = state.status.targets.find((x) => x.name === name);
+    const trust = t?.status?.gateway_trust?.state;
+    if (trust === "refused") toast("The target refuses the gateway's certificate", "bad");
+    else if (trust === "trusted") toast("Target reachable and accepts the gateway");
+    else toast("Check done");
   },
 
   /** Trusts the target's server certificate, after showing its thumbprint. */

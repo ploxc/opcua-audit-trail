@@ -488,8 +488,8 @@ impl Connection {
                 let hint = if text.contains("BadSecurityChecksFailed")
                     || text.contains("BadCertificateUntrusted")
                 {
-                    // Show it on the target's card now, not at the next
-                    // periodic trust check.
+                    // Show it on the target's card and in the trail now,
+                    // not at the next periodic trust check.
                     target
                         .set_gateway_trust(crate::discovery::GatewayTrust::Refused {
                             detail: text.clone(),
@@ -502,17 +502,6 @@ impl Connection {
                     ""
                 };
                 tracing::warn!(target = %target.config.name, "upstream connect failed: {text}{hint}");
-                // Also in the trail, with the client that tried: the log
-                // alone does not show who is refused.
-                record(
-                    target,
-                    &self.client,
-                    AuditEvent::UpstreamUnavailable {
-                        endpoint_url: target.config.endpoint_url.clone(),
-                        reason: format!("{text}{hint}"),
-                    },
-                )
-                .await;
                 Err(StatusCode::BadServerNotConnected)
             }
         }

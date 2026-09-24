@@ -535,14 +535,19 @@ async fn discover_target(
 ) -> ApiResult<Vec<EndpointInfo>> {
     user.require(Role::Operator)?;
     let url = target_url(&s, &name).await?;
-    let endpoints = discovery::discover(&s.client, &url)
-        .await
-        .map_err(ApiError::upstream)?;
-    // And whether the target accepts the gateway, so the page shows it now.
-    if let Some(relay) = s.targets.relay(&name).await {
+    let result = discovery::discover_raw(&s.client, &url).await;
+    // "Check now": the target's status (availability, endpoints) and whether
+    // it accepts the gateway are updated at once, not at the next interval.
+    let relay = s.targets.relay(&name).await;
+    let endpoints = match &result {
+        Ok(raw) => Ok(raw.iter().map(EndpointInfo::from).collect()),
+        Err(e) => Err(anyhow::anyhow!("{e:#}")),
+    };
+    if let Some(relay) = relay {
+        discovery::apply_discovery(&relay.config, &s.statuses, &s.audit, result).await;
         relay.check_gateway_trust().await;
     }
-    Ok(Json(endpoints))
+    endpoints.map(Json).map_err(ApiError::upstream)
 }
 
 #[derive(Deserialize)]

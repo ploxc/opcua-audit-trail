@@ -93,6 +93,31 @@ function render() {
   </div>`.s;
 }
 
+// A dot next to "Targets" when a target is down or refuses the gateway
+// (red), or does not accept it for another reason (amber).
+function targetsDot() {
+  const targets = state.status?.targets || [];
+  const down = targets.filter(
+    (t) => t.status?.state === "unavailable" || t.status?.gateway_trust?.state === "refused",
+  );
+  const other = targets.filter(
+    (t) =>
+      !down.includes(t) &&
+      ["failed", "target_not_trusted"].includes(t.status?.gateway_trust?.state),
+  );
+  const list = down.length ? down : other;
+  if (!list.length) return "";
+  const title = `Needs attention: ${list.map((t) => t.name).join(", ")}`;
+  return html`<span class="nav-dot ${down.length ? "bad" : "warn"}" title="${title}"
+    aria-label="${title}"></span>`;
+}
+
+// The sidebar is not redrawn with the page: update the dot in place.
+function updateTargetsDot() {
+  const el = document.querySelector(".targets-dot");
+  if (el) el.innerHTML = html`${targetsDot()}`.s;
+}
+
 // The sidebar: brand, navigation with counts, the user and their buttons.
 function sidebar(page) {
   const rejected = state.status?.rejected_certificates || 0;
@@ -103,6 +128,7 @@ function sidebar(page) {
       html`<span class="count" title="Certificates waiting for a decision">${rejected}</span>`,
     )}
     ${when(p.id === "audit", () => html`<span class="alarm-counts">${alarmCounts()}</span>`)}
+    ${when(p.id === "targets", () => html`<span class="targets-dot">${targetsDot()}</span>`)}
   </a>`;
   return html`<aside class="sidebar">
     <div class="brand">${gatewayLogo()}<div>Audit Gateway<small>OPC UA</small></div></div>
@@ -135,6 +161,7 @@ function sidebar(page) {
 function renderPage() {
   const el = document.getElementById("page");
   if (!el) return render();
+  updateTargetsDot();
 
   // Remember the form being typed in, and scroll positions.
   const active = document.activeElement;
@@ -270,8 +297,18 @@ function schedule(pageId) {
 
 setHooks({ render, renderPage, load, schedule });
 
-// The sidebar's warning and error counts stay current on every page.
-setInterval(refreshAlarms, 10000);
+// The sidebar's warning and error counts and the targets dot stay current
+// on every page.
+setInterval(async () => {
+  refreshAlarms();
+  if (!state.user || state.user.must_change_password) return;
+  try {
+    state.status = await get("/status");
+  } catch {
+    return;
+  }
+  updateTargetsDot();
+}, 10000);
 
 // ---------- actions and forms ----------
 

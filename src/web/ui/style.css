@@ -1256,6 +1256,21 @@ tr.dimmed td {
 .alarm-counts .count {
   margin-left: 0;
 }
+.targets-dot {
+  margin-left: auto;
+  display: inline-flex;
+}
+.nav-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.nav-dot.bad {
+  background: var(--bad);
+}
+.nav-dot.warn {
+  background: var(--warn);
+}
 .nav .count.bad {
   background: var(--bad-soft);
   color: var(--bad);
