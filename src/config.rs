@@ -38,8 +38,11 @@ pub struct ExportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuestDbConfig {
-    /// QuestDB HTTP endpoint, e.g. `http://questdb:9000`.
+    /// QuestDB HTTP endpoint, e.g. `http://questdb:9000` or `https://…`.
     pub url: String,
+    /// CA certificates (PEM) to verify an `https` endpoint with, e.g. the
+    /// plant CA. Without it the usual public roots are used.
+    pub ca_file: Option<PathBuf>,
     #[serde(default = "default_questdb_table")]
     pub table: String,
     /// Bearer token (QuestDB Enterprise), or use `username` + `password`.
@@ -63,6 +66,8 @@ fn default_export_interval() -> u64 {
 pub enum SyslogProtocol {
     Udp,
     Tcp,
+    /// Syslog over TLS (RFC 5425).
+    Tls,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +82,8 @@ pub struct SyslogConfig {
     pub facility: u8,
     #[serde(default = "default_export_interval")]
     pub interval_secs: u64,
+    /// CA certificates (PEM) for `protocol = "tls"`; default: public roots.
+    pub ca_file: Option<PathBuf>,
 }
 
 fn default_syslog_protocol() -> SyslogProtocol {
@@ -274,6 +281,16 @@ impl Config {
         if let Some(db) = self.audit.database.as_mut() {
             resolve(db);
         }
+        if let Some(q) = self.export.questdb.as_mut() {
+            if let Some(p) = q.ca_file.as_mut() {
+                resolve(p);
+            }
+        }
+        if let Some(s) = self.export.syslog.as_mut() {
+            if let Some(p) = s.ca_file.as_mut() {
+                resolve(p);
+            }
+        }
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -284,8 +301,15 @@ impl Config {
             bail!("web: tls_certificate is set but tls = false");
         }
         if let Some(q) = &self.export.questdb {
-            if !q.url.starts_with("http://") {
-                bail!("export.questdb.url must start with http:// (for TLS, put a proxy in front)");
+            let Some(rest) = q
+                .url
+                .strip_prefix("http://")
+                .or_else(|| q.url.strip_prefix("https://"))
+            else {
+                bail!("export.questdb.url must start with http:// or https://");
+            };
+            if rest.split('/').next().unwrap_or_default().contains('@') {
+                bail!("export.questdb.url must not contain credentials; use token or username/password");
             }
             if q.token.is_some() && (q.username.is_some() || q.password.is_some()) {
                 bail!("export.questdb: use either token or username/password");

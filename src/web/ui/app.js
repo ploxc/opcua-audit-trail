@@ -184,12 +184,13 @@ const EVENT_LABELS = {
   gateway_stopped: "Gateway stopped", config_changed: "Configuration changed", ui_login: "UI login",
   ui_login_failed: "UI login failed", retention_pruned: "Retention", events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed", subscriptions_transferred: "Subscriptions transferred",
-  connections_refused: "Connections refused",
+  connections_refused: "Connections refused", trail_truncated: "Trail cut off", clock_jumped: "Clock jumped",
+  export_gap: "Export gap",
 };
 const CHANGE_EVENTS = new Set(["write", "call", "history_update", "node_management", "subscriptions_transferred"]);
 const eventBadge = (type) => {
   const kind = CHANGE_EVENTS.has(type) ? "accent"
-    : /failed|rejected|unavailable|lost|changed$/.test(type) && type !== "config_changed" ? "bad"
+    : /failed|rejected|unavailable|lost|changed$|truncated|gap|jumped|refused/.test(type) && type !== "config_changed" ? "bad"
     : type === "change_intent" ? "warn" : "neutral";
   return html`<span class="badge plain ${kind}">${EVENT_LABELS[type] || type}</span>`;
 };
@@ -213,6 +214,9 @@ function eventSummary(e) {
     case "upstream_endpoints_changed": return html`<div>${e.endpoint_url}</div><div class="small muted">before: ${e.before.join("; ")}</div><div class="small">now: ${e.after.join("; ")}</div>`;
     case "subscriptions_transferred": return `subscriptions ${e.subscription_ids.join(", ")}`;
     case "connections_refused": return `${e.count} from ${e.remote_addr}: ${e.reason}`;
+    case "trail_truncated": return `records ${e.found_seq + 1} to ${e.expected_seq} are missing`;
+    case "clock_jumped": return `by ${e.seconds} s`;
+    case "export_gap": return `${e.destination}: ${e.reason}`;
     case "upstream_unavailable": return e.reason;
     case "config_changed": return html`<b>${e.by}</b>: ${e.summary}`;
     case "ui_login": case "ui_login_failed": return e.user;
@@ -347,6 +351,7 @@ function dashboardView() {
     <div class="page-head"><div class="inline">${menuButton}<h1>Dashboard</h1></div>
       <span class="muted small">Gateway ${s.version} · updates every 5 s</span></div>
     ${when(s.exports?.some((e) => e.last_error), html`<div class="alert warn">Audit export is failing; records wait in the local store and are sent once the destination is back.</div>`)}
+    ${s.exports?.filter((e) => e.gap).map((e) => html`<div class="alert bad">Export to ${e.name}: ${e.gap}</div>`)}
     ${when(s.lost_audit_events > 0, html`<div class="alert bad">${s.lost_audit_events} audit events could not be stored. Check the disk of the audit database.</div>`)}
     ${when(s.rejected_certificates > 0 && can("admin"), html`<div class="alert warn">${s.rejected_certificates} certificate(s) are waiting for a decision. <a href="#/certificates">Review</a></div>`)}
     <div class="stats">

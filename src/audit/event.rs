@@ -128,6 +128,27 @@ pub enum AuditEvent {
     EventsLost {
         count: u64,
     },
+    /// At start, the newest records were missing: the trail had reached
+    /// `expected_seq` but ends at `found_seq`. The chain continues after
+    /// `expected_seq`, so `verify` keeps reporting the gap.
+    TrailTruncated {
+        expected_seq: i64,
+        found_seq: i64,
+    },
+    /// An exporter found records missing between what it delivered last and
+    /// what the trail holds now (pruned before export, or the database was
+    /// replaced). Delivery resumes at `next_seq`.
+    ExportGap {
+        destination: String,
+        after_seq: i64,
+        next_seq: i64,
+        reason: String,
+    },
+    /// The wall clock moved differently from the time that really passed
+    /// (by `seconds`, positive = forward). Retention skips that round.
+    ClockJumped {
+        seconds: i64,
+    },
 
     // Upstream server
     UpstreamAvailable {
@@ -249,6 +270,9 @@ impl AuditEvent {
             AuditEvent::UiLoginFailed { .. } => "ui_login_failed",
             AuditEvent::RetentionPruned { .. } => "retention_pruned",
             AuditEvent::EventsLost { .. } => "events_lost",
+            AuditEvent::TrailTruncated { .. } => "trail_truncated",
+            AuditEvent::ClockJumped { .. } => "clock_jumped",
+            AuditEvent::ExportGap { .. } => "export_gap",
             AuditEvent::UpstreamAvailable { .. } => "upstream_available",
             AuditEvent::UpstreamUnavailable { .. } => "upstream_unavailable",
             AuditEvent::UpstreamEndpointsChanged { .. } => "upstream_endpoints_changed",

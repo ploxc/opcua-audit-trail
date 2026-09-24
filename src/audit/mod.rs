@@ -20,10 +20,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{AuditConfig, FailMode};
 pub use event::{AuditEntry, AuditEvent};
-use store::{AuditQuery, AuditStore, StoredRecord, VerifyReport};
+use store::{Anchor, AuditQuery, AuditStore, StoredRecord, VerifyReport};
 
 const QUEUE_CAPACITY: usize = 10_000;
 const MAX_BATCH: usize = 512;
+/// How long fail-open waits for room in a full queue before counting an
+/// event as lost: a burst of writes slows down a little instead of losing
+/// records.
+const QUEUE_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuditError {
@@ -55,11 +59,14 @@ impl AuditHandle {
     pub async fn record(&self, entry: AuditEntry) -> Result<(), AuditError> {
         match self.fail_mode {
             FailMode::Open => {
-                if self
-                    .tx
-                    .try_send(Command::Append(Box::new(entry), None))
-                    .is_err()
-                {
+                let lost = match self.tx.try_send(Command::Append(Box::new(entry), None)) {
+                    Ok(()) => false,
+                    Err(mpsc::error::TrySendError::Full(command)) => {
+                        self.tx.send_timeout(command, QUEUE_WAIT).await.is_err()
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => true,
+                };
+                if lost {
                     self.lost.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(())
@@ -71,14 +78,22 @@ impl AuditHandle {
     /// Records an event and waits for it to be committed, whatever the fail mode.
     /// Returns the record's sequence number.
     pub async fn record_committed(&self, entry: AuditEntry) -> Result<i64, AuditError> {
-        let (ack, done) = oneshot::channel();
-        self.tx
-            .send(Command::Append(Box::new(entry), Some(ack)))
-            .await
-            .map_err(|_| AuditError::WriterStopped)?;
-        done.await
-            .map_err(|_| AuditError::WriterStopped)?
-            .map_err(AuditError::Store)
+        let result = async {
+            let (ack, done) = oneshot::channel();
+            self.tx
+                .send(Command::Append(Box::new(entry), Some(ack)))
+                .await
+                .map_err(|_| AuditError::WriterStopped)?;
+            done.await
+                .map_err(|_| AuditError::WriterStopped)?
+                .map_err(AuditError::Store)
+        }
+        .await;
+        if result.is_err() && self.fail_mode == FailMode::Open {
+            // Callers in fail-open mode carry on; the loss is reported.
+            self.lost.fetch_add(1, Ordering::Relaxed);
+        }
+        result
     }
 
     pub async fn prune_before(&self, cutoff: DateTime<Utc>) -> Result<u64, AuditError> {
@@ -240,25 +255,66 @@ impl AuditReader {
         self.with_conn(store::head_seq).await
     }
 
+    #[cfg(test)]
     pub async fn verify(&self) -> anyhow::Result<VerifyReport> {
         self.with_conn(store::verify).await
     }
+
+    pub async fn verify_against(&self, anchors: Vec<Anchor>) -> anyhow::Result<VerifyReport> {
+        self.with_conn(move |c| store::verify_against(c, &anchors))
+            .await
+    }
 }
 
-/// Periodically applies the retention policy.
+/// Periodically applies the retention policy. It trusts the wall clock only
+/// while it keeps pace with the time that really passed: after a jump that
+/// round is skipped and the jump is recorded.
 pub async fn run_retention(handle: AuditHandle, retention_days: u32) {
     if retention_days == 0 {
         return;
     }
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    let period = std::time::Duration::from_secs(3600);
+    let mut tick = tokio::time::interval(period);
+    let mut last: Option<(std::time::Instant, DateTime<Utc>)> = None;
     loop {
         tick.tick().await;
-        let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
-        match handle.prune_before(cutoff).await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("retention removed {n} audit records"),
-            Err(AuditError::WriterStopped) => return,
-            Err(e) => tracing::error!("audit retention failed: {e}"),
+        let now = (std::time::Instant::now(), Utc::now());
+        if let Some((mono, wall)) = last {
+            let real = chrono::Duration::from_std(now.0 - mono).unwrap_or_default();
+            let jump = (now.1 - wall) - real;
+            if jump.num_seconds().abs() > 300 {
+                tracing::warn!(
+                    "the system clock jumped by {} s; retention skipped",
+                    jump.num_seconds()
+                );
+                let _ = handle
+                    .record(AuditEntry::new(AuditEvent::ClockJumped {
+                        seconds: jump.num_seconds(),
+                    }))
+                    .await;
+                last = Some(now);
+                continue;
+            }
+        }
+        last = Some(now);
+        let cutoff = now.1 - chrono::Duration::days(i64::from(retention_days));
+        loop {
+            match handle.prune_before(cutoff).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    tracing::info!("retention removed {n} audit records");
+                    if n < store::MAX_PRUNE as u64 {
+                        break;
+                    }
+                    // More to go: let other records through in between.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(AuditError::WriterStopped) => return,
+                Err(e) => {
+                    tracing::error!("audit retention failed: {e}");
+                    break;
+                }
+            }
         }
     }
 }

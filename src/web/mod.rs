@@ -663,7 +663,9 @@ fn csv_row(record: &StoredRecord) -> String {
 
 async fn audit_verify(State(s): State<AppState>, user: AuthUser) -> ApiResult<VerifyReport> {
     user.require(Role::Auditor)?;
-    Ok(Json(s.reader.verify().await?))
+    // The records exported last must still be in the trail, unchanged.
+    let anchors = crate::export::anchors_from(&s.config.gateway.data_dir.join("export-state.json"));
+    Ok(Json(s.reader.verify_against(anchors).await?))
 }
 
 async fn list_users(State(s): State<AppState>, user: AuthUser) -> ApiResult<Vec<User>> {
