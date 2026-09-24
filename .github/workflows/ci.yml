@@ -1,8 +1,10 @@
 name: CI
 
+# Manual only (Actions tab -> CI -> Run workflow): the account's Actions
+# minutes are limited. Run `cargo fmt --check`, `cargo clippy --all-targets
+# -- -D warnings` and `cargo test` locally before pushing.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
