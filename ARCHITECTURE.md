@@ -188,9 +188,9 @@ record that names the last deleted sequence number and hash. The remaining
 chain therefore stays verifiable, and the gap is accounted for.
 
 The chain proves integrity *within* the database. Someone with write access to
-the file could rebuild the entire chain. The planned mitigation is to
-periodically publish the chain head outside the device (QuestDB, syslog, or the
-central server).
+the file could rebuild the entire chain. The export (QuestDB, syslog) is the
+answer: every exported record carries its hash, so once records are outside
+the device, a rebuilt local chain no longer matches the copy.
 
 ### Fail mode
 
@@ -256,7 +256,7 @@ back to `config.toml` with the file's comments preserved.
 | 3. Relay, `Sign` / `SignAndEncrypt` | Certificate and signature rewriting, user token re-encryption, trust lists | ✅ done (interop with real PLCs pending) |
 | 4. Old values & display names | Read-before-write, node name cache | ✅ done |
 | 5. Web UI | Login and roles, targets, discovery, certificates, audit viewer, dashboard, browser | ✅ done |
-| 6. Export | QuestDB export, chain-head publishing | next |
+| 6. Export | QuestDB (ILP/HTTP) and syslog (RFC 5424) export with persisted positions; exported hashes anchor the chain | ✅ done |
 | 7. Packaging | Windows service, systemd unit, multi-arch images, releases | |
 
 ## Decision log

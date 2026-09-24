@@ -8,13 +8,14 @@ audit trail of every write, method call and client session. It is a single Rust
 binary that runs standalone (Linux, Windows, macOS, ARM PLCs such as PLCnext) or
 in Docker.
 
-> **Status: milestones 1–5 of 7.** The relay works for security `None`, `Sign`
+> **Status: milestones 1–6 of 7.** The relay works for security `None`, `Sign`
 > and `SignAndEncrypt` (all RSA policies), anonymous and user name logins, and
 > every service (reads, writes, subscriptions, method calls, …). Writes, method
 > calls, history updates, node management, sessions and connections are
 > audited, with old value → new value and the node's display name. The web UI
 > covers status, the audit trail, targets, certificates, an OPC UA browser and
-> users. Next: packaging (Windows service, systemd, releases) and HTTPS.
+> users. Audit records can be exported to QuestDB and syslog. Next: packaging
+> (Windows service, systemd, releases) and HTTPS.
 > See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and roadmap.
 
 ## Try it without a PLC
@@ -82,6 +83,32 @@ docker compose up -d
 
 Data (certificates, users and the audit database) lives in the `gateway-data`
 volume. The initial admin password is in `docker compose logs gateway`.
+
+## Audit export
+
+The audit trail lives in the gateway (SQLite) and can also be copied to other
+systems. Each destination keeps its own position in `data/export-state.json`:
+nothing is skipped while a destination is down, and records are delivered at
+least once.
+
+```toml
+[export.questdb]              # long-term storage and SQL analysis
+url = "http://questdb:9000"   # ILP over HTTP; each batch is acknowledged
+table = "opcua_audit"         # created on first write
+# token = "…"  or  username = "…" / password = "…"
+
+[export.syslog]               # SIEM: Graylog, Splunk, Wazuh, rsyslog, …
+address = "siem.local:514"
+protocol = "tcp"              # RFC 6587 framing; "udp" is fire-and-forget
+facility = 16                 # local0
+```
+
+Every exported record carries its sequence number and hash. Once records are
+outside the gateway, rewriting the local database no longer goes unnoticed:
+compare the hashes. In QuestDB, make retries idempotent with
+`ALTER TABLE opcua_audit DEDUP ENABLE UPSERT KEYS(ts, seq)`.
+
+The dashboard shows each destination's state and how many records are waiting.
 
 ## Web UI
 

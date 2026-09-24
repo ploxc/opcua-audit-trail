@@ -20,7 +20,71 @@ pub struct Config {
     #[serde(default)]
     pub audit: AuditConfig,
     #[serde(default)]
+    pub export: ExportConfig,
+    #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// Copies of the audit trail outside the gateway. Every record carries its
+/// hash, so an external copy also anchors the local chain: rewriting the
+/// local database no longer goes unnoticed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportConfig {
+    pub questdb: Option<QuestDbConfig>,
+    pub syslog: Option<SyslogConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestDbConfig {
+    /// QuestDB HTTP endpoint, e.g. `http://questdb:9000`.
+    pub url: String,
+    #[serde(default = "default_questdb_table")]
+    pub table: String,
+    /// Bearer token (QuestDB Enterprise), or use `username` + `password`.
+    pub token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default = "default_export_interval")]
+    pub interval_secs: u64,
+}
+
+fn default_questdb_table() -> String {
+    "opcua_audit".into()
+}
+
+fn default_export_interval() -> u64 {
+    5
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyslogProtocol {
+    Udp,
+    Tcp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyslogConfig {
+    /// `host:port` of the syslog receiver (SIEM, Graylog, rsyslog, …).
+    pub address: String,
+    #[serde(default = "default_syslog_protocol")]
+    pub protocol: SyslogProtocol,
+    /// Syslog facility number; 16 = local0.
+    #[serde(default = "default_syslog_facility")]
+    pub facility: u8,
+    #[serde(default = "default_export_interval")]
+    pub interval_secs: u64,
+}
+
+fn default_syslog_protocol() -> SyslogProtocol {
+    SyslogProtocol::Udp
+}
+
+fn default_syslog_facility() -> u8 {
+    16
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +225,25 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(q) = &self.export.questdb {
+            if !q.url.starts_with("http://") {
+                bail!("export.questdb.url must start with http:// (for TLS, put a proxy in front)");
+            }
+            if q.token.is_some() && (q.username.is_some() || q.password.is_some()) {
+                bail!("export.questdb: use either token or username/password");
+            }
+            if q.interval_secs == 0 {
+                bail!("export.questdb.interval_secs must be > 0");
+            }
+        }
+        if let Some(s) = &self.export.syslog {
+            if s.facility > 23 {
+                bail!("export.syslog.facility must be 0..=23");
+            }
+            if s.interval_secs == 0 {
+                bail!("export.syslog.interval_secs must be > 0");
+            }
+        }
         let mut names = std::collections::HashSet::new();
         let mut listens = std::collections::HashSet::new();
         for t in &self.targets {
@@ -220,6 +303,16 @@ retention_days = 365
 # "closed": a write is rejected unless its audit record was committed.
 fail_mode = "open"
 record_old_value = true
+
+# Optional copies of the audit trail outside the gateway. Records carry their
+# hash, so an external copy also proves the local trail was not rewritten.
+# [export.questdb]
+# url = "http://questdb:9000"
+# table = "opcua_audit"
+#
+# [export.syslog]
+# address = "siem.local:514"
+# protocol = "tcp"          # or "udp"
 
 # One block per upstream OPC UA server.
 # [[targets]]

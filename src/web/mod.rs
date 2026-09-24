@@ -44,6 +44,7 @@ pub struct AppState {
     pub users: Arc<UserStore>,
     pub sessions: Arc<Sessions>,
     pub browser: Arc<BrowserSessions>,
+    pub exports: crate::export::ExportStatuses,
 }
 
 impl AppState {
@@ -196,6 +197,7 @@ struct StatusResponse {
     record_old_value: bool,
     retention_days: u32,
     rejected_certificates: usize,
+    exports: Vec<crate::export::ExportStatus>,
     targets: Vec<TargetView>,
 }
 
@@ -226,6 +228,8 @@ async fn target_views(s: &AppState) -> Vec<TargetView> {
 
 async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusResponse> {
     user.require(Role::Auditor)?;
+    // Copy out first: the lock must not be held across the awaits below.
+    let exports = s.exports.read().values().cloned().collect();
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
         application_name: s.config.gateway.application_name.clone(),
@@ -240,6 +244,7 @@ async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusRe
         record_old_value: s.config.audit.record_old_value,
         retention_days: s.config.audit.retention_days,
         rejected_certificates: s.pki.rejected().len(),
+        exports,
         targets: target_views(&s).await,
     }))
 }
@@ -601,35 +606,21 @@ fn csv_field(value: &str) -> String {
 }
 
 fn csv_row(record: &StoredRecord) -> String {
-    let entry = &record.entry;
-    let client = entry.client.as_ref();
-    let event = serde_json::to_value(&entry.event).unwrap_or_default();
-    let get = |key: &str| -> String {
-        match event.get(key) {
-            None | Some(serde_json::Value::Null) => String::new(),
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Object(o)) if o.contains_key("value") => o["value"].to_string(),
-            Some(v) => v.to_string(),
-        }
-    };
+    let f = crate::export::fields(record);
     let fields = [
         record.seq.to_string(),
-        entry.ts.to_rfc3339(),
-        entry.target.clone().unwrap_or_default(),
-        entry.event.kind().to_string(),
-        client.map(|c| c.remote_addr.clone()).unwrap_or_default(),
-        client
-            .and_then(|c| c.application_name.clone().or(c.application_uri.clone()))
-            .unwrap_or_default(),
-        client
-            .and_then(|c| c.user.as_ref().map(|u| u.label()))
-            .unwrap_or_default(),
-        entry.event.node_id().unwrap_or_default().to_string(),
-        get("display_name"),
-        get("old_value"),
-        get("new_value"),
-        get("status"),
-        event.to_string(),
+        record.entry.ts.to_rfc3339(),
+        f.target,
+        f.kind.to_string(),
+        f.client_address,
+        f.client_application,
+        f.user,
+        f.node_id,
+        f.display_name,
+        f.old_value,
+        f.new_value,
+        f.status,
+        f.event_json,
         record.hash.clone(),
     ];
     let mut line = fields

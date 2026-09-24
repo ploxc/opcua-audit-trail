@@ -285,6 +285,7 @@ function dashboardView() {
   return html`
     <div class="page-head"><div class="inline"><button class="menu-button" data-action="menu">☰</button><h1>Dashboard</h1></div>
       <span class="muted small">Gateway ${s.version} · updates every 5 s</span></div>
+    ${when(s.exports?.some((e) => e.last_error), html`<div class="alert warn">Audit export is failing; records wait in the local store and are sent once the destination is back.</div>`)}
     ${when(s.lost_audit_events > 0, html`<div class="alert bad">${s.lost_audit_events} audit events could not be stored. Check the disk of the audit database.</div>`)}
     ${when(s.rejected_certificates > 0 && can("admin"), html`<div class="alert warn">${s.rejected_certificates} certificate(s) are waiting for a decision. <a href="#/certificates">Review</a></div>`)}
     <div class="stats">
@@ -295,6 +296,11 @@ function dashboardView() {
     </div>
     ${when(!targets.length, html`<div class="card"><h2>No targets yet</h2><p class="muted">A target is an OPC UA server (usually a PLC) that clients reach through the gateway.</p>${when(can("admin"), html`<a class="button primary" href="#/targets">Add a target</a>`)}</div>`)}
     ${targets.map((t) => targetCard(t))}
+    ${when(s.exports?.length, () => html`<div class="card"><div class="card-head"><h2>Audit export</h2><span class="muted small">copies outside the gateway anchor the hash chain</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Destination</th><th>State</th><th>Exported up to</th><th>Waiting</th><th>Last delivery</th></tr></thead>
+      <tbody>${s.exports.map((e) => html`<tr><td>${e.destination}</td>
+        <td>${e.last_error ? html`<span class="badge bad" title="${e.last_error}">Failing</span><div class="small muted">${e.last_error}</div>` : html`<span class="badge ok">OK</span>`}</td>
+        <td class="num">#${e.exported_seq}</td><td class="num">${e.pending}</td><td class="small">${since(e.last_success) || "—"}</td></tr>`)}</tbody></table></div></div>`)}
     <div class="card">
       <div class="card-head"><h2>Latest changes</h2><a href="#/audit" class="small">Full audit trail</a></div>
       ${auditTable(recent, { compact: true })}

@@ -246,6 +246,37 @@ pub fn query(conn: &Connection, q: &AuditQuery) -> anyhow::Result<Vec<StoredReco
     Ok(out)
 }
 
+/// Records after `after_seq`, oldest first (for exporting).
+pub fn query_after(
+    conn: &Connection,
+    after_seq: i64,
+    limit: u32,
+) -> anyhow::Result<Vec<StoredRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT seq, hash, body FROM audit WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![after_seq, limit], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (seq, hash, body) = row?;
+        let entry = serde_json::from_str(&body)
+            .with_context(|| format!("audit record {seq} has an unreadable body"))?;
+        out.push(StoredRecord { seq, hash, entry });
+    }
+    Ok(out)
+}
+
+/// Sequence number of the newest record (0 when empty).
+pub fn head_seq(conn: &Connection) -> anyhow::Result<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM audit", [], |r| r.get(0))?)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyReport {
     pub records: u64,

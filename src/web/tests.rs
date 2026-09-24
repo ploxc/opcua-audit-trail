@@ -70,6 +70,7 @@ async fn web() -> Web {
         users: Arc::new(users),
         sessions: Default::default(),
         browser: Default::default(),
+        exports: Default::default(),
     };
     Web {
         app: router(state),

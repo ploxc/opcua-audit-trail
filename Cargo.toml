@@ -18,10 +18,14 @@ async-opcua = { version = "0.19", features = ["client"] }
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 hex = "0.4"
+hyper = { version = "1", features = ["client", "http1"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 parking_lot = "0.12"
 rpassword = "7"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -40,7 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-opcua = { version = "0.19", features = ["client", "server"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 
 # Optimise dependencies in dev/test builds: RSA key generation and
 # encryption are unbearably slow unoptimised.

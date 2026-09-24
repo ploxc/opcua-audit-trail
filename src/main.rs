@@ -1,6 +1,7 @@
 mod audit;
 mod config;
 mod discovery;
+mod export;
 mod pki;
 mod relay;
 mod targets;
@@ -237,6 +238,12 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
     ));
     targets.start_all().await;
 
+    let exports = export::start(
+        &config.export,
+        AuditReader::new(&db),
+        &config.gateway.data_dir.join("export-state.json"),
+    )?;
+
     let state = web::AppState {
         config: config.clone(),
         targets: targets.clone(),
@@ -248,6 +255,7 @@ async fn run(path: &Path) -> anyhow::Result<ExitCode> {
         users,
         sessions: Default::default(),
         browser: Default::default(),
+        exports,
     };
     tokio::spawn(state.browser.clone().reap_idle(state.clone()));
     let listener = tokio::net::TcpListener::bind(config.web.listen)

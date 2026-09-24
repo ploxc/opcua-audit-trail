@@ -231,6 +231,15 @@ impl AuditReader {
         self.with_conn(move |c| store::query(c, &q)).await
     }
 
+    pub async fn after(&self, after_seq: i64, limit: u32) -> anyhow::Result<Vec<StoredRecord>> {
+        self.with_conn(move |c| store::query_after(c, after_seq, limit))
+            .await
+    }
+
+    pub async fn head_seq(&self) -> anyhow::Result<i64> {
+        self.with_conn(store::head_seq).await
+    }
+
     pub async fn verify(&self) -> anyhow::Result<VerifyReport> {
         self.with_conn(store::verify).await
     }

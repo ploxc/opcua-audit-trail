@@ -18,6 +18,14 @@ retention_days = 365
 fail_mode = "open"
 record_old_value = true
 
+# Copies of the audit trail outside the gateway (see README "Audit export").
+# [export.questdb]
+# url = "http://questdb:9000"      # with: docker compose --profile questdb up -d
+#
+# [export.syslog]
+# address = "siem.local:514"
+# protocol = "tcp"
+
 # [[targets]]
 # name = "plc1"
 # listen = "0.0.0.0:4841"
