@@ -31,6 +31,36 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the design, and
 [docs/audit](docs/audit/) for the security audit and its independent
 verification.
 
+## Screenshots
+
+The audit trail: every write with who, from which client, old → new value and
+the result.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/audit-trail-dark.png">
+  <img alt="Audit trail" src="docs/screenshots/audit-trail-light.png">
+</picture>
+
+<details>
+<summary>Dashboard, targets and the OPC UA browser</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/dashboard-dark.png">
+  <img alt="Dashboard with connected clients and the latest changes" src="docs/screenshots/dashboard-light.png">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/targets-dark.png">
+  <img alt="A target with its endpoints, logins and certificates" src="docs/screenshots/targets-light.png">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/browser-dark.png">
+  <img alt="The OPC UA browser with attributes and a watched value" src="docs/screenshots/browser-light.png">
+</picture>
+
+</details>
+
 ## What is tested
 
 Tested:
