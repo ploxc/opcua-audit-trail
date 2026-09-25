@@ -424,7 +424,8 @@ mod tests {
     /// needs a label for every kind: both must follow this file.
     #[test]
     fn web_ui_knows_every_kind_and_severity() {
-        let js = include_str!("../web/ui/js/format.js");
+        // Windows checkouts may have CRLF line ends.
+        let js = include_str!("../web/ui/js/format.js").replace('\r', "");
         let set = |name: &str| -> Vec<String> {
             let start = js
                 .find(&format!("export const {name} = new Set(["))
@@ -450,7 +451,7 @@ mod tests {
             assert_eq!(set(name), expected, "{name} in format.js");
         }
         // Every kind the gateway writes has a label (kind() lists them all).
-        let source = include_str!("event.rs");
+        let source = include_str!("event.rs").replace('\r', "");
         let start = source.find("pub fn kind(&self)").unwrap();
         let body = &source[start..];
         let body = &body[..body.find("\n    }\n").unwrap()];
