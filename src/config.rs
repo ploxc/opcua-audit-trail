@@ -26,6 +26,10 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
+    /// What loading had to correct (e.g. a node in two summarise groups for
+    /// the same client). `run` writes the corrected file back and records it.
+    #[serde(skip)]
+    pub load_fixes: Vec<String>,
 }
 
 /// The MCP endpoint for AI assistants. Off unless an admin turns it on; it
@@ -493,6 +497,7 @@ impl Config {
             t.migrate_ignore();
             for message in t.drop_summarise_overlaps() {
                 tracing::warn!("{message}");
+                config.load_fixes.push(message);
             }
         }
         config.apply_env(|name| std::env::var(name).ok())?;
@@ -819,6 +824,34 @@ mod tests {
             ]
         );
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn loading_corrects_overlapping_groups_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "{EXAMPLE_CONFIG}
+                [[targets]]
+                name = \"plc\"
+                listen = \"127.0.0.1:4841\"
+                endpoint_url = \"opc.tcp://127.0.0.1:4840\"
+                [[targets.summarise]]
+                name = \"a\"
+                client = \"hmi\"
+                nodes = [\"ns=3;i=1\"]
+                [[targets.summarise]]
+                name = \"b\"
+                client = \"hmi\"
+                nodes = [\"ns=3;i=1\"]"
+            ),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.load_fixes.len(), 1, "{:?}", config.load_fixes);
+        assert!(config.targets[0].summarise[1].nodes.is_empty());
     }
 
     #[test]

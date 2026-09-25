@@ -427,6 +427,21 @@ async fn run(
             .await;
     }
 
+    // Corrections made while loading are made for real: the file is written
+    // back, and each one is a record, like a change in the web UI.
+    if !config.load_fixes.is_empty() {
+        targets::write_targets(path, &config.targets)
+            .with_context(|| format!("writing the corrected {}", path.display()))?;
+        for summary in &config.load_fixes {
+            let _ = audit
+                .record(AuditEntry::new(AuditEvent::ConfigChanged {
+                    by: "gateway".into(),
+                    summary: summary.clone(),
+                }))
+                .await;
+        }
+    }
+
     let client = Arc::new(discovery::discovery_client(&config)?);
     let statuses = discovery::initial_statuses(&Config::default());
     let targets = Arc::new(targets::TargetManager::new(
