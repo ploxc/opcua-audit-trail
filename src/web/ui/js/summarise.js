@@ -243,16 +243,11 @@ export const actions = {
     const { target, node, name, clientKey: key, clientLabel: label } = el.dataset;
     const title = name || node;
     const client = key ? { remote_addr: key, application_uri: key } : null;
-    // Every group is shown; one that cannot take this write says why, instead
-    // of being left out (which looked like a missing option).
-    const groups = groupsOf(target).map((g) => ({
-      ...g,
-      why: g.nodes.includes(node)
-        ? "Already in this group."
-        : !fitsClient(g, client)
-          ? `Only for ${g.client}: writes from ${label || key || "this client"} would still be recorded one by one.`
-          : "",
-    }));
+    // The groups for this client (or every client); one that has the node
+    // already is shown as such, so it does not look missing.
+    const groups = groupsOf(target)
+      .filter((g) => fitsClient(g, client))
+      .map((g) => ({ ...g, why: g.nodes.includes(node) ? "Already in this group." : "" }));
     const fits = groups.filter((g) => !g.why);
     const option = (value, text, note, checked, disabled = false) => html`<label
       class="${disabled ? "muted" : ""}">
