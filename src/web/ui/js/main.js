@@ -98,12 +98,12 @@ function render() {
 function targetsDot() {
   const targets = state.status?.targets || [];
   const down = targets.filter(
-    (t) => t.status?.state === "unavailable" || t.status?.gateway_trust?.state === "refused",
+    (t) =>
+      t.status?.state === "unavailable" ||
+      ["refused", "target_not_trusted"].includes(t.status?.gateway_trust?.state),
   );
   const other = targets.filter(
-    (t) =>
-      !down.includes(t) &&
-      ["failed", "target_not_trusted"].includes(t.status?.gateway_trust?.state),
+    (t) => !down.includes(t) && t.status?.gateway_trust?.state === "failed",
   );
   const list = down.length ? down : other;
   if (!list.length) return "";
