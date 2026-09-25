@@ -1411,3 +1411,22 @@ async fn mcp_refuses_batches() {
     assert!(records.as_array().unwrap().is_empty());
     assert_eq!(w.mcp(secret, ping).await.0, StatusCode::OK);
 }
+
+/// Audit finding S5: off loopback the UI still only answers to known names.
+#[test]
+fn host_check_on_every_address() {
+    use super::host_allowed;
+    let names = vec!["gateway.local".to_string()];
+    // Loopback listener: loopback names only.
+    assert!(host_allowed("localhost:8080", true, &names));
+    assert!(!host_allowed("gateway.local:8080", true, &names));
+    assert!(!host_allowed("192.168.0.20:8080", true, &names));
+    // Any other listener: also IP addresses and the configured names.
+    assert!(host_allowed("127.0.0.1:8080", false, &names));
+    assert!(host_allowed("192.168.0.20:8443", false, &names));
+    assert!(host_allowed("[fe80::1]:8443", false, &names));
+    assert!(host_allowed("Gateway.Local:8443", false, &names));
+    assert!(host_allowed("gateway.local", false, &names));
+    assert!(!host_allowed("attacker.example:8443", false, &names));
+    assert!(!host_allowed("", false, &names));
+}

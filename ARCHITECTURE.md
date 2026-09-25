@@ -320,7 +320,9 @@ embedded, so the UI needs no internet access.
 - Confirmations use an in-page dialog that explains the consequence.
 
 The web UI binds to `127.0.0.1` by default; on a loopback address it only
-accepts requests whose `Host` is a loopback name (against DNS rebinding). The
+accepts requests whose `Host` is a loopback name (against DNS rebinding).
+On other addresses the `Host` must be an IP address, a loopback name, the
+machine's name, one of `certificate_hostnames` or `[web] allowed_hosts`. The
 compose file only publishes it on the host's loopback. Security headers (CSP,
 `X-Frame-Options`, `nosniff`, no referrer) are sent on every response.
 

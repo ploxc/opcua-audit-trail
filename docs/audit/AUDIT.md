@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S5 | Medium | No Host check when the web UI listens on a non-loopback address (DNS rebinding) |
 | N8 | Medium | Fail-open, the default, drops write records under load |
 | S6 | Low | The forced-change allow-list matches path suffixes (`/api/users/me` passes) |
 | S7 | Low | Two forced password changes at once: the last one wins |
@@ -50,19 +49,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Medium
-
-### S5: No Host check on non-loopback addresses
-
-- **Issue:** the Host check runs only when the UI listens on loopback
-  (`mod.rs` `security_headers`). In the container it listens on `0.0.0.0`,
-  so it never runs, also when compose publishes on `127.0.0.1` only.
-- **Scenario:** with plain HTTP (`OPCUA_GATEWAY_WEB_TLS=false` behind a
-  proxy, or a binary on `0.0.0.0`), a DNS-rebinding page becomes
-  same-origin, sends the CSRF header and, together with W6, logs in as
-  `admin`. With the default self-signed HTTPS the name mismatch blocks it.
-- **Recommendation:** on non-loopback addresses accept only loopback names,
-  IP literals and the names in `certificate_hostnames` (plus a configurable
-  list for a proxy's name).
 
 ### N8: Fail-open, the default, drops write records under load
 

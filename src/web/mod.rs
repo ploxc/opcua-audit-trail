@@ -176,15 +176,37 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Whether a Host header names this machine's loopback interface.
-fn is_loopback_host(host: &str) -> bool {
-    let name = match host.rsplit_once(':') {
+/// The host name of a Host header, without the port.
+fn host_name(host: &str) -> &str {
+    match host.rsplit_once(':') {
         Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) && !name.ends_with(':') => {
             name
         }
         _ => host,
-    };
-    matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+    }
+}
+
+/// Whether a Host header names this machine's loopback interface.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host_name(host), "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// Whether the UI answers to this Host header. On loopback only loopback
+/// names; elsewhere also IP addresses, this machine's names, the gateway's
+/// `certificate_hostnames` and `[web] allowed_hosts`. Any other name could
+/// be a DNS rebinding page that resolves to this address.
+fn host_allowed(host: &str, loopback: bool, names: &[String]) -> bool {
+    if is_loopback_host(host) {
+        return true;
+    }
+    if loopback {
+        return false;
+    }
+    let name = host_name(host).to_ascii_lowercase();
+    let ip = name.trim_start_matches('[').trim_end_matches(']');
+    !name.is_empty()
+        && (ip.parse::<std::net::IpAddr>().is_ok()
+            || names.iter().any(|n| n.eq_ignore_ascii_case(&name)))
 }
 
 async fn security_headers(
@@ -192,19 +214,24 @@ async fn security_headers(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    // A UI on loopback only answers to loopback names: a web page on
-    // another site cannot reach it through a DNS name that resolves to
-    // 127.0.0.1 (DNS rebinding).
-    if s.config.web.listen.ip().is_loopback() {
-        let host = request
-            .headers()
-            .get(header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        if !is_loopback_host(host) {
-            return ApiError(StatusCode::MISDIRECTED_REQUEST, "unknown host name".into())
-                .into_response();
-        }
+    // Only known host names: a web page on another site cannot reach the UI
+    // through a DNS name that resolves to its address (DNS rebinding).
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| request.uri().authority().map(|a| a.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let loopback = s.config.web.listen.ip().is_loopback();
+    let mut names = s.config.web.allowed_hosts.clone();
+    if !loopback {
+        names.extend(s.targets.config().await.gateway.certificate_hostnames);
+        names.extend(opcua::crypto::X509Data::computer_hostnames());
+    }
+    if !host_allowed(&host, loopback, &names) {
+        return ApiError(StatusCode::MISDIRECTED_REQUEST, "unknown host name".into())
+            .into_response();
     }
     let path = request.uri().path();
     let api = path.starts_with("/api/") || path == "/mcp";

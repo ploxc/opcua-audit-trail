@@ -294,9 +294,12 @@ Authorities), or use a certificate from your own CA. It names localhost, the
 machine and the certificate host names (Settings); after changing those,
 regenerate it there and restart. With TLS the session cookie is `Secure` and
 `__Host-` prefixed; HSTS is only sent with a configured certificate (with a
-self-signed one it would stop browsers from letting you accept it). Without TLS, keep the UI on loopback: there it only answers requests for
+self-signed one it would stop browsers from letting you accept it). Without
+TLS, keep the UI on loopback: there it only answers requests for
 `localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
-rebinding.
+rebinding. On other addresses it answers to IP addresses, the machine's
+names and the certificate host names; add a reverse proxy's name with
+`allowed_hosts = ["audit.example.com"]` under `[web]`.
 
 ## Audit export
 

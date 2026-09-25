@@ -138,6 +138,11 @@ pub struct WebConfig {
     pub tls: bool,
     pub tls_certificate: Option<PathBuf>,
     pub tls_private_key: Option<PathBuf>,
+    /// Further host names the UI answers to when it listens on a
+    /// non-loopback address (e.g. a reverse proxy's name). Loopback names, IP
+    /// addresses, this machine's names and `certificate_hostnames` are
+    /// always accepted; any other name is refused (DNS rebinding).
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for WebConfig {
@@ -147,6 +152,7 @@ impl Default for WebConfig {
             tls: false,
             tls_certificate: None,
             tls_private_key: None,
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -460,6 +466,9 @@ data_dir = "data"
 #   tls = true                        # uses the gateway certificate, or:
 #   tls_certificate = "web-cert.pem"  # PEM chain
 #   tls_private_key = "web-key.pem"   # PEM (PKCS#8, PKCS#1 or SEC1)
+# Off loopback the UI only answers to IP addresses, this machine's names and
+# certificate_hostnames; add other names (e.g. a reverse proxy's) here:
+#   allowed_hosts = ["audit.example.com"]
 listen = "127.0.0.1:8080"
 
 [audit]
