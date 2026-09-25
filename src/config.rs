@@ -473,9 +473,10 @@ listen = "127.0.0.1:8080"
 
 [audit]
 retention_days = 365
-# "open": writes keep flowing if the audit store fails (events are counted as lost).
 # "closed": a write is rejected unless its audit record was committed.
-fail_mode = "open"
+# "open": writes keep flowing if the audit store fails or cannot keep up
+# (those records are lost; only their number is recorded).
+fail_mode = "closed"
 record_old_value = true
 # Writes to ignored nodes (see [[targets.ignore]]) are recorded as one
 # summary per node this often.
@@ -534,7 +535,18 @@ mod tests {
     fn example_config_parses() {
         let config = parse(EXAMPLE_CONFIG).unwrap();
         assert!(config.targets.is_empty());
-        assert_eq!(config.audit.fail_mode, FailMode::Open);
+        // Audit finding N8: new configs lose no write records; a config
+        // without the key (an existing one) stays fail-open.
+        assert_eq!(config.audit.fail_mode, FailMode::Closed);
+        assert_eq!(
+            parse("[audit]\nretention_days = 30\n")
+                .unwrap()
+                .audit
+                .fail_mode,
+            FailMode::Open
+        );
+        let docker = include_str!("../docker/config.toml").replace("\r\n", "\n");
+        assert_eq!(parse(&docker).unwrap().audit.fail_mode, FailMode::Closed);
     }
 
     #[test]

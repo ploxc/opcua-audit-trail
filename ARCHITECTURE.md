@@ -241,11 +241,13 @@ records `export_gap` and the dashboard shows it.
 
 ### Fail mode
 
-- `open` (default): forwarding never waits on the audit store. Events that
-  cannot be queued or written are counted and recorded later as `events_lost`.
-  The UI shows the counter.
-- `closed`: a write is only forwarded after its audit record has been committed.
-  If that fails, the client gets `BadInternalError` and the PLC is not touched.
+- `closed` (in new configs: the template and `init`): a write is only
+  forwarded after its audit record has been committed. If that fails, the
+  client gets `BadInternalError` and the PLC is not touched.
+- `open` (a config without `fail_mode`, so existing installs keep their
+  behaviour): forwarding never waits on the audit store. Events that cannot
+  be queued or written are counted and recorded later as `events_lost`. The
+  UI shows the counter.
 
 ### Errors and warnings
 
@@ -453,7 +455,7 @@ dependency out of the binary.
 | Placement | On the PLC (container, other port) or on an edge device; the PLC trusts only the gateway |
 | Upstream login | Passthrough of the client's user identity |
 | Old value | Configurable, on by default |
-| Audit store unavailable | Fail-open with counting/reporting; fail-closed optional |
+| Audit store unavailable | Fail-closed in new configs; fail-open (counting/reporting) when set, or in configs from before |
 | Storage | Embedded SQLite always; QuestDB optional. Standalone binary is first-class, Docker optional |
 | Targets per instance | Several, one listen port each |
 | Integrity | Hash chain + retention |

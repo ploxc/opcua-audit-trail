@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| N8 | Medium | Fail-open, the default, drops write records under load |
 | S6 | Low | The forced-change allow-list matches path suffixes (`/api/users/me` passes) |
 | S7 | Low | Two forced password changes at once: the last one wins |
 | S8 | Low | A forced change accepts the password the admin chose |
@@ -47,15 +46,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S18 | Info | `/mcp` tells unauthenticated callers whether MCP is on |
 | S19 | Info | Export status clamps `pending`, so a stalled export can look healthy |
 | S20 | Info | A failed random generator would give an empty session token |
-
-## Medium
-
-### N8: Fail-open, the default, drops write records under load
-
-- **Issue:** when the audit queue is full, only an `events_lost` count
-  remains (`audit/mod.rs`); a 200 ms wait was added, nothing more.
-- **Recommendation:** make `fail_mode = "closed"` the default for new
-  installs, or persist lost records' essentials and raise an error.
 
 ## Low
 
