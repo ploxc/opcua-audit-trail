@@ -87,7 +87,7 @@ pub mod tests {
             ),
         )
         .unwrap();
-        let server = crate::web::tls::server_config(&config).unwrap();
+        let server = crate::web::tls::server_config(&config).unwrap().0;
         (Arc::new(server), ca_file)
     }
 

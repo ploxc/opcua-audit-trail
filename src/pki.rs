@@ -58,6 +58,27 @@ pub fn cap_rejected(dir: &Path) {
 }
 
 /// Makes the private key readable by the service only.
+/// Fails unless `key` is the private key of `cert` (a signature made with
+/// it verifies with the certificate's public key).
+pub(crate) fn check_key_pair(cert: &X509, key: &PrivateKey) -> anyhow::Result<()> {
+    let policy = SecurityPolicy::Basic256Sha256;
+    let probe = b"opcua-audit-gateway key check";
+    let mut signature = vec![0u8; key.size()];
+    policy
+        .asymmetric_sign(key, probe, &mut signature)
+        .map_err(|e| anyhow!("private key unusable: {e}"))?;
+    let public = cert
+        .public_key()
+        .map_err(|e| anyhow!("certificate has no usable public key: {e}"))?;
+    if policy
+        .asymmetric_verify_signature(&public, probe, &signature)
+        .is_err()
+    {
+        bail!("the private key does not belong to the certificate");
+    }
+    Ok(())
+}
+
 pub(crate) fn protect_private_key(store: &CertificateStore) {
     #[cfg(unix)]
     {
@@ -226,21 +247,7 @@ impl Pki {
             .map_err(|_| anyhow!("the certificate is neither DER nor PEM"))?;
         let key = PrivateKey::from_pem(key_pem)
             .map_err(|_| anyhow!("the private key is not a PEM encoded RSA key"))?;
-        let policy = SecurityPolicy::Basic256Sha256;
-        let probe = b"opcua-audit-gateway key check";
-        let mut signature = vec![0u8; key.size()];
-        policy
-            .asymmetric_sign(&key, probe, &mut signature)
-            .map_err(|e| anyhow!("private key unusable: {e}"))?;
-        let public = cert
-            .public_key()
-            .map_err(|e| anyhow!("certificate has no usable public key: {e}"))?;
-        if policy
-            .asymmetric_verify_signature(&public, probe, &signature)
-            .is_err()
-        {
-            bail!("the private key does not belong to the certificate");
-        }
+        check_key_pair(&cert, &key)?;
         // Clients reject a certificate that is not valid now or names
         // another application.
         cert.is_time_valid(&chrono::Utc::now())

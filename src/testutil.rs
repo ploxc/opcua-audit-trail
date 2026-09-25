@@ -155,3 +155,27 @@ pub async fn start_test_plc(dir: &Path) -> TestPlc {
         method,
     }
 }
+
+/// A new self-signed certificate (DER), for tests that need any certificate.
+pub fn self_signed_der() -> Vec<u8> {
+    let dir = tempfile::tempdir().unwrap();
+    let store = opcua::crypto::CertificateStore::new(dir.path());
+    let (cert, _) = store
+        .create_and_store_application_instance_cert(
+            &opcua::crypto::X509Data {
+                key_size: 2048,
+                common_name: "test".into(),
+                organization: "test".into(),
+                organizational_unit: "test".into(),
+                country: String::new(),
+                state: String::new(),
+                alt_host_names: opcua::crypto::X509Data::alt_host_names(
+                    "urn:test", None, false, false, false,
+                ),
+                certificate_duration_days: 1,
+            },
+            true,
+        )
+        .unwrap();
+    cert.to_der().unwrap()
+}

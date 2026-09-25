@@ -445,7 +445,28 @@ async fn run(
         &config.gateway.data_dir.join("export-state.json"),
     )?;
 
+    // HTTPS setup failing stops the web UI only: the relay keeps auditing.
+    let tls = if config.web.tls {
+        match web::tls::server_config(&config) {
+            Ok(tls) => Some(tls),
+            Err(e) => {
+                tracing::error!(
+                    "web UI not started: HTTPS setup failed: {e:#}; the relay keeps running"
+                );
+                let _ = audit
+                    .record(AuditEntry::new(AuditEvent::ConfigChanged {
+                        by: "gateway".into(),
+                        summary: format!("web UI not started: HTTPS setup failed: {e:#}"),
+                    }))
+                    .await;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let state = web::AppState {
+        web_certificate: tls.as_ref().map(|(_, der)| Arc::new(der.clone())),
         config: config.clone(),
         targets: targets.clone(),
         statuses,
@@ -460,10 +481,10 @@ async fn run(
     };
     tokio::spawn(state.browser.clone().reap_idle(state.clone()));
     let router = web::router(state);
-    if config.web.tls {
-        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
-            web::tls::server_config(&config)?,
-        ));
+    if config.web.tls && tls.is_none() {
+        shutdown.await;
+    } else if let Some((server, _)) = tls {
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
         let listener = std::net::TcpListener::bind(config.web.listen)
             .with_context(|| format!("binding web UI to {}", config.web.listen))?;
         listener.set_nonblocking(true)?;

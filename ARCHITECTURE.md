@@ -310,7 +310,11 @@ embedded, so the UI needs no internet access.
   is allowed. There is no well-known default password.
   UI logins and every change made through the UI are audited. HTTPS with
   rustls (`ring` provider), using the gateway certificate or PEM files; with
-  TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.
+  TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent. A
+  web certificate whose key does not match is replaced at start; if HTTPS
+  still cannot be set up, only the web UI stays off (logged and recorded),
+  the relay keeps running. The certificate download is the one the server
+  presents.
 - **Discovery** of an arbitrary URL is admin-only and audited, so the UI
   cannot be used to probe the plant network.
 - **Settings**: retention, fail mode, old values, the summary interval, export

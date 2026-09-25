@@ -48,6 +48,8 @@ pub struct AppState {
     pub sessions: Arc<Sessions>,
     pub browser: Arc<BrowserSessions>,
     pub exports: Arc<crate::export::Exports>,
+    /// The certificate the web server presents (DER); `None` without HTTPS.
+    pub web_certificate: Option<Arc<Vec<u8>>>,
 }
 
 impl AppState {
@@ -816,11 +818,13 @@ fn certificate_file(der: &[u8], name: &str, pem: bool) -> Response {
 /// and Node (NODE_EXTRA_CA_CERTS) import to trust it.
 async fn web_certificate(s: &AppState, user: &AuthUser, pem: bool) -> Result<Response, ApiError> {
     user.require(Role::Auditor)?;
-    let cert = tls::web_store(&s.config)
-        .read_own_cert()
-        .map_err(|_| ApiError::not_found("the web UI has no certificate of its own (HTTPS off)"))?;
-    let der = cert.to_der().map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(certificate_file(&der, "opcua-audit-gateway-web", pem))
+    // The one the server presents: after Regenerate that is still the old
+    // one until the restart, and with configured PEM files it is theirs.
+    let der = s
+        .web_certificate
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("the web UI does not use HTTPS"))?;
+    Ok(certificate_file(der, "opcua-audit-gateway-web", pem))
 }
 
 async fn web_certificate_pem(
@@ -845,7 +849,10 @@ async fn regenerate_web_certificate(
 ) -> ApiResult<CertificateInfo> {
     user.require(Role::Admin)?;
     let config = s.targets.config().await;
-    let cert = tls::regenerate_web_certificate(&config)?;
+    // RSA key generation takes a while: not on the async runtime.
+    let cert = tokio::task::spawn_blocking(move || tls::regenerate_web_certificate(&config))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
     let info = CertificateInfo::from_x509(&cert);
     s.config_changed(
         &user,

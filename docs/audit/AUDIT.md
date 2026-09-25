@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S10 | Low | Web certificate: the download can differ from the certificate in use; a mismatched key pair stops the whole gateway |
 | S11 | Low | Private keys are world-readable for a moment before `chmod 600` |
 | S12 | Low | An empty `OPCUA_GATEWAY_WEB_TLS` silently turns HTTPS off |
 | S13 | Low | The MCP scope `settings` can shorten retention (deleting history) and switch fail-closed off |
@@ -44,18 +43,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S10: Web certificate download and key pair
-
-After Regenerate the downloads serve the new certificate while the server
-still presents the old one; with `tls_certificate` configured they serve a
-leftover or 404. `ensure_web_certificate` checks that the files exist, not
-that key and certificate match: a crash halfway leaves a pair that makes
-`server_config` fail, and `main.rs` then stops the whole gateway, relay
-included. Regenerate runs RSA key generation on the async runtime.
-**Fix:** download the certificate in use, check the pair and regenerate
-when it does not match, keep the relay running when HTTPS setup fails, use
-`spawn_blocking`.
 
 ### S11: Keys world-readable for a moment
 

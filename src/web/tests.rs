@@ -29,6 +29,11 @@ struct Web {
 }
 
 async fn web() -> Web {
+    web_with(|_| {}).await
+}
+
+/// `web()` with a change to the state before the router is built.
+async fn web_with(change: impl FnOnce(&mut AppState)) -> Web {
     let dir = tempfile::tempdir().unwrap();
     let plc = start_test_plc(dir.path()).await;
     let config_path = dir.path().join("config.toml");
@@ -66,7 +71,7 @@ async fn web() -> Web {
         &config.gateway.data_dir.join("export-state.json"),
     )
     .unwrap();
-    let state = AppState {
+    let mut state = AppState {
         config: Arc::new(config.clone()),
         targets,
         statuses,
@@ -78,7 +83,9 @@ async fn web() -> Web {
         sessions: Default::default(),
         browser: Default::default(),
         exports,
+        web_certificate: None,
     };
+    change(&mut state);
     Web {
         app: router(state),
         plc,
@@ -1507,4 +1514,22 @@ fn forwarded_address_only_from_trusted_proxies() {
         client_address(Some(ip("10.0.0.1")), xff, &[]),
         Some(ip("10.0.0.1"))
     );
+}
+
+/// Audit finding S10: the download is the certificate the server presents.
+#[tokio::test]
+async fn web_certificate_download_is_the_one_in_use() {
+    let w = web().await;
+    let auditor = w.login("auditor").await;
+    let (status, _) = w.get("/api/web-certificate/cert.der", &auditor).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let in_use = crate::testutil::self_signed_der();
+    let expected = in_use.clone();
+    let w = web_with(move |s| s.web_certificate = Some(Arc::new(in_use))).await;
+    let auditor = w.login("auditor").await;
+    let (status, pem) = w.get("/api/web-certificate/cert.pem", &auditor).await;
+    assert_eq!(status, StatusCode::OK);
+    let pem = opcua::crypto::X509::from_pem(pem.as_str().unwrap().as_bytes()).unwrap();
+    assert_eq!(pem.to_der().unwrap(), expected);
 }
