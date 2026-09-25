@@ -28,19 +28,10 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| N23 | Low | Fail-open accounting: the lost counter is in memory only; a dead writer thread is not restarted |
 | S17 | Info | A failed `mcp_query` record does not stop the tool call |
 | S18 | Info | `/mcp` tells unauthenticated callers whether MCP is on |
 | S19 | Info | Export status clamps `pending`, so a stalled export can look healthy |
 | S20 | Info | A failed random generator would give an empty session token |
-
-## Low
-
-### N23: Fail-open accounting gaps
-
-The lost counter lives in memory only, and a writer thread that died is
-not restarted (`audit/mod.rs`). **Fix:** persist the counter, restart the
-thread or stop the gateway.
 
 ## Info
 

@@ -251,7 +251,12 @@ records `export_gap` and the dashboard shows it.
 - `open` (a config without `fail_mode`, so existing installs keep their
   behaviour): forwarding never waits on the audit store. Events that cannot
   be queued or written are counted and recorded later as `events_lost`. The
-  UI shows the counter.
+  UI shows the counter; it is also kept in `<database>.lost` until reported,
+  so a restart does not forget it.
+
+A writer thread that panics is restarted with the store opened again (its
+unfinished batch is refused or counted as lost); more than three failures
+in a minute stop the gateway rather than run without an audit trail.
 
 ### Errors and warnings
 
