@@ -312,10 +312,13 @@ impl Config {
 
     /// Settings the environment overrides, e.g. from docker-compose.yml.
     fn apply_env(&mut self, var: impl Fn(&str) -> Option<String>) -> anyhow::Result<()> {
-        if let Some(v) = var(WEB_TLS_ENV) {
+        // Empty counts as not set: an unset ${VAR} in a compose file must
+        // not silently turn HTTPS off.
+        let value = var(WEB_TLS_ENV).filter(|v| !v.trim().is_empty());
+        if let Some(v) = value {
             self.web.tls = match v.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => true,
-                "0" | "false" | "no" | "off" | "" => false,
+                "0" | "false" | "no" | "off" => false,
                 other => bail!("{WEB_TLS_ENV}: '{other}' is not true or false"),
             };
         }
@@ -530,6 +533,11 @@ mod tests {
         c.web.tls = true;
         c.apply_env(|_| None).unwrap();
         assert!(c.web.tls, "unset keeps the file's value");
+        // Audit finding S12: empty is not "false".
+        c.apply_env(env("")).unwrap();
+        assert!(c.web.tls, "empty keeps the file's value");
+        c.apply_env(env("  ")).unwrap();
+        assert!(c.web.tls);
     }
 
     fn parse(text: &str) -> anyhow::Result<Config> {

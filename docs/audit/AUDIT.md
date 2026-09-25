@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S12 | Low | An empty `OPCUA_GATEWAY_WEB_TLS` silently turns HTTPS off |
 | S13 | Low | The MCP scope `settings` can shorten retention (deleting history) and switch fail-closed off |
 | S14 | Low | A token's change scopes come back when its user is made admin again |
 | S15 | Low | MCP arguments that are not an object skip the unknown-argument check |
@@ -42,11 +41,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S12: An empty environment value turns HTTPS off
-
-`OPCUA_GATEWAY_WEB_TLS=` (or an unset `${VAR}` in compose) means `false`
-(`config.rs` `apply_env`). **Fix:** treat an empty value as not set.
 
 ### S13: `settings` through MCP can delete history
 
