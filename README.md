@@ -242,18 +242,16 @@ Use the `x86_64` archive on an Intel Mac.
 
 The image `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7) is
 published for every release, with the tags `latest`, `X.Y` and `X.Y.Z`. All
-you need is [`docker/compose/docker-compose.yml`](docker/compose/docker-compose.yml)
-(also attached to every release):
+you need is [`docker-compose.yml`](docker-compose.yml) (also attached to
+every release):
 
 ```sh
-curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker/compose/docker-compose.yml
+curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker-compose.yml
 docker compose up -d
 ```
 
 The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
-In a checkout, `docker compose up -d` uses the `docker-compose.yml` there: the
-same image, or a local build when it cannot be pulled (`docker compose build`
-forces one).
+In a checkout, `docker compose build` builds the image from the source instead.
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
 volume. On the first start `/data/config.toml` is created from
