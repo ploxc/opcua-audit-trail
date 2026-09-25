@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S14 | Low | A token's change scopes come back when its user is made admin again |
 | S15 | Low | MCP arguments that are not an object skip the unknown-argument check |
 | S16 | Low | Credentials in a QuestDB URL are recorded unredacted in `mcp_query` |
 | N12 | Low | Browser sessions outlive an untrusted certificate and a password change |
@@ -40,12 +39,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S14: Scopes come back after re-promotion
-
-Change scopes only apply while the token's user is an admin, but they stay
-stored: demoting and later promoting the user brings them back silently.
-**Fix:** clear tokens' scopes when a user stops being admin.
 
 ### S15: Non-object MCP arguments skip the argument check
 

@@ -398,7 +398,8 @@ dependency out of the binary.
 - **Change tools, per scope** (`targets`, `certificates`, `settings`):
   listed and callable only when the token was created with the
   scope (by an admin; stored with the token) and its user is still an
-  admin. They call the web API's handlers
+  admin; demoting the user clears the scopes for good. They call the web
+  API's handlers
   with the token's user, so role checks, validation and `config_changed`
   records are the same; the record's `by` says "via MCP, token <id>". None
   writes to a PLC, and users, MCP settings, tokens and the web server are

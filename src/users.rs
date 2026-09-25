@@ -396,6 +396,17 @@ impl UserStore {
                 params![username, role.as_str()],
             )?;
             changes.push(format!("role {}", role.as_str()));
+            // Change scopes only apply to admins; cleared, so a later
+            // promotion does not silently bring them back.
+            if role < Role::Admin {
+                let n = tx.execute(
+                    "UPDATE api_tokens SET scopes = '' WHERE username = ?1 AND scopes != ''",
+                    [username],
+                )?;
+                if n > 0 {
+                    changes.push(format!("{n} API token(s) now read only"));
+                }
+            }
         }
         if let Some(hash) = hash {
             tx.execute(
@@ -819,6 +830,21 @@ mod tests {
                 .unwrap()
                 .must_change_password
         );
+    }
+
+    #[test]
+    fn demotion_clears_token_scopes() {
+        // Audit finding S14.
+        let (_dir, users) = store();
+        users.create("a", "a-password", Role::Admin).unwrap();
+        users.create("b", "b-password", Role::Admin).unwrap();
+        let token = users
+            .create_token("a", "t", &["targets".to_string()])
+            .unwrap();
+        users.set_role("a", Role::Operator).unwrap();
+        users.set_role("a", Role::Admin).unwrap();
+        let (_, scopes) = users.verify_token(&token.secret).unwrap().unwrap();
+        assert!(scopes.is_empty(), "{scopes:?}");
     }
 
     #[test]
