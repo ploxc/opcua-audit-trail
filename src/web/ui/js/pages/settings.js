@@ -263,7 +263,8 @@ function mcpCard(m, off, save) {
       </label>
       <p class="help">
         Lets an AI assistant such as Claude read the audit trail and the gateway status with an
-        API token (Account page). Every question is recorded in the trail. Off: the endpoint
+        <a href="#/account">API token</a>, which each user creates on their Account page. Every
+        question is recorded in the trail. Off: the endpoint
         answers nothing and tokens stop working.
       </p>
     </div>
