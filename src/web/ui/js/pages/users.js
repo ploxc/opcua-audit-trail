@@ -124,9 +124,11 @@ function tokensCard() {
                     <td>${t.username}</td>
                     <td>${t.name} <span class="muted mono">${t.id}</span></td>
                     <td class="small">
-                      ${t.scopes.length
-                        ? t.scopes.map((x) => SCOPE_LABELS[x]?.[0] || x).join(", ")
-                        : html`<span class="muted">read only</span>`}
+                      ${
+                        t.scopes.length
+                          ? t.scopes.map((x) => SCOPE_LABELS[x]?.[0] || x).join(", ")
+                          : html`<span class="muted">read only</span>`
+                      }
                     </td>
                     <td class="small nowrap">
                       ${t.last_used ? time(t.last_used) : html`<span class="muted">never</span>`}
