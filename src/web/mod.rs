@@ -192,6 +192,10 @@ async fn security_headers(
     if api {
         // Audit records, users and certificates must not stay in caches.
         headers.insert(header::CACHE_CONTROL, "no-store".parse().expect("valid"));
+    } else if !headers.contains_key(header::CACHE_CONTROL) {
+        // The UI is embedded in the binary: after an upgrade the browser
+        // must check again instead of running the old scripts.
+        headers.insert(header::CACHE_CONTROL, "no-cache".parse().expect("valid"));
     }
     if s.config.web.tls {
         headers.insert(
