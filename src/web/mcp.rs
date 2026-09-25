@@ -41,7 +41,7 @@ configuration, tools for that are listed too (targets, certificates, \
 settings): explain what you will change and get the user's confirmation first. \
 Nothing here writes values to a PLC.";
 
-/// POST /mcp: one JSON-RPC message (or a batch).
+/// POST /mcp: one JSON-RPC message.
 pub async fn post(
     State(s): State<AppState>,
     ClientAddr(address): ClientAddr,
@@ -97,24 +97,21 @@ pub async fn post(
             .and_then(|v| v.to_str().ok())
             .map(|v| clip(v, 128)),
     };
-    let answers = match message {
-        Value::Array(batch) => {
-            let mut out = Vec::new();
-            for m in batch {
-                out.extend(handle(&s, &ctx, m).await);
-            }
-            if out.is_empty() {
-                return StatusCode::ACCEPTED.into_response();
-            }
-            Value::Array(out)
-        }
-        m => match handle(&s, &ctx, m).await {
-            Some(answer) => answer,
-            // Notifications and responses get no answer.
-            None => return StatusCode::ACCEPTED.into_response(),
-        },
-    };
-    Json(answers).into_response()
+    // No batches (protocol 2025-06-18 has none): one request could
+    // otherwise run thousands of tool calls, an empty one included.
+    if message.is_array() {
+        return Json(error(
+            Value::Null,
+            -32600,
+            "invalid request: batches are not supported",
+        ))
+        .into_response();
+    }
+    match handle(&s, &ctx, message).await {
+        Some(answer) => Json(answer).into_response(),
+        // Notifications and responses get no answer.
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 /// Whether MCP may answer: over HTTPS always, over plain HTTP only when the

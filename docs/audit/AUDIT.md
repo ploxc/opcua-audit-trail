@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S4 | Medium | MCP accepts unbounded JSON-RPC batches |
 | S5 | Medium | No Host check when the web UI listens on a non-loopback address (DNS rebinding) |
 | N8 | Medium | Fail-open, the default, drops write records under load |
 | S6 | Low | The forced-change allow-list matches path suffixes (`/api/users/me` passes) |
@@ -51,16 +50,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Medium
-
-### S4: MCP accepts unbounded JSON-RPC batches
-
-- **Issue:** `mcp.rs` `post` runs every element of an array, one after the
-  other, limited only by the 2 MB body limit.
-- **Scenario:** one request with ~30 000 `verify_audit_trail` calls: 30 000
-  full hash-chain scans and 30 000 `mcp_query` records. With
-  `discover_endpoints`, as many outbound connections.
-- **Recommendation:** refuse batches (protocol 2025-06-18 has none) or cap
-  them at ~10. An empty batch should be an Invalid Request error, not 202.
 
 ### S5: No Host check on non-loopback addresses
 

@@ -1390,3 +1390,24 @@ async fn export_credentials_stay_with_their_server() {
     assert!(send(put("http://localhost:9000", Some("pw2"))).await);
     assert!(!send(put("http://localhost:9001", None)).await);
 }
+
+/// Audit finding S4: JSON-RPC batches are refused, an empty one included.
+#[tokio::test]
+async fn mcp_refuses_batches() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let admin = w.login("admin").await;
+    let (_, token) = w
+        .post("/api/me/tokens", &admin, json!({ "name": "t" }))
+        .await;
+    let secret = token["secret"].as_str().unwrap();
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    for batch in [json!([]), json!([ping.clone(), ping.clone()])] {
+        let (status, answer) = w.mcp(secret, batch).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["error"]["code"], -32600, "{answer}");
+    }
+    let (_, records) = w.get("/api/audit?kind=mcp_query", &admin).await;
+    assert!(records.as_array().unwrap().is_empty());
+    assert_eq!(w.mcp(secret, ping).await.0, StatusCode::OK);
+}

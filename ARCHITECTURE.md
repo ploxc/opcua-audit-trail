@@ -363,10 +363,11 @@ templates left as written).
 
 `src/web/mcp.rs` serves the Model Context Protocol on `POST /mcp`, on the web
 UI's listener, for AI assistants. It is a hand-written JSON-RPC handler for
-the Streamable HTTP transport in its simplest form: no sessions and no
-server-sent events, one JSON answer per request (`initialize`, `ping`,
-`tools/list`, `tools/call`; notifications get `202`). That is all the tools
-need, and it keeps an SDK dependency out of the binary.
+the Streamable HTTP transport in its simplest form: no sessions, no
+server-sent events and no batches (an array is an Invalid Request), one JSON
+answer per request (`initialize`, `ping`, `tools/list`, `tools/call`;
+notifications get `202`). That is all the tools need, and it keeps an SDK
+dependency out of the binary.
 
 - **Off by default:** `[mcp] enabled`, switched by an admin on the Settings
   page (audited, applied at once). Off, `/mcp` answers `404` and every token
