@@ -19,18 +19,18 @@ services:
     volumes:
       - gateway-data:/data
 
-  # Optional long-term store: `docker compose --profile questdb up -d`, then set
+  # Optional long-term store: uncomment this service and
+  # questdb-data below, run `docker compose up -d`, then set
   # [export.questdb] url = "http://questdb:9000" in /data/config.toml.
   # QuestDB's console is on http://127.0.0.1:9000.
-  questdb:
-    image: questdb/questdb:latest   # pin a version for production
-    profiles: ["questdb"]
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9000:9000"
-    volumes:
-      - questdb-data:/var/lib/questdb
+  # questdb:
+  #   image: questdb/questdb:latest   # pin a version for production
+  #   restart: unless-stopped
+  #   ports:
+  #     - "127.0.0.1:9000:9000"
+  #   volumes:
+  #     - questdb-data:/var/lib/questdb
 
 volumes:
   gateway-data:
-  questdb-data:
+  # questdb-data:
