@@ -336,6 +336,11 @@ impl Exports {
         };
         let mut tasks = self.tasks.lock();
         for (sink, interval) in sinks {
+            // Shown at once, not only when the task has started.
+            let position = state.position_for(sink.name(), &sink.key());
+            self.statuses
+                .write()
+                .insert(sink.name().into(), initial_status(&sink, &position));
             tasks.push(tokio::spawn(run(
                 sink,
                 self.reader.clone(),
@@ -398,6 +403,18 @@ fn gap(position: &Position, records: &[StoredRecord], head: i64) -> Option<(i64,
     }
 }
 
+fn initial_status(sink: &Sink, position: &Position) -> ExportStatus {
+    ExportStatus {
+        name: sink.name().into(),
+        destination: sink.destination(),
+        exported_seq: position.seq,
+        pending: 0,
+        last_success: None,
+        last_error: None,
+        gap: None,
+    }
+}
+
 pub async fn run(
     mut sink: Sink,
     reader: AuditReader,
@@ -409,18 +426,9 @@ pub async fn run(
     let name = sink.name();
     let key = sink.key();
     let mut position = state.position_for(name, &key);
-    statuses.write().insert(
-        name.into(),
-        ExportStatus {
-            name: name.into(),
-            destination: sink.destination(),
-            exported_seq: position.seq,
-            pending: 0,
-            last_success: None,
-            last_error: None,
-            gap: None,
-        },
-    );
+    statuses
+        .write()
+        .insert(name.into(), initial_status(&sink, &position));
     let mut failures: u32 = 0;
     loop {
         let result: anyhow::Result<usize> = async {
