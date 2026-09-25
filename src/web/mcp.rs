@@ -1046,9 +1046,15 @@ async fn find_group(
         .iter()
         .position(|g| g.name == name && g.client == client)
         .ok_or_else(|| {
+            let wanted = crate::config::SummariseGroup {
+                name: name.clone(),
+                client: client.clone(),
+                ..Default::default()
+            };
             anyhow::anyhow!(
-                "target '{target}' has no summarise group with name {name:?} and client \
-                 {client:?} (list_targets shows them)"
+                "target '{target}' has no summarise group {}; list_targets shows them \
+                 (give group_client for a group of one client)",
+                wanted.label()
             )
         })?;
     let check = super::GroupCheck::expecting(name, client);
