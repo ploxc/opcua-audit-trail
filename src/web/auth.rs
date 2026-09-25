@@ -449,14 +449,13 @@ pub async fn change_password(
     let users = s.users.clone();
     let name = user.username.clone();
     let forced = user.must_change_password;
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        if !forced {
-            let current = req.current.unwrap_or_default();
-            if users.verify(&name, &current)?.is_none() {
-                anyhow::bail!("the current password is wrong");
-            }
-        }
-        users.set_password(&name, &req.new)
+    tokio::task::spawn_blocking(move || {
+        let current = if forced {
+            None
+        } else {
+            Some(req.current.unwrap_or_default())
+        };
+        users.change_own_password(&name, current.as_deref(), &req.new)
     })
     .await
     .map_err(|e| anyhow::anyhow!(e))?

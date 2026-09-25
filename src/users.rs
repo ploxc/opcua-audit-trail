@@ -246,6 +246,60 @@ impl UserStore {
         }
     }
 
+    /// A user changes their own password: with the current one, or without
+    /// it while a change is forced (a password someone else chose). The new
+    /// one must differ from the current one. Checked and written under one
+    /// lock, and only if nothing changed meanwhile: of two forced changes at
+    /// once, the second fails instead of silently replacing the first.
+    pub fn change_own_password(
+        &self,
+        username: &str,
+        current: Option<&str>,
+        new: &str,
+    ) -> anyhow::Result<()> {
+        validate(username, new)?;
+        let conn = self.conn.lock();
+        let row: Option<(String, bool, i64)> = conn
+            .query_row(
+                "SELECT password_hash, must_change_password, session_epoch
+                 FROM users WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((stored, forced, epoch)) = row else {
+            bail!("no user '{username}'");
+        };
+        let matches = |password: &str| {
+            PasswordHash::new(&stored)
+                .map(|h| {
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &h)
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        };
+        match current {
+            Some(current) if !matches(current) => bail!("the current password is wrong"),
+            Some(_) => {}
+            None if !forced => bail!("the current password is needed"),
+            None => {}
+        }
+        if matches(new) {
+            bail!("choose a password other than the current one");
+        }
+        let changed = conn.execute(
+            "UPDATE users SET password_hash = ?2, must_change_password = 0,
+                              session_epoch = session_epoch + 1
+             WHERE username = ?1 AND session_epoch = ?3",
+            params![username, hash(new)?, epoch],
+        )?;
+        if changed == 0 {
+            bail!("the password was changed meanwhile; log in again");
+        }
+        Ok(())
+    }
+
     /// The user's current role and session epoch; `None` if the user is gone.
     pub fn session_state(&self, username: &str) -> anyhow::Result<Option<SessionState>> {
         let row: Option<(String, i64, bool)> = self
@@ -723,6 +777,47 @@ mod tests {
         assert_eq!(
             users.tokens("a").unwrap()[0].scopes,
             vec!["targets".to_string()]
+        );
+    }
+
+    #[test]
+    fn own_password_change() {
+        // Audit findings S7 and S8.
+        let (_dir, users) = store();
+        users
+            .create_with("a", "chosen-by-admin", Role::Auditor, true)
+            .unwrap();
+        assert!(
+            users
+                .session_state("a")
+                .unwrap()
+                .unwrap()
+                .must_change_password
+        );
+        // S8: the admin's password cannot simply be kept.
+        let same = users.change_own_password("a", None, "chosen-by-admin");
+        assert!(same.unwrap_err().to_string().contains("other than"));
+        users
+            .change_own_password("a", None, "first-own-pw")
+            .unwrap();
+        // S7: the forced change is used up; a second one needs the current
+        // password, like any other change.
+        assert!(users
+            .change_own_password("a", None, "second-own-pw")
+            .is_err());
+        assert!(users
+            .change_own_password("a", Some("wrong-password"), "second-own-pw")
+            .is_err());
+        users
+            .change_own_password("a", Some("first-own-pw"), "second-own-pw")
+            .unwrap();
+        assert!(users.verify("a", "second-own-pw").unwrap().is_some());
+        assert!(
+            !users
+                .session_state("a")
+                .unwrap()
+                .unwrap()
+                .must_change_password
         );
     }
 

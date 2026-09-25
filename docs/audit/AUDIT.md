@@ -28,8 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S7 | Low | Two forced password changes at once: the last one wins |
-| S8 | Low | A forced change accepts the password the admin chose |
 | S9 | Low | The per-user login block locks out the real admin; behind a proxy all clients share one address |
 | S10 | Low | Web certificate: the download can differ from the certificate in use; a mismatched key pair stops the whole gateway |
 | S11 | Low | Private keys are world-readable for a moment before `chmod 600` |
@@ -47,19 +45,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S7: Two forced changes at once
-
-`forced` is read when the request arrives and the password is set later
-without checking again: two sessions with the forced password both succeed,
-the last one wins and ends the other. **Fix:** update only
-`WHERE must_change_password = 1` and fail when no row changed.
-
-### S8: A forced change accepts the admin-chosen password
-
-After an admin reset the user can enter the same password again and clear
-the flag (the default `admin` is too short, so not there). **Fix:** refuse a
-new password equal to the current one.
 
 ### S9: The per-user login block locks out the real admin
 
