@@ -162,12 +162,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          # A multi-arch image shows its description on the package page
+          # from the index's annotations.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+          # Shown on the package page (at most 512 characters), above the
+          # repository's README, which GitHub shows for a linked package.
+          labels: |
+            org.opencontainers.image.description=Docker image of the OPC UA Audit Gateway: a transparent OPC UA gateway that records who writes what, when. Start it with the docker-compose.yml from the release (ports, volume, HTTPS): docker compose up -d, then docker compose logs gateway for the first admin password. Manual: https://github.com/ploxc/opcua-audit-trail/tree/main/docs/manual
+          annotations: |
+            org.opencontainers.image.description=Docker image of the OPC UA Audit Gateway: a transparent OPC UA gateway that records who writes what, when. Start it with the docker-compose.yml from the release (ports, volume, HTTPS): docker compose up -d, then docker compose logs gateway for the first admin password. Manual: https://github.com/ploxc/opcua-audit-trail/tree/main/docs/manual
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           # No .dockerbuild build record in the artifacts; the job summary stays.
@@ -179,3 +189,4 @@ jobs:
           push: ${{ startsWith(github.ref, 'refs/tags/') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
