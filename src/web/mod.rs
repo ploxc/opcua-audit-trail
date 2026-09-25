@@ -1324,8 +1324,8 @@ async fn create_token(
     Json(req): Json<NewToken>,
 ) -> ApiResult<crate::users::NewApiToken> {
     // Changes need an admin, like in the web UI.
-    if !req.scopes.is_empty() {
-        user.require(Role::Admin)?;
+    for scope in &req.scopes {
+        user.require(crate::config::mcp_scope_role(scope))?;
     }
     let token = s
         .users

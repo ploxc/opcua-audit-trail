@@ -14,7 +14,7 @@ import {
 } from "../components.js";
 import { time } from "../format.js";
 import { can, load, render, renderPage, state } from "../state.js";
-import { SCOPE_LABELS } from "./settings.js";
+import { SCOPE_LABELS, scopeRole } from "./settings.js";
 
 export function loginView() {
   return html`<div class="login">
@@ -145,10 +145,10 @@ function tokensCard() {
             placeholder="e.g. Claude Desktop on my laptop">
         </div>
         ${when(
-          can("admin"),
+          mcp.scopes.some((scope) => can(scopeRole(scope))),
           () => html`<fieldset class="choice">
             <legend>May also change (nothing ticked: read only)</legend>
-            ${mcp.scopes.map(
+            ${mcp.scopes.filter((scope) => can(scopeRole(scope))).map(
               (scope) => html`<label>
                 <input type="checkbox" name="scopes" value="${scope}">
                 <span>${SCOPE_LABELS[scope]?.[0] || scope}</span>

@@ -84,11 +84,12 @@ pub async fn post(
         ..Default::default()
     };
     // What the token was created with, and only for an admin.
-    let changes = if user.role >= Role::Admin {
-        user.scopes.clone()
-    } else {
-        Vec::new()
-    };
+    let changes = user
+        .scopes
+        .iter()
+        .filter(|scope| user.role >= crate::config::mcp_scope_role(scope))
+        .cloned()
+        .collect();
     let ctx = Caller {
         changes,
         user,
@@ -518,6 +519,16 @@ fn tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
             "annotations": {"readOnlyHint": true, "openWorldHint": false},
         }),
+        json!({
+            "name": "list_unacknowledged_alarms",
+            "description": "The errors and warnings nobody acknowledged yet, per severity, \
+                oldest first (at most 200 each), with how many there are in total. Errors: \
+                something is broken (audit incomplete, a target unreachable or without \
+                trust). Warnings: something to look at (refused certificates, logins, \
+                connections). Show these to the user before acknowledging anything.",
+            "annotations": {"readOnlyHint": true, "openWorldHint": false},
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+        }),
     ]
 }
 
@@ -634,6 +645,26 @@ async fn call(s: &AppState, tool: &str, args: &Value) -> anyhow::Result<Value> {
                 "head_hash": report.head_hash,
                 "error": report.error,
             }))
+        }
+        "list_unacknowledged_alarms" => {
+            use crate::audit::event::Severity;
+            let mut out = serde_json::Map::new();
+            for severity in Severity::ALL {
+                let (mark, records) = unacknowledged(s, severity, None).await?;
+                let name = if severity == Severity::Error {
+                    "errors"
+                } else {
+                    "warnings"
+                };
+                out.insert(
+                    name.into(),
+                    json!({
+                        "acknowledged_up_to_seq": mark,
+                        "records": records.into_iter().map(compact).collect::<Vec<_>>(),
+                    }),
+                );
+            }
+            Ok(Value::Object(out))
         }
         other => anyhow::bail!("unknown tool '{other}'"),
     }
@@ -860,7 +891,62 @@ fn change_tools() -> Vec<(&'static str, Value)> {
                 &["certificate_hostnames"],
             ),
         ),
+        (
+            "alarms",
+            json!({
+                "name": "acknowledge_alarms",
+                "description": "Marks the unacknowledged errors or warnings up to and including \
+                    up_to_seq as seen, so the web UI stops counting them. ALWAYS call \
+                    list_unacknowledged_alarms first, show the user every record you are \
+                    about to acknowledge (seq, time, type, target, what happened), and only \
+                    call this after the user confirmed, even if they asked you to acknowledge \
+                    in general. Pass the highest seq you showed as up_to_seq, so records that \
+                    arrived since are not acknowledged unseen. Afterwards, tell the user \
+                    exactly which records were acknowledged (the answer lists them). \
+                    Acknowledging deletes nothing; it is itself recorded in the trail.",
+                "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {"type": "string", "enum": ["error", "warning"]},
+                        "up_to_seq": {"type": "integer", "minimum": 1,
+                            "description": "The highest seq shown to the user."},
+                    },
+                    "required": ["severity", "up_to_seq"],
+                    "additionalProperties": false,
+                },
+            }),
+        ),
     ]
+}
+
+/// The records of a severity after its last acknowledgement, up to and
+/// including `up_to` (all when `None`), oldest first.
+async fn unacknowledged(
+    s: &AppState,
+    severity: crate::audit::event::Severity,
+    up_to: Option<i64>,
+) -> anyhow::Result<(i64, Vec<StoredRecord>)> {
+    s.audit.flush().await;
+    let mark = s
+        .reader
+        .alarms()
+        .await?
+        .into_iter()
+        .find(|a| a.severity == severity)
+        .map_or(0, |a| a.acknowledged_up_to);
+    let mut records = s
+        .reader
+        .query(AuditQuery {
+            kinds: Some(severity.kinds().join(",")),
+            after_seq: Some(mark),
+            before_seq: up_to.map(|u| u + 1),
+            limit: Some(MAX_RECORDS),
+            ..Default::default()
+        })
+        .await?;
+    records.reverse();
+    Ok((mark, records))
 }
 
 /// A web API handler's answer as a tool result.
@@ -980,6 +1066,35 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
         }
         "update_certificate_hostnames" => {
             reply(super::settings::put_gateway(st(), user, Json(arg(&args)?)).await).await
+        }
+        "acknowledge_alarms" => {
+            use crate::audit::event::Severity;
+            let severity: Severity = serde_json::from_value(args["severity"].clone())
+                .map_err(|_| anyhow::anyhow!("severity must be error or warning"))?;
+            let up_to = args["up_to_seq"]
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("up_to_seq is required"))?;
+            let (mark, records) = unacknowledged(s, severity, Some(up_to)).await?;
+            if records.is_empty() {
+                anyhow::bail!(
+                    "nothing to acknowledge: no unacknowledged {severity:?} records after seq \
+                     {mark} up to {up_to} (list_unacknowledged_alarms shows what is open)"
+                );
+            }
+            s.audit
+                .record_committed(AuditEntry::new(AuditEvent::AlarmsAcknowledged {
+                    by: user.actor(),
+                    severity,
+                    up_to_seq: up_to,
+                    count: records.len() as u64,
+                }))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let (_, left) = unacknowledged(s, severity, None).await?;
+            Ok(json!({
+                "acknowledged": records.into_iter().map(compact).collect::<Vec<_>>(),
+                "still_unacknowledged": left.len(),
+            }))
         }
         other => anyhow::bail!("unknown tool '{other}'"),
     }

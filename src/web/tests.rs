@@ -1635,3 +1635,79 @@ async fn mcp_arguments_must_be_an_object() {
         assert_eq!(answer["result"]["isError"], false, "{answer}");
     }
 }
+
+/// Alarms through MCP: listed first, then acknowledged only up to what was
+/// shown; the answer says what was acknowledged. Operators may do it.
+#[tokio::test]
+async fn mcp_acknowledges_only_what_was_shown() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let operator = w.login("operator").await;
+    let (_, token) = w
+        .post(
+            "/api/me/tokens",
+            &operator,
+            json!({ "name": "t", "scopes": ["alarms"] }),
+        )
+        .await;
+    let secret = token["secret"].as_str().unwrap().to_string();
+    let call = |name: &str, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments}})
+    };
+    let failed_login = || async {
+        w.send(
+            Method::POST,
+            "/api/login",
+            None,
+            Some(json!({ "username": "nobody", "password": "wrong-password" })),
+        )
+        .await
+    };
+    failed_login().await;
+
+    let (_, listed) = w
+        .mcp(&secret, call("list_unacknowledged_alarms", json!({})))
+        .await;
+    let warnings = &listed["result"]["structuredContent"]["warnings"]["records"];
+    let shown = warnings.as_array().unwrap().last().unwrap()["seq"]
+        .as_i64()
+        .unwrap();
+
+    // A warning that arrives after the list stays unacknowledged.
+    failed_login().await;
+    let (_, acked) = w
+        .mcp(
+            &secret,
+            call(
+                "acknowledge_alarms",
+                json!({"severity": "warning", "up_to_seq": shown}),
+            ),
+        )
+        .await;
+    let result = &acked["result"]["structuredContent"];
+    assert_eq!(acked["result"]["isError"], false, "{acked}");
+    assert!(result["acknowledged"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["seq"].as_i64().unwrap() <= shown));
+    assert_eq!(result["still_unacknowledged"], 1, "{acked}");
+
+    // Recorded as done via MCP; acknowledging again finds nothing.
+    let admin = w.login("admin").await;
+    let (_, records) = w
+        .get("/api/audit?kind=alarms_acknowledged&limit=1", &admin)
+        .await;
+    assert!(records.to_string().contains("via MCP"), "{records}");
+    let (_, again) = w
+        .mcp(
+            &secret,
+            call(
+                "acknowledge_alarms",
+                json!({"severity": "warning", "up_to_seq": shown}),
+            ),
+        )
+        .await;
+    assert_eq!(again["result"]["isError"], true, "{again}");
+}

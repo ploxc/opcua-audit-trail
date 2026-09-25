@@ -61,14 +61,18 @@ download it on **Settings → Web UI** and set `NODE_EXTRA_CA_CERTS` (see
 Every token can read: `search_audit_trail` (the same filters as the Audit
 trail page), `get_audit_record`, `gateway_status` (targets, connected
 clients, unacknowledged warnings, exports), `most_written_nodes` and
-`verify_audit_trail`.
+`verify_audit_trail` and `list_unacknowledged_alarms`.
 
-What a token may **change** is chosen when an admin creates it, per area:
+What a token may **change** is chosen when it is created, per area:
 
 - **Targets:** add, change and remove targets; discover; summarised nodes.
 - **Certificates:** trust and untrust OPC UA certificates.
 - **Settings:** audit, export and certificate host names. Retention only
   longer, and fail-closed not off: those stay in the web UI.
+- **Alarms** (operators too, as in the web UI): acknowledge errors and
+  warnings. The assistant is told to show the records and ask first, and it
+  only acknowledges up to the last record it showed, so newer ones stay
+  open; afterwards it says what it acknowledged.
 
 A token with nothing ticked only reads, so a leaked read token cannot change
 anything. Give a token only what it needs, and delete it when the work is
@@ -83,7 +87,8 @@ confirming changes.
 
 - Every tool call is an `mcp_query` record, with the token's user, the
   token's id and the arguments (passwords and tokens hidden).
-- Changes are `config_changed` records "by admin (via MCP, token …)".
+- Changes are `config_changed` records "by admin (via MCP, token …)";
+  acknowledgements are `alarms_acknowledged` records, marked the same way.
 - A refused token is an `api_token_rejected` warning.
 
 Tokens are stored as a SHA-256 hash. Delete one on the Account page; admins
