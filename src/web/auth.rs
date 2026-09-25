@@ -268,10 +268,14 @@ impl FromRequestParts<AppState> for AuthUser {
             must_change_password: current.must_change_password,
             via_token: None,
         };
-        let path = parts.uri.path();
-        let allowed = ["/me", "/me/password", "/logout"]
-            .iter()
-            .any(|p| path.ends_with(p));
+        // Exact paths: a suffix would also let /api/users/me through. The
+        // nested router strips /api, so compare the original URI.
+        let path = parts
+            .extensions
+            .get::<axum::extract::OriginalUri>()
+            .map(|u| u.0.path().to_string())
+            .unwrap_or_else(|| parts.uri.path().to_string());
+        let allowed = ["/api/me", "/api/me/password", "/api/logout"].contains(&path.as_str());
         if user.must_change_password && !allowed {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,

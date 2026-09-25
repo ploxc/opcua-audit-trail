@@ -1430,3 +1430,38 @@ fn host_check_on_every_address() {
     assert!(!host_allowed("attacker.example:8443", false, &names));
     assert!(!host_allowed("", false, &names));
 }
+
+/// Audit finding S6: while a password change is forced, only /me,
+/// /me/password and /logout answer, not paths that merely end like them.
+#[tokio::test]
+async fn forced_change_allows_exact_paths_only() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let (status, _) = w
+        .post(
+            "/api/users",
+            &admin,
+            json!({ "username": "me", "password": "me-password", "role": "admin" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let me = w.login("me").await;
+    assert_eq!(w.get("/api/me", &me).await.0, StatusCode::OK);
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/me",
+            Some(&me),
+            Some(json!({ "role": "auditor" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = w
+        .send(Method::DELETE, "/api/users/me", Some(&me), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, users) = w.get("/api/users", &admin).await;
+    assert!(users.to_string().contains("\"username\":\"me\""));
+    let (status, _, _) = w.send(Method::POST, "/api/logout", Some(&me), None).await;
+    assert!(status.is_success(), "{status}");
+}

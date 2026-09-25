@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S6 | Low | The forced-change allow-list matches path suffixes (`/api/users/me` passes) |
 | S7 | Low | Two forced password changes at once: the last one wins |
 | S8 | Low | A forced change accepts the password the admin chose |
 | S9 | Low | The per-user login block locks out the real admin; behind a proxy all clients share one address |
@@ -48,13 +47,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S6: Forced-change allow-list matches suffixes
-
-`auth.rs`: `["/me", "/me/password", "/logout"].iter().any(|p| path.ends_with(p))`
-also lets `PUT/DELETE /api/users/me`, `/api/targets/me` and
-`DELETE /api/certificates/rejected/me` through while a password change is
-forced. **Fix:** compare exact paths.
 
 ### S7: Two forced changes at once
 
