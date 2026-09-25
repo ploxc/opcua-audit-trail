@@ -347,10 +347,76 @@ fn validate_summarise(t: &TargetConfig) -> anyhow::Result<()> {
             bail!("target '{name}': summarise names {extra}, which is not in the group");
         }
     }
+    if let Some((node_id, a, b)) = t.summarise_overlap() {
+        bail!(
+            "target '{name}': {node_id} is already summarised in group {a}, which also \
+             applies to the writes of group {b}"
+        );
+    }
     Ok(())
 }
 
+/// Whether two groups apply to the same writes: the same client, or one of
+/// them for every client.
+fn groups_overlap(a: &SummariseGroup, b: &SummariseGroup) -> bool {
+    a.client.is_none() || b.client.is_none() || a.client == b.client
+}
+
 impl TargetConfig {
+    /// A node in two groups that apply to the same writes: the node and the
+    /// two groups' labels.
+    fn summarise_overlap(&self) -> Option<(String, String, String)> {
+        let groups = &self.summarise;
+        for (i, a) in groups.iter().enumerate() {
+            for b in groups.iter().skip(i + 1).filter(|b| groups_overlap(a, b)) {
+                let in_a: HashSet<_> = a.nodes.iter().filter_map(|n| parse_node(n).ok()).collect();
+                if let Some(n) = b
+                    .nodes
+                    .iter()
+                    .find(|n| parse_node(n).is_ok_and(|p| in_a.contains(&p)))
+                {
+                    return Some((n.clone(), a.label(), b.label()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Removes nodes that an earlier group already summarises for the same
+    /// writes (configs written before that was refused). Says what it removed.
+    pub fn drop_summarise_overlaps(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        let target = self.name.clone();
+        for i in 0..self.summarise.len() {
+            for j in (i + 1)..self.summarise.len() {
+                if !groups_overlap(&self.summarise[i], &self.summarise[j]) {
+                    continue;
+                }
+                let earlier: HashSet<_> = self.summarise[i]
+                    .nodes
+                    .iter()
+                    .filter_map(|n| parse_node(n).ok())
+                    .collect();
+                let first = self.summarise[i].label();
+                let later = &mut self.summarise[j];
+                let before = later.nodes.clone();
+                later
+                    .nodes
+                    .retain(|n| parse_node(n).map_or(true, |p| !earlier.contains(&p)));
+                let kept = later.nodes.clone();
+                later.names.retain(|k, _| kept.contains(k));
+                for n in before.iter().filter(|n| !kept.contains(n)) {
+                    dropped.push(format!(
+                        "target '{target}': {n} removed from summarise group {}, group {first} \
+                         already has it",
+                        later.label()
+                    ));
+                }
+            }
+        }
+        dropped
+    }
+
     /// Moves old `ignore` rules into `summarise` groups: one per client, and
     /// one for the rules without a client.
     pub fn migrate_ignore(&mut self) {
@@ -425,6 +491,9 @@ impl Config {
         config.resolve_paths(&base);
         for t in &mut config.targets {
             t.migrate_ignore();
+            for message in t.drop_summarise_overlaps() {
+                tracing::warn!("{message}");
+            }
         }
         config.apply_env(|name| std::env::var(name).ok())?;
         config.validate()?;
@@ -732,6 +801,8 @@ mod tests {
         let t = &mut config.targets[0];
         t.migrate_ignore();
         assert!(t.ignore.is_empty());
+        // ns=3;i=1 for everyone already covers 10.0.0.5: dropped there.
+        assert_eq!(t.drop_summarise_overlaps().len(), 1);
         assert_eq!(
             t.summarise,
             vec![
@@ -742,12 +813,46 @@ mod tests {
                 },
                 SummariseGroup {
                     client: Some("10.0.0.5".into()),
-                    nodes: vec!["ns=3;i=2".into(), "ns=3;i=1".into()],
+                    nodes: vec!["ns=3;i=2".into()],
                     ..Default::default()
                 },
             ]
         );
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn a_node_is_in_one_group_per_client() {
+        let group = |client: Option<&str>, name: &str| SummariseGroup {
+            name: Some(name.into()),
+            client: client.map(String::from),
+            nodes: vec!["ns=3;s=Life".into()],
+            ..Default::default()
+        };
+        let mut t = TargetConfig {
+            name: "plc".into(),
+            listen: "127.0.0.1:4841".parse().unwrap(),
+            endpoint_url: "opc.tcp://127.0.0.1:4840".into(),
+            discovery_interval_secs: 60,
+            min_security: MinSecurity::None,
+            max_connections: 50,
+            max_connections_per_address: 10,
+            ignore: Vec::new(),
+            summarise: vec![group(Some("hmi"), "a"), group(Some("scada"), "b")],
+        };
+        // Different clients: fine.
+        assert!(validate_summarise(&t).is_ok());
+        // The same client, or a group for every client: refused.
+        t.summarise.push(group(Some("hmi"), "c"));
+        assert!(validate_summarise(&t).is_err());
+        t.summarise.pop();
+        t.summarise.push(group(None, "everyone"));
+        assert!(validate_summarise(&t).is_err());
+        // An old config with overlaps still loads: the later groups lose the node.
+        let dropped = t.drop_summarise_overlaps();
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert!(t.summarise[2].nodes.is_empty());
+        assert!(validate_summarise(&t).is_ok());
     }
 
     #[test]
@@ -771,8 +876,8 @@ mod tests {
                          names = { "ns=3;i=2" = "x" }"#
         )
         .is_err());
-        // The same node for one client and for everyone is fine.
-        parse(&format!(
+        // The same node for one client and for everyone overlaps: refused.
+        assert!(parse(&format!(
             "{TARGET}
             [[targets.summarise]]
             client = \"10.0.0.5\"
@@ -780,7 +885,7 @@ mod tests {
             [[targets.summarise]]
             nodes = [\"ns=3;i=1\"]"
         ))
-        .unwrap();
+        .is_err());
         // The limit counts nodes, not groups.
         let nodes: Vec<String> = (0..=MAX_SUMMARISED_NODES)
             .map(|i| format!("\"ns=3;i={i}\""))

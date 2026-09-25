@@ -598,7 +598,7 @@ async fn summarise_groups_are_admin_only_audited_and_kept_on_edit() {
         .post(
             "/api/targets/plc1/summarise",
             &admin,
-            json!({ "client": "", "nodes": [{ "node_id": "ns=3;i=1" }] }),
+            json!({ "client": "", "nodes": [{ "node_id": "ns=3;i=9" }] }),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -630,6 +630,16 @@ async fn summarise_groups_are_admin_only_audited_and_kept_on_edit() {
         .post("/api/targets/plc1/summarise/5/add", &admin, json!([]))
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // ns=3;i=9 is summarised for every client, so also for 192.168.1.20:
+    // adding it to that client's group is refused.
+    let (status, refused) = w
+        .post(
+            "/api/targets/plc1/summarise/0/add",
+            &admin,
+            json!([{ "node_id": "ns=3;i=9" }]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
 
     let (_, targets) = w.get("/api/targets", &operator).await;
     assert_eq!(
@@ -641,7 +651,7 @@ async fn summarise_groups_are_admin_only_audited_and_kept_on_edit() {
                 "nodes": ["ns=3;s=\"DB1\".\"Life\"", "ns=3;i=1"],
                 "names": { "ns=3;s=\"DB1\".\"Life\"": "Life" },
             },
-            { "nodes": ["ns=3;i=1"] },
+            { "nodes": ["ns=3;i=9"] },
         ])
     );
     assert_eq!(
