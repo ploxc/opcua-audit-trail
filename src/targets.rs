@@ -347,7 +347,10 @@ fn write_settings(path: &std::path::Path, config: &Config) -> anyhow::Result<()>
 
 /// Replaces the `[[targets]]` tables in the config file, keeping everything
 /// else (other sections, comments, formatting) as it was.
-fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Result<()> {
+pub(crate) fn write_targets(
+    path: &std::path::Path,
+    targets: &[TargetConfig],
+) -> anyhow::Result<()> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut doc: toml_edit::DocumentMut = text
