@@ -7,20 +7,27 @@ writes are no longer recorded one by one, but counted, and every hour one
 many failed), from which clients, from when to when, and the last value. A
 write to such a node therefore never goes unnoticed entirely.
 
+A target keeps its summarised nodes in **groups**, e.g. "HMI line 1": a
+name, optionally one client (IP address or application URI; the same nodes
+written by anyone else stay recorded one by one), and the nodes. A write is
+summarised when a group for its client, or one for every client, has the
+node. At most 1000 nodes per target, over all its groups.
+
 ## In the web UI (admin)
 
-- **Audit trail → Most written** lists the nodes written most in the last 24
-  hours. **Summarise…** opens a dialog that explains what happens and asks
-  whose writes to summarise: every client's, or only one client's (the same
-  node written by anyone else stays recorded one by one).
-- The same button is in a write record's details and on a variable in the
-  Browser.
+- Each target shows its groups under **Summarised nodes**, with **Add
+  nodes…** (tick nodes among the most written, for that group's client, or
+  paste node ids one per line), **Rename**, **Remove group** and a remove
+  button per node.
+- **Audit trail → Most written**, a write record's details and a variable in
+  the Browser have **Summarise…**: add the node to a group that fits the
+  client, or start a new group for that client or for every client.
 - Summarised nodes carry a *summarised* label in the audit trail and the
-  Browser, and each target lists them under **Summarised nodes**, with
-  **Record every write again** to undo it.
+  Browser.
 
-Changes apply at once, without disconnecting clients, and are audited
-(`config_changed`).
+Changes apply at once, without disconnecting clients, and each is audited as
+one `config_changed` record, e.g. "target 'plc1': 12 nodes added to 'HMI line
+1' (from 192.168.1.20)".
 
 ## In `config.toml`
 
@@ -31,13 +38,18 @@ ignored_summary_secs = 3600         # one summary per node per hour (default; al
 [[targets]]
 name = "line1"
 # …
-[[targets.ignore]]
-node_id = 'ns=3;s="DB1"."Life"'     # as shown in the audit trail
-name = "Life bit"                   # optional, shown in the web UI
-[[targets.ignore]]
-node_id = "ns=3;i=1234"
-client = "10.0.0.5"                 # only from this address or application URI
+[[targets.summarise]]
+name = "HMI line 1"                 # optional, for people
+client = "192.168.1.20"             # optional: only from this address or application URI
+nodes = [                           # as shown in the audit trail
+  'ns=3;s="DB1"."Life"',
+  "ns=3;i=1234",
+]
 ```
+
+The older form, one `[[targets.ignore]]` table per node, still loads: its
+rules become groups (one per client, one for every client), and the file is
+written with groups the next time the web UI saves it.
 
 ## What is not summarised
 

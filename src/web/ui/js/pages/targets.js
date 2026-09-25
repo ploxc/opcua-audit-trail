@@ -5,8 +5,8 @@
 import { flag, html, when } from "../html.js";
 import { del, get, post, put } from "../api.js";
 import { dialog, fold, formData, menuButton, stateBadge, toast } from "../components.js";
-import { clientUrl, plural } from "../format.js";
-import { summaryEvery } from "../ignore.js";
+import { clientUrl } from "../format.js";
+import { summariseSection } from "../summarise.js";
 import { can, load, renderPage, state } from "../state.js";
 
 // How secure an endpoint is, and the minimum a target asks, on one scale.
@@ -243,66 +243,6 @@ function securitySection(t, endpoints, { editing = false } = {}) {
     : fold(`${t.name}:security`, "Security", summary, body);
 }
 
-// ---------- summarised nodes ----------
-
-// The nodes whose writes a target summarises, in a fold on its card.
-function summarisedNodes(t) {
-  const rules = t.ignore || [];
-  const row = (r) => html`<tr>
-    <td>
-      ${r.name || r.node_id}${when(r.name, html`<div class="muted mono small">${r.node_id}</div>`)}
-    </td>
-    <td>
-      ${
-        r.client
-          ? html`only <span class="mono">${r.client}</span>
-            <div class="muted small">other clients are recorded one by one</div>`
-          : "every client"
-      }
-    </td>
-    <td>
-      ${when(
-        can("admin"),
-        html`<button
-          class="small"
-          data-action="unignore"
-          data-target="${t.name}"
-          data-node="${r.node_id}"
-          data-client="${r.client || ""}"
-        >Record every write again</button>`,
-      )}
-    </td>
-  </tr>`;
-  return fold(
-    `${t.name}:summarised`,
-    "Summarised nodes",
-    rules.length ? plural(rules.length, "node") : "none",
-    () => html`
-      <p class="section-note">
-        Writes to these nodes are not recorded one by one: every ${summaryEvery()} one record per
-        node says how many there were, from whom, and the last value. Add nodes from
-        <a href="#/audit">Audit trail → Most written</a>, a write's details, or the
-        <a href="#/browser">Browser</a>.
-      </p>
-      ${
-        rules.length
-          ? html`<div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Node</th>
-                  <th>Writes from</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>${rules.map(row)}</tbody>
-            </table>
-          </div>`
-          : html`<p class="muted small">None: every write is recorded.</p>`
-      }`,
-  );
-}
-
 // ---------- the page ----------
 
 export function targetsView() {
@@ -367,7 +307,7 @@ function targetCard(t, editing) {
       ${when(t.status?.last_error, html`<dt>Error</dt><dd class="small">${t.status?.last_error}</dd>`)}
     </dl>
     ${securitySection(t, state.targets.discovery[t.name] || t.status?.endpoints)}
-    ${summarisedNodes(t)}
+    ${summariseSection(t)}
   </div>`;
 }
 

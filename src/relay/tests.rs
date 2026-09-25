@@ -797,10 +797,9 @@ async fn ignored_writes_are_summarised() {
         )
         .await
         .unwrap();
-    h.relay.ignore.set(&[crate::config::IgnoreRule {
-        node_id: h.setpoint.to_string(),
-        client: None,
-        name: None,
+    h.relay.summarise.set(&[crate::config::SummariseGroup {
+        nodes: vec![h.setpoint.to_string()],
+        ..Default::default()
     }]);
 
     for i in 0..3 {
@@ -863,11 +862,11 @@ async fn ignored_writes_are_summarised() {
         Some(h.setpoint.to_string().as_str())
     );
 
-    // A rule for another client ignores nothing from this one.
-    h.relay.ignore.set(&[crate::config::IgnoreRule {
-        node_id: h.setpoint.to_string(),
+    // A group for another client summarises nothing from this one.
+    h.relay.summarise.set(&[crate::config::SummariseGroup {
         client: Some("urn:another-hmi".into()),
-        name: None,
+        nodes: vec![h.setpoint.to_string()],
+        ..Default::default()
     }]);
     session
         .write(&[write_value(&h.setpoint, 8.0)])

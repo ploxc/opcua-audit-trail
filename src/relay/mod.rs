@@ -184,7 +184,7 @@ pub struct RelayTarget {
     /// its client and server certificate and closes if one is revoked.
     pub trust_changed: tokio::sync::watch::Sender<u64>,
     /// Nodes whose value writes are summarised; changeable while running.
-    pub ignore: ignore::IgnoreList,
+    pub summarise: ignore::SummariseList,
     /// Ignored writes since the last summary.
     pub ignored: ignore::IgnoredWrites,
 }
@@ -213,7 +213,7 @@ impl RelayTarget {
             request_handles: AtomicU32::new(GATEWAY_REQUEST_HANDLES),
             shutdown: CancellationToken::new(),
             trust_changed: tokio::sync::watch::Sender::new(0),
-            ignore: ignore::IgnoreList::new(&config.ignore),
+            summarise: ignore::SummariseList::new(&config.summarise),
             ignored: ignore::IgnoredWrites::default(),
             config,
         }

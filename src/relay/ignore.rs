@@ -1,17 +1,17 @@
-//! Ignored nodes: value writes that would flood the audit trail (a life bit,
+//! Summarised nodes: value writes that would flood the audit trail (a life bit,
 //! a seconds counter) are not recorded one by one. They are counted per node
 //! and recorded periodically as one `ignored_writes` summary: how many, how
 //! many failed, from which clients, first and last time, and the last value.
 //! A write to an ignored node therefore never goes unnoticed entirely.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use opcua::types::NodeId;
 use parking_lot::{Mutex, RwLock};
 
 use crate::audit::event::{AuditEvent, AuditValue, ClientContext};
-use crate::config::IgnoreRule;
+use crate::config::{parse_node, SummariseGroup};
 
 /// Most clients listed in one summary.
 const MAX_CLIENTS: usize = 20;
@@ -19,52 +19,55 @@ const MAX_CLIENTS: usize = 20;
 /// usual until the next summary.
 const MAX_NODES: usize = 10_000;
 
-struct Rule {
-    node: NodeId,
-    client: Option<String>,
-}
-
-/// The ignore rules of a target. They can change while clients are
-/// connected.
+/// The nodes a target summarises, per client, for a quick lookup per
+/// write. They can change while clients are connected.
 #[derive(Default)]
-pub struct IgnoreList {
-    rules: RwLock<Vec<Rule>>,
+pub struct SummariseList {
+    lookup: RwLock<Lookup>,
 }
 
-impl IgnoreList {
-    pub fn new(rules: &[IgnoreRule]) -> Self {
+#[derive(Default)]
+struct Lookup {
+    /// Nodes summarised whoever writes them.
+    all: HashSet<NodeId>,
+    /// Nodes summarised for one client, by its address or application URI.
+    by_client: HashMap<String, HashSet<NodeId>>,
+}
+
+impl SummariseList {
+    pub fn new(groups: &[SummariseGroup]) -> Self {
         let list = Self::default();
-        list.set(rules);
+        list.set(groups);
         list
     }
 
-    /// Replaces the rules. Rules that are not valid node ids are skipped
-    /// (the configuration is validated before it gets here).
-    pub fn set(&self, rules: &[IgnoreRule]) {
-        *self.rules.write() = rules
-            .iter()
-            .filter_map(|r| {
-                Some(Rule {
-                    node: r.node().ok()?,
-                    client: r.client.as_ref().map(|c| c.trim().to_string()),
-                })
-            })
-            .collect();
+    /// Replaces the groups. Node ids that do not parse are skipped (the
+    /// configuration is validated before it gets here).
+    pub fn set(&self, groups: &[SummariseGroup]) {
+        let mut lookup = Lookup::default();
+        for g in groups {
+            let nodes = match &g.client {
+                Some(c) => lookup.by_client.entry(c.trim().to_string()).or_default(),
+                None => &mut lookup.all,
+            };
+            nodes.extend(g.nodes.iter().filter_map(|n| parse_node(n).ok()));
+        }
+        lookup.by_client.retain(|_, nodes| !nodes.is_empty());
+        *self.lookup.write() = lookup;
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rules.read().is_empty()
+        let lookup = self.lookup.read();
+        lookup.all.is_empty() && lookup.by_client.is_empty()
     }
 
-    /// Whether a value write to `node` by `client` is ignored.
+    /// Whether a value write to `node` by `client` is summarised.
     pub fn matches(&self, node: &NodeId, client: &ClientContext) -> bool {
-        self.rules.read().iter().any(|r| {
-            &r.node == node
-                && r.client.as_deref().is_none_or(|c| {
-                    c == client_ip(&client.remote_addr)
-                        || client.application_uri.as_deref() == Some(c)
-                })
-        })
+        let lookup = self.lookup.read();
+        let for_client = |key: &str| lookup.by_client.get(key).is_some_and(|n| n.contains(node));
+        lookup.all.contains(node)
+            || for_client(client_ip(&client.remote_addr))
+            || client.application_uri.as_deref().is_some_and(for_client)
     }
 }
 
@@ -186,36 +189,47 @@ mod tests {
         }
     }
 
-    fn rule(node_id: &str, client: Option<&str>) -> IgnoreRule {
-        IgnoreRule {
-            node_id: node_id.into(),
+    fn group(client: Option<&str>, nodes: &[&str]) -> SummariseGroup {
+        SummariseGroup {
             client: client.map(Into::into),
-            name: None,
+            nodes: nodes.iter().map(|n| n.to_string()).collect(),
+            ..Default::default()
         }
     }
 
     #[test]
-    fn rules_match_node_and_optionally_client() {
-        let life: NodeId = "ns=3;s=\"DB1\".\"Life\"".parse().unwrap();
+    fn groups_match_node_and_optionally_client() {
+        const LIFE: &str = "ns=3;s=\"DB1\".\"Life\"";
+        let life: NodeId = LIFE.parse().unwrap();
         let other: NodeId = "ns=3;s=\"DB1\".\"Set\"".parse().unwrap();
         let hmi = client("10.0.0.5:50000", "urn:hmi");
         let scada = client("[fe80::1]:50000", "urn:scada");
 
-        let list = IgnoreList::new(&[rule("ns=3;s=\"DB1\".\"Life\"", None)]);
+        let list = SummariseList::new(&[group(None, &[LIFE, "ns=3;i=1"])]);
         assert!(list.matches(&life, &hmi) && list.matches(&life, &scada));
         assert!(!list.matches(&other, &hmi));
 
-        list.set(&[rule("ns=3;s=\"DB1\".\"Life\"", Some("10.0.0.5"))]);
+        list.set(&[group(Some("10.0.0.5"), &[LIFE])]);
         assert!(list.matches(&life, &hmi));
         assert!(!list.matches(&life, &scada), "another client is recorded");
 
-        list.set(&[rule("ns=3;s=\"DB1\".\"Life\"", Some("urn:scada"))]);
+        list.set(&[group(Some(" urn:scada "), &[LIFE])]);
         assert!(list.matches(&life, &scada) && !list.matches(&life, &hmi));
 
-        list.set(&[rule("ns=3;s=\"DB1\".\"Life\"", Some("fe80::1"))]);
+        list.set(&[group(Some("fe80::1"), &[LIFE])]);
         assert!(list.matches(&life, &scada));
 
-        list.set(&[]);
+        // A node in a client's group and in the group for everyone: both apply.
+        list.set(&[
+            group(Some("10.0.0.5"), &[LIFE]),
+            group(None, &[LIFE]),
+            group(Some("10.0.0.5"), &["ns=3;s=\"DB1\".\"Set\""]),
+        ]);
+        assert!(list.matches(&life, &scada) && list.matches(&other, &hmi));
+        assert!(!list.matches(&other, &scada));
+
+        // An empty group summarises nothing.
+        list.set(&[group(Some("10.0.0.5"), &[])]);
         assert!(list.is_empty() && !list.matches(&life, &hmi));
     }
 

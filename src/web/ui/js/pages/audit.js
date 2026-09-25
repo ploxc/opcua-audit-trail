@@ -6,7 +6,7 @@ import { Html, flag, html, when } from "../html.js";
 import { get, post } from "../api.js";
 import { dialog, eventBadge, formData, menuButton, statusBadge } from "../components.js";
 import { EVENT_GROUPS, eventsByLabel, plural, time, userLabel, valueText } from "../format.js";
-import { ignoreControls, summarisedBadge } from "../ignore.js";
+import { summariseControls, summarisedBadge } from "../summarise.js";
 import { alarm, unacked } from "../alarms.js";
 import { can, load, render, renderPage, schedule, state } from "../state.js";
 
@@ -251,7 +251,7 @@ function mostWrittenCard() {
       }
     </td>
     <td>
-      ${ignoreControls(
+      ${summariseControls(
         { target: n.target, node_id: n.node_id, name: n.display_name, client: n.last.client },
         { compact: true },
       )}
@@ -447,7 +447,7 @@ function recordDetail(selected) {
       <dd class="mono small">${selected.hash}</dd>
     </dl>
     ${when(summarisable, () =>
-      ignoreControls({
+      summariseControls({
         target: selected.target,
         node_id: e.node_id,
         name: e.display_name,

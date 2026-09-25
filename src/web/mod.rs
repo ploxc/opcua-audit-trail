@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::audit::event::AuditEvent;
 use crate::audit::store::{AuditQuery, StoredRecord, VerifyReport};
 use crate::audit::{AuditEntry, AuditHandle, AuditReader};
-use crate::config::{Config, IgnoreRule, TargetConfig};
+use crate::config::{parse_node, Config, SummariseGroup, TargetConfig};
 use crate::discovery::{self, EndpointInfo, TargetStatus, TargetStatuses};
 use crate::pki::{CertificateInfo, Pki};
 use crate::relay::ClientInfo;
@@ -114,8 +114,16 @@ pub fn router(state: AppState) -> Router {
         .route("/targets/{name}/clients", get(target_clients))
         .route("/targets/{name}/discover", post(discover_target))
         .route("/targets/{name}/trust-server", post(trust_server))
-        .route("/targets/{name}/ignore", post(ignore_node))
-        .route("/targets/{name}/ignore/remove", post(unignore_node))
+        .route("/targets/{name}/summarise", post(create_group))
+        .route(
+            "/targets/{name}/summarise/{group}",
+            put(rename_group).delete(delete_group),
+        )
+        .route("/targets/{name}/summarise/{group}/add", post(add_nodes))
+        .route(
+            "/targets/{name}/summarise/{group}/remove",
+            post(remove_nodes),
+        )
         .route("/discover", post(discover_url))
         .route("/certificates", get(certificates))
         .route("/certificates/own/cert.der", get(own_certificate_der))
@@ -310,7 +318,7 @@ const SCRIPTS: &[(&str, &str)] = &[
     ("state.js", include_str!("ui/js/state.js")),
     ("format.js", include_str!("ui/js/format.js")),
     ("components.js", include_str!("ui/js/components.js")),
-    ("ignore.js", include_str!("ui/js/ignore.js")),
+    ("summarise.js", include_str!("ui/js/summarise.js")),
     ("alarms.js", include_str!("ui/js/alarms.js")),
     ("pages/account.js", include_str!("ui/js/pages/account.js")),
     ("pages/audit.js", include_str!("ui/js/pages/audit.js")),
@@ -467,9 +475,10 @@ async fn targets(State(s): State<AppState>, user: AuthUser) -> ApiResult<Vec<Tar
 async fn create_target(
     State(s): State<AppState>,
     user: AuthUser,
-    Json(target): Json<TargetConfig>,
+    Json(mut target): Json<TargetConfig>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
+    target.migrate_ignore();
     let summary = format!(
         "added target '{}' ({} -> {})",
         target.name, target.listen, target.endpoint_url
@@ -489,9 +498,10 @@ async fn update_target(
     Json(mut target): Json<TargetConfig>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
-    // Ignored nodes have their own routes; editing a target keeps them.
+    // Summarised nodes have their own routes; editing a target keeps them.
     let old = target_config(&s, &name).await?;
-    target.ignore = old.ignore.clone();
+    target.summarise = old.summarise.clone();
+    target.ignore.clear();
     let summary = target_changes(&old, &target);
     s.targets
         .upsert(target, Some(&name))
@@ -527,80 +537,261 @@ async fn target_config(s: &AppState, name: &str) -> Result<TargetConfig, ApiErro
         .ok_or_else(|| ApiError::not_found(format!("unknown target '{name}'")))
 }
 
-fn describe_rule(rule: &IgnoreRule) -> String {
-    let node = match &rule.name {
-        Some(name) => format!("{name} ({})", rule.node_id),
-        None => rule.node_id.clone(),
-    };
-    match &rule.client {
-        Some(client) => format!("{node} from {client}"),
-        None => node,
+// ---------- summarised nodes ----------
+
+/// A node to summarise, with its display name where known.
+#[derive(Deserialize)]
+pub(crate) struct NodeRef {
+    node_id: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct NewGroup {
+    #[serde(default)]
+    name: Option<String>,
+    /// IP address or application URI; none = every client.
+    #[serde(default)]
+    client: Option<String>,
+    #[serde(default)]
+    nodes: Vec<NodeRef>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct GroupName {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct NodeIds {
+    nodes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GroupChange {
+    /// The group's position in the target's `summarise` list.
+    group: usize,
+    /// How many nodes were added or removed.
+    changed: usize,
+}
+
+fn trimmed(s: Option<String>) -> Option<String> {
+    s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn group_mut<'a>(
+    groups: &'a mut [SummariseGroup],
+    index: usize,
+    target: &str,
+) -> Result<&'a mut SummariseGroup, ApiError> {
+    groups
+        .get_mut(index)
+        .ok_or_else(|| ApiError::not_found(format!("target '{target}' has no group {index}")))
+}
+
+/// Adds nodes to a group, skipping those already in it. Returns how many
+/// were added.
+fn add_to_group(g: &mut SummariseGroup, nodes: Vec<NodeRef>) -> Result<usize, ApiError> {
+    let mut present = g
+        .nodes
+        .iter()
+        .filter_map(|n| parse_node(n).ok())
+        .collect::<std::collections::HashSet<_>>();
+    let mut added = 0;
+    for n in nodes {
+        let node_id = n.node_id.trim().to_string();
+        if node_id.is_empty() {
+            continue;
+        }
+        if !present.insert(parse_node(&node_id).map_err(ApiError::bad_request)?) {
+            continue;
+        }
+        if let Some(name) = trimmed(n.name) {
+            let name = crate::audit::event::clip(&name, crate::audit::event::MAX_NAME);
+            g.names.insert(node_id.clone(), name);
+        }
+        g.nodes.push(node_id);
+        added += 1;
+    }
+    Ok(added)
+}
+
+fn nodes_text(n: usize) -> String {
+    if n == 1 {
+        "1 node".into()
+    } else {
+        format!("{n} nodes")
     }
 }
 
-/// Summarises a node's value writes instead of recording each one.
-async fn ignore_node(
+/// Creates a summarise group, optionally with its first nodes.
+async fn create_group(
     State(s): State<AppState>,
     user: AuthUser,
     Path(name): Path<String>,
-    Json(mut rule): Json<IgnoreRule>,
+    Json(new): Json<NewGroup>,
+) -> ApiResult<GroupChange> {
+    user.require(Role::Admin)?;
+    let (change, label) = s
+        .targets
+        .update_summarise(&name, |groups| {
+            let mut g = SummariseGroup {
+                name: trimmed(new.name),
+                client: trimmed(new.client),
+                ..Default::default()
+            };
+            let added = add_to_group(&mut g, new.nodes)?;
+            let label = g.label();
+            groups.push(g);
+            Ok::<_, ApiError>((
+                GroupChange {
+                    group: groups.len() - 1,
+                    changed: added,
+                },
+                label,
+            ))
+        })
+        .await
+        .map_err(bad_request)?;
+    let mut summary = format!("target '{name}': summarise group {label} created");
+    if change.changed > 0 {
+        summary.push_str(&format!(" with {}", nodes_text(change.changed)));
+    }
+    s.config_changed(&user, summary).await;
+    Ok(Json(change))
+}
+
+async fn rename_group(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((name, index)): Path<(String, usize)>,
+    Json(new): Json<GroupName>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
-    rule.node_id = rule.node_id.trim().to_string();
-    rule.client = rule
-        .client
-        .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty());
-    rule.name = rule
-        .name
-        .map(|n| crate::audit::event::clip(n.trim(), crate::audit::event::MAX_NAME))
-        .filter(|n| !n.is_empty());
-    let mut rules = target_config(&s, &name).await?.ignore;
-    if rules.iter().any(|r| r.same(&rule)) {
-        return Ok(StatusCode::NO_CONTENT);
-    }
-    let summary = format!(
-        "target '{name}': writes to {} are summarised instead of recorded",
-        describe_rule(&rule)
-    );
-    rules.push(rule);
-    s.targets
-        .set_ignore(&name, rules)
+    let (old, new) = s
+        .targets
+        .update_summarise(&name, |groups| {
+            let g = group_mut(groups, index, &name)?;
+            let old = g.label();
+            g.name = trimmed(new.name);
+            Ok::<_, ApiError>((old, g.label()))
+        })
         .await
-        .map_err(ApiError::bad_request)?;
-    s.config_changed(&user, summary).await;
+        .map_err(bad_request)?;
+    if old != new {
+        s.config_changed(
+            &user,
+            format!("target '{name}': summarise group {old} renamed to {new}"),
+        )
+        .await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn unignore_node(
+async fn delete_group(
     State(s): State<AppState>,
     user: AuthUser,
-    Path(name): Path<String>,
-    Json(rule): Json<IgnoreRule>,
+    Path((name, index)): Path<(String, usize)>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
-    let mut rules = target_config(&s, &name).await?.ignore;
-    let before = rules.len();
-    rules.retain(|r| !r.same(&rule));
-    if rules.len() == before {
-        return Err(ApiError::not_found(format!(
-            "{} is not ignored on '{name}'",
-            describe_rule(&rule)
-        )));
-    }
-    s.targets
-        .set_ignore(&name, rules)
+    let g = s
+        .targets
+        .update_summarise(&name, |groups| {
+            group_mut(groups, index, &name)?;
+            Ok::<_, ApiError>(groups.remove(index))
+        })
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(bad_request)?;
     s.config_changed(
         &user,
         format!(
-            "target '{name}': writes to {} are recorded again",
-            describe_rule(&rule)
+            "target '{name}': summarise group {} removed; writes to its {} are recorded again",
+            g.label(),
+            nodes_text(g.nodes.len())
         ),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn add_nodes(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((name, index)): Path<(String, usize)>,
+    Json(nodes): Json<Vec<NodeRef>>,
+) -> ApiResult<GroupChange> {
+    user.require(Role::Admin)?;
+    let (added, label) = s
+        .targets
+        .update_summarise(&name, |groups| {
+            let g = group_mut(groups, index, &name)?;
+            Ok::<_, ApiError>((add_to_group(g, nodes)?, g.label()))
+        })
+        .await
+        .map_err(bad_request)?;
+    if added > 0 {
+        s.config_changed(
+            &user,
+            format!("target '{name}': {} added to {label}", nodes_text(added)),
+        )
+        .await;
+    }
+    Ok(Json(GroupChange {
+        group: index,
+        changed: added,
+    }))
+}
+
+async fn remove_nodes(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((name, index)): Path<(String, usize)>,
+    Json(req): Json<NodeIds>,
+) -> ApiResult<GroupChange> {
+    user.require(Role::Admin)?;
+    let remove: std::collections::HashSet<_> = req
+        .nodes
+        .iter()
+        .filter_map(|n| parse_node(n).ok())
+        .collect();
+    let (removed, label) = s
+        .targets
+        .update_summarise(&name, |groups| {
+            let g = group_mut(groups, index, &name)?;
+            let before = g.nodes.len();
+            g.nodes
+                .retain(|n| parse_node(n).map_or(true, |n| !remove.contains(&n)));
+            let nodes = g.nodes.clone();
+            g.names.retain(|k, _| nodes.contains(k));
+            Ok::<_, ApiError>((before - g.nodes.len(), g.label()))
+        })
+        .await
+        .map_err(bad_request)?;
+    if removed > 0 {
+        s.config_changed(
+            &user,
+            format!(
+                "target '{name}': {} removed from {label}; their writes are recorded again",
+                nodes_text(removed)
+            ),
+        )
+        .await;
+    }
+    Ok(Json(GroupChange {
+        group: index,
+        changed: removed,
+    }))
+}
+
+/// An invalid result (e.g. too many nodes) is the request's fault.
+fn bad_request(e: ApiError) -> ApiError {
+    if e.0 == StatusCode::INTERNAL_SERVER_ERROR {
+        ApiError(StatusCode::BAD_REQUEST, e.1)
+    } else {
+        e
+    }
 }
 
 async fn target_clients(
@@ -1039,6 +1230,11 @@ async fn acknowledge_alarms(
 struct MostWrittenQuery {
     /// Look back this many hours (default 24, at most a year).
     hours: Option<u32>,
+    /// How many nodes (default 10, at most 500).
+    limit: Option<u32>,
+    target: Option<String>,
+    /// Only writes from this client: IP address or application URI.
+    client: Option<String>,
 }
 
 /// The nodes written most often recently: what floods the audit trail.
@@ -1050,7 +1246,12 @@ async fn audit_most_written(
     user.require(Role::Auditor)?;
     let hours = q.hours.unwrap_or(24).clamp(1, 24 * 366);
     let since = chrono::Utc::now() - chrono::Duration::hours(hours.into());
-    Ok(Json(s.reader.most_written(since, 10).await?))
+    let filter = crate::audit::store::WrittenFilter {
+        target: trimmed(q.target),
+        client: trimmed(q.client),
+    };
+    let limit = q.limit.unwrap_or(10).clamp(1, 500);
+    Ok(Json(s.reader.most_written(since, limit, filter).await?))
 }
 
 /// The filtered audit trail as CSV, newest first (up to 100 000 records).

@@ -5,7 +5,7 @@ import { flag, html, when } from "../html.js";
 import { get, post } from "../api.js";
 import { formData, menuButton, statusBadge } from "../components.js";
 import { time, valueText } from "../format.js";
-import { ignoreControls, summarisedBadge } from "../ignore.js";
+import { summariseControls, summarisedBadge } from "../summarise.js";
 import { BROWSER_EMPTY, renderPage, schedule, state } from "../state.js";
 
 const NODE_CLASSES = {
@@ -181,7 +181,7 @@ export function browserView() {
             </div>`,
           )}
           ${when(hasValue, () =>
-            ignoreControls({ target: b.target, node_id: b.selected, name: browserNodeName() }),
+            summariseControls({ target: b.target, node_id: b.selected, name: browserNodeName() }),
           )}
         </div>
         ${watchCard(b)}
