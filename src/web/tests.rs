@@ -491,6 +491,54 @@ async fn user_management() {
     assert_eq!(users.as_array().unwrap().len(), 4);
 }
 
+/// A forced change needs no current password (the user just logged in with
+/// it); any other change does.
+#[tokio::test]
+async fn own_password_change() {
+    let w = web().await;
+    let operator = w.login("operator").await;
+    let (status, _) = w
+        .post(
+            "/api/me/password",
+            &operator,
+            json!({ "new": "new-password" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let admin = w.login("admin").await;
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/operator",
+            Some(&admin),
+            Some(json!({ "password": "reset-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, cookie) = w
+        .send(
+            Method::POST,
+            "/api/login",
+            None,
+            Some(json!({ "username": "operator", "password": "reset-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let operator = cookie.unwrap();
+    let (status, _, cookie) = w
+        .send(
+            Method::POST,
+            "/api/me/password",
+            Some(&operator),
+            Some(json!({ "new": "new-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, me) = w.get("/api/me", &cookie.unwrap()).await;
+    assert_eq!(me["must_change_password"], false);
+}
+
 #[tokio::test]
 async fn ignore_list_is_admin_only_audited_and_kept_on_edit() {
     let w = web().await;

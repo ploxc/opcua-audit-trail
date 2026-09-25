@@ -83,7 +83,7 @@ function render() {
   }
   if (state.user.must_change_password) {
     app.innerHTML = account.mustChangeView().s;
-    app.querySelector("input[name=current]")?.focus();
+    app.querySelector("input[name=new]")?.focus();
     return;
   }
   const page = currentPage();

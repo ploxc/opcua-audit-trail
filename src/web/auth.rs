@@ -410,12 +410,15 @@ pub async fn me(user: AuthUser) -> Json<AuthUser> {
 
 #[derive(Deserialize)]
 pub struct PasswordChange {
-    current: String,
+    /// Not needed for a forced change: the user just logged in with it.
+    #[serde(default)]
+    current: Option<String>,
     new: String,
 }
 
-/// Any user may change their own password. All their other sessions end;
-/// this one continues with a new cookie.
+/// Any user may change their own password, giving the current one unless
+/// the change is forced. All their other sessions end; this one continues
+/// with a new cookie.
 pub async fn change_password(
     State(s): State<AppState>,
     user: AuthUser,
@@ -424,9 +427,13 @@ pub async fn change_password(
 ) -> Result<(CookieJar, StatusCode), ApiError> {
     let users = s.users.clone();
     let name = user.username.clone();
+    let forced = user.must_change_password;
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        if users.verify(&name, &req.current)?.is_none() {
-            anyhow::bail!("the current password is wrong");
+        if !forced {
+            let current = req.current.unwrap_or_default();
+            if users.verify(&name, &current)?.is_none() {
+                anyhow::bail!("the current password is wrong");
+            }
         }
         users.set_password(&name, &req.new)
     })

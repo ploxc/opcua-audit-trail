@@ -38,12 +38,12 @@ export function mustChangeView() {
       </div>
       <p class="section-note">Your password was set by someone else. Choose your own to continue.</p>
       <div class="field">
-        <label for="c">Current password</label>
-        <input id="c" name="current" type="password" required autocomplete="current-password">
-      </div>
-      <div class="field">
         <label for="n">New password (min. 8)</label>
         <input id="n" name="new" type="password" minlength="8" required autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label for="r">Repeat new password</label>
+        <input id="r" name="repeat" type="password" minlength="8" required autocomplete="new-password">
       </div>
       <button class="primary" type="submit">Continue</button>
       <p class="mt"><button type="button" class="link small" data-action="logout">Log out</button></p>
@@ -65,6 +65,10 @@ export function accountView() {
         <div>
           <label>New password (min. 8)</label>
           <input name="new" type="password" minlength="8" required autocomplete="new-password">
+        </div>
+        <div>
+          <label>Repeat new password</label>
+          <input name="repeat" type="password" minlength="8" required autocomplete="new-password">
         </div>
         <div><button class="primary" type="submit">Change</button></div>
       </div>
@@ -88,7 +92,9 @@ export const forms = {
   /** Changes the own password (the forced change and the Account page). */
   async password(form) {
     const wasForced = state.user.must_change_password;
-    await post("/me/password", formData(form));
+    const { repeat, ...body } = formData(form);
+    if (body.new !== repeat) throw new Error("The new passwords do not match");
+    await post("/me/password", body);
     form.reset();
     toast("Password changed");
     state.user = await get("/me");
