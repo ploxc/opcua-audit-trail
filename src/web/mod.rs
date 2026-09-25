@@ -967,6 +967,8 @@ async fn untrust(
     user.require(Role::Admin)?;
     let info = s.pki.untrust(&thumbprint).map_err(ApiError::bad_request)?;
     s.targets.recheck_trust().await;
+    // Open browser sessions were set up with the old trust.
+    s.browser.close_all(&s).await;
     s.config_changed(
         &user,
         format!(
@@ -1238,6 +1240,7 @@ async fn update_user(
     // All or nothing; a reset password must be replaced at the next login.
     let users = s.users.clone();
     let n = name.clone();
+    let new_password = req.password.is_some();
     let changes = tokio::task::spawn_blocking(move || {
         users.update(&n, req.role, req.password.as_deref(), true)
     })
@@ -1245,7 +1248,7 @@ async fn update_user(
     .map_err(|e| anyhow::anyhow!(e))?
     .map_err(ApiError::bad_request)?;
     s.sessions.remove_user(&name);
-    if req.role.is_some_and(|r| r < Role::Operator) {
+    if new_password || req.role.is_some_and(|r| r < Role::Operator) {
         s.browser.close_user(&s, &name).await;
     }
     s.config_changed(

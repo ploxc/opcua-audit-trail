@@ -507,6 +507,7 @@ pub async fn change_password(
     .map_err(|e| anyhow::anyhow!(e))?
     .map_err(ApiError::bad_request)?;
     s.sessions.remove_user(&user.username);
+    s.browser.close_user(&s, &user.username).await;
     let state = s
         .users
         .session_state(&user.username)?

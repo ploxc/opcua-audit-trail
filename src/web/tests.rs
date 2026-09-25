@@ -438,6 +438,37 @@ async fn browser_needs_operator_and_reads_the_address_space() {
 
     let (_, sessions) = w.get("/api/audit?kind=session_created", &admin).await;
     assert_eq!(sessions[0]["client"]["user"]["name"], "ui:operator");
+
+    // Audit finding N12: a password reset ends the user's browser session,
+    // and revoking trust in the PLC's certificate ends every one.
+    let (status, _) = w.post("/api/browser/plc1/connect", &admin, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/operator",
+            Some(&admin),
+            Some(json!({ "password": "reset-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(closed_sessions(&w, &admin).await, 1);
+    let (status, _) = w
+        .post(
+            &format!("/api/certificates/trusted/{thumbprint}/untrust"),
+            &admin,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(closed_sessions(&w, &admin).await, 2);
+    let (status, _) = w.get("/api/browser/plc1/browse", &admin).await;
+    assert!(!status.is_success(), "{status}");
+}
+
+async fn closed_sessions(w: &Web, admin: &str) -> usize {
+    let (_, closed) = w.get("/api/audit?kind=session_closed", admin).await;
+    closed.as_array().unwrap().len()
 }
 
 fn urlencode(s: &str) -> String {
