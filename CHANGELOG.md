@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The container image has a description on its package page: that it is the
+  Docker image, how to start it and where the first password is.
+
 ## [0.1.0] - 2026-09-26
 
 The first release: a working concept, not production ready. See
