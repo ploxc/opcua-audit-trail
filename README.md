@@ -65,9 +65,9 @@ the result.
 
 Tested:
 
-- About 90 automated tests: relay, audit store and hash chain, export, web API
-  and certificates. The end-to-end tests run a real OPC UA client and server
-  through the gateway.
+- About 100 automated tests: relay, audit store and hash chain, export, web API,
+  certificates and the MCP endpoint. The end-to-end tests run a real OPC UA
+  client and server through the gateway.
 - The web UI, in a browser (Chromium), page by page.
 - By hand against [OPC PLC](docker/opc-plc/) (Microsoft's simulator, in
   Docker) with the Prosys OPC UA Browser as client:
@@ -75,14 +75,20 @@ Tested:
   - certificate trust in both directions;
   - user name logins and writes.
 - Against Siemens PLCSIM Advanced.
+- The Docker image and `docker-compose.yml`, against OPC PLC: first start and
+  first login, HTTPS on and off (`OPCUA_GATEWAY_WEB_TLS`), the web UI's own
+  certificate, and a stable identity when the container is recreated.
+- The MCP endpoint from Claude Desktop (through `mcp-remote`, over HTTPS) and
+  Claude chat: reading the trail and changing the configuration.
+- The release workflow as a dry run: every binary and the multi-arch image
+  build; publishing a release has not run yet.
 
 Not tested yet (the code and files are there, but nobody has run them for
 real):
 
-- The Docker image and `docker-compose.yml` of the gateway itself.
 - The Linux service installation (systemd, `packaging/linux`) and the Windows
   service.
-- The release workflow (binaries and multi-arch images).
+- Publishing a release (GitHub release, images on ghcr.io).
 - Export to a real QuestDB (tested against a stand-in only).
 - Real PLCs on a real network, over longer periods and under load.
 
@@ -96,13 +102,12 @@ cargo run -- init                                  # config.toml + certificate
 #   name = "line1"
 #   listen = "0.0.0.0:4841"
 #   endpoint_url = "opc.tcp://127.0.0.1:4840/"
-cargo run -- run                                   # admin password: data/initial-admin-password.txt
+cargo run -- run                                   # first login: admin / admin
 cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/
 ```
 
-Open http://127.0.0.1:8080 and log in as `admin` with the password from
-`data/initial-admin-password.txt`. You choose a new password at the first
-login (the file is removed then). Then watch the writes arrive.
+Open http://127.0.0.1:8080 and log in as `admin` with password `admin`. You
+choose a new password at the first login. Then watch the writes arrive.
 
 To try it locked down, as a PLC should be (only the gateway may connect,
 encrypted, with a login), start the stand-in PLC with `--strict` and the
@@ -132,7 +137,7 @@ cargo build --release
 ./target/release/opcua-audit-gateway discover opc.tcp://192.168.0.10:4840
 # add a [[targets]] block to config.toml, then:
 ./target/release/opcua-audit-gateway run         # web UI on http://127.0.0.1:8080
-                                                 # (admin password: data/initial-admin-password.txt)
+                                                 # (first login: admin / admin)
 ./target/release/opcua-audit-gateway verify      # check the audit trail's hash chain
 ```
 
@@ -194,8 +199,9 @@ multi-arch images (`ghcr.io/ploxc/opcua-audit-trail`) are built for every
 tar xzf opcua-audit-gateway-*-linux-amd64.tar.gz && cd opcua-audit-gateway-*
 sudo ./install.sh ./opcua-audit-gateway
 sudo nano /etc/opcua-audit-gateway/config.toml    # or add targets in the web UI
-sudo cat /var/lib/opcua-audit-gateway/initial-admin-password.txt  # first login
 ```
+
+The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
 
 The service runs as the unprivileged user `opcua-gw` with a hardened unit.
 Data, certificates and the audit trail live in `/var/lib/opcua-audit-gateway`.
@@ -218,8 +224,8 @@ The service runs under its own virtual account
 (`NT SERVICE\OpcUaAuditGateway`), not as LocalSystem. `service install`
 restricts the config, data, certificate and log directories to that account,
 SYSTEM and administrators; don't point them at shared directories. Logs go to
-`logs` next to the config (daily files, kept 14 days). The initial admin
-password is in `initial-admin-password.txt` in the data directory.
+`logs` next to the config (daily files, kept 14 days). The first login is
+`admin` / `admin`.
 `service uninstall` removes the service; install it again after an upgrade
 from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
 to files instead of the console.
@@ -242,18 +248,17 @@ Use the `x86_64` archive on an Intel Mac.
 
 The image `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7) is
 published for every release, with the tags `latest`, `X.Y` and `X.Y.Z`. All
-you need is [`docker/compose/docker-compose.yml`](docker/compose/docker-compose.yml)
-(also attached to every release):
+you need is [`docker-compose.yml`](docker-compose.yml) (also attached to
+every release):
 
 ```sh
-curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker/compose/docker-compose.yml
+curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker-compose.yml
 docker compose up -d
-docker compose cp gateway:/data/initial-admin-password.txt .   # first login
 ```
 
-The web UI is on http://127.0.0.1:8080. In a checkout, `docker compose up -d`
-uses the `docker-compose.yml` there: the same image, or a local build when it
-cannot be pulled (`docker compose build` forces one).
+The web UI is on https://127.0.0.1:8080 (HTTPS with the gateway certificate:
+accept it once in the browser); the first login is `admin` / `admin`.
+In a checkout, `docker compose build` builds the image from the source instead.
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
 volume. On the first start `/data/config.toml` is created from
@@ -267,15 +272,24 @@ volume. On the first start `/data/config.toml` is created from
 ```toml
 [web]
 listen = "0.0.0.0:8443"
-tls = true                          # uses the gateway certificate, or:
+tls = true                          # a self-signed certificate of its own, or:
 # tls_certificate = "web-cert.pem"  # PEM chain, e.g. from your plant CA
 # tls_private_key = "web-key.pem"
 ```
 
-With the gateway certificate, browsers ask once to accept it. To avoid that,
-import `pki/own/cert.der` as trusted, or use a certificate from your own CA.
-With TLS the session cookie is `Secure` and `__Host-` prefixed, and HSTS is
-sent. Without TLS, keep the UI on loopback: there it only answers requests for
+The container image has HTTPS on by default: `OPCUA_GATEWAY_WEB_TLS` in
+`docker-compose.yml` (`true`/`false`) overrides `tls` in the config file.
+
+Without `tls_certificate`, the web UI generates a self-signed certificate of
+its own (`<data_dir>/web-pki`), separate from the gateway's OPC UA
+certificate: renewing it never concerns a PLC. Browsers ask once to accept
+it; to avoid that, download it on the Settings page (Web UI) and trust it
+(macOS Keychain: Always Trust; Windows: Trusted Root Certification
+Authorities), or use a certificate from your own CA. It names localhost, the
+machine and the certificate host names (Settings); after changing those,
+regenerate it there and restart. With TLS the session cookie is `Secure` and
+`__Host-` prefixed; HSTS is only sent with a configured certificate (with a
+self-signed one it would stop browsers from letting you accept it). Without TLS, keep the UI on loopback: there it only answers requests for
 `localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
 rebinding.
 
@@ -407,6 +421,59 @@ requests also need the header `X-Requested-With: opcua-audit-gateway`.
 
 By default the web UI serves plain HTTP on `127.0.0.1`. For remote access,
 enable HTTPS (see above).
+
+## AI assistants (MCP)
+
+An AI assistant such as Claude can answer questions about the trail ("who
+changed Line1.Setpoint yesterday?", "which clients are connected?", "is the
+trail intact?") through the [Model Context Protocol](https://modelcontextprotocol.io)
+endpoint at `/mcp`, on the same address as the web UI.
+
+The endpoint is **off** until an administrator turns it on (Settings page, or
+`[mcp] enabled = true`). The token is a password, so the endpoint only
+answers over HTTPS, or over plain HTTP when the web UI listens on loopback
+only.
+
+1. On the **Account** page, create an API token. It acts as you and is shown
+   once.
+2. Add the server to the assistant, e.g. Claude Code:
+
+   ```sh
+   claude mcp add --transport http opcua-audit http://127.0.0.1:8080/mcp \
+     --header "Authorization: Bearer gwt_…"
+   ```
+
+   Other MCP clients: Streamable HTTP transport, URL `…/mcp`, header
+   `Authorization: Bearer <token>`. Clients that only run local servers
+   (Claude Desktop) connect through `npx mcp-remote <url> --header
+   "Authorization:${AUTH}"` with `AUTH` = `Bearer <token>` in its environment.
+
+   With the web UI's self-signed certificate (the Docker default), the
+   assistant has to trust it: download the .pem on the Settings page (Web
+   UI) and start the assistant with
+   `NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem`.
+
+Every token can read: `search_audit_trail` (the same filters as the Audit
+trail page), `get_audit_record`, `gateway_status` (targets, connected
+clients, unacknowledged warnings, exports), `most_written_nodes` and
+`verify_audit_trail`.
+
+An assistant can also help configure the gateway. What a token may change
+is chosen when an admin creates it (Account page), per area: targets,
+certificates, settings (audit, export, certificate host names), users. A
+token with nothing ticked only reads, so a leaked read token cannot change
+anything; the MCP switch in Settings stops every token at once.
+
+The assistant then sees tools such as `add_target`, `update_target`,
+`trust_server_certificate` or `update_audit_settings`. They go through the
+same checks as the web UI and are recorded as `config_changed` "via MCP"
+with the token's id; passwords in their arguments are not recorded.
+Assistants never write values to a PLC, and never change the MCP settings,
+API tokens or the web server. Every tool call is recorded in the trail as
+`mcp_query`, with the token's user and the arguments. Tokens are stored as a
+SHA-256 hash; delete one on the Account page, and deleting a user deletes
+theirs. The endpoint does not accept the web UI's session cookie. Turning
+the endpoint off stops every token at once.
 
 ## Development
 

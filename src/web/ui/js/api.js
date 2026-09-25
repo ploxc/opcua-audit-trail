@@ -27,8 +27,11 @@ export async function api(method, path, body) {
   }
   const response = await fetch("/api" + path, options);
   if (response.status === 401 && path !== "/login") {
+    // Only on the way out: redrawing an open login screen again (a timer
+    // that still runs) would wipe what is being typed.
+    const wasLoggedIn = state.user !== null;
     state.user = null;
-    render();
+    if (wasLoggedIn) render();
     throw new ApiError(401, "Not logged in");
   }
   const text = await response.text();

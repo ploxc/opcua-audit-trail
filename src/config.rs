@@ -23,8 +23,30 @@ pub struct Config {
     #[serde(default)]
     pub export: ExportConfig,
     #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
     pub targets: Vec<TargetConfig>,
 }
+
+/// The MCP endpoint for AI assistants. Off unless an admin turns it on; it
+/// only answers over HTTPS, or on a loopback-only web UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct McpConfig {
+    pub enabled: bool,
+    /// No longer used: what a token may change is chosen per token. Still
+    /// read, so a config that has it keeps loading; dropped when saved.
+    #[serde(skip_serializing)]
+    pub allow: Vec<String>,
+}
+
+/// Overrides `[web] tls` (true/false), e.g. in docker-compose.yml.
+pub const WEB_TLS_ENV: &str = "OPCUA_GATEWAY_WEB_TLS";
+
+/// What an API token can be allowed to change through MCP (chosen when the
+/// token is created). The MCP settings themselves, API tokens and the web
+/// server are never among them.
+pub const MCP_SCOPES: [&str; 4] = ["targets", "certificates", "settings", "users"];
 
 /// Copies of the audit trail outside the gateway. Every record carries its
 /// hash, so an external copy also anchors the local chain: rewriting the
@@ -273,8 +295,21 @@ impl Config {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         config.resolve_paths(&base);
+        config.apply_env(|name| std::env::var(name).ok())?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Settings the environment overrides, e.g. from docker-compose.yml.
+    fn apply_env(&mut self, var: impl Fn(&str) -> Option<String>) -> anyhow::Result<()> {
+        if let Some(v) = var(WEB_TLS_ENV) {
+            self.web.tls = match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" | "" => false,
+                other => bail!("{WEB_TLS_ENV}: '{other}' is not true or false"),
+            };
+        }
+        Ok(())
     }
 
     fn resolve_paths(&mut self, base: &Path) {
@@ -464,6 +499,21 @@ ignored_summary_secs = 3600
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_overrides_tls() {
+        let env =
+            |value: &'static str| move |name: &str| (name == WEB_TLS_ENV).then(|| value.into());
+        let mut c = Config::default();
+        c.apply_env(env("true")).unwrap();
+        assert!(c.web.tls);
+        c.apply_env(env("0")).unwrap();
+        assert!(!c.web.tls);
+        assert!(c.apply_env(env("maybe")).is_err());
+        c.web.tls = true;
+        c.apply_env(|_| None).unwrap();
+        assert!(c.web.tls, "unset keeps the file's value");
+    }
 
     fn parse(text: &str) -> anyhow::Result<Config> {
         let config: Config = toml::from_str(text)?;

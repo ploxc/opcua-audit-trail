@@ -200,7 +200,7 @@ It is never logged or stored.
 
 The primary store is an **embedded SQLite database** (`data/audit.db`, WAL mode),
 so the standalone binary is fully functional and Docker is optional. Optionally,
-records are also shipped to **QuestDB** (same compose file or central server) for
+records are also shipped to an existing **QuestDB** (not bundled: too heavy for this volume) for
 long-term analytics across gateways; the local store remains the source of truth
 and doubles as the buffer while QuestDB is unreachable.
 
@@ -247,6 +247,28 @@ records `export_gap` and the dashboard shows it.
 - `closed`: a write is only forwarded after its audit record has been committed.
   If that fails, the client gets `BadInternalError` and the PLC is not touched.
 
+### Errors and warnings
+
+Some event kinds are errors or warnings (`Severity` in `src/audit/event.rs`);
+they are counted in the sidebar until acknowledged, and coloured the same
+everywhere (red, orange). The web UI has a copy of the lists in
+`js/format.js`; a test keeps the two equal.
+
+- **Error: something is broken and needs action.** The trail or its copies
+  may be incomplete (`events_lost`, `trail_truncated`, `export_gap`), or
+  clients cannot reach a target through the gateway (`upstream_unavailable`,
+  `target_not_trusted`, `target_refused_gateway`), or the target's security
+  changed (`upstream_endpoints_changed`).
+- **Warning: something to look at while everything works.** A refused
+  client certificate, login or API token (`certificate_rejected`,
+  `authentication_failed`, `ui_login_failed`, `api_token_rejected`), refused
+  connections (`connections_refused`), a clock that jumped (`clock_jumped`).
+
+Live status follows the same rule: a target that is unreachable or lacks
+trust is red; an export that fails but keeps its records is orange.
+Changes of trust are recorded once per change (`target_trust_restored` when
+solved), not once per client.
+
 ## Web UI
 
 Served by the same binary (axum). The frontend is plain JavaScript without a
@@ -278,8 +300,8 @@ embedded, so the UI needs no internet access.
   request (changing a password, role or removing a user ends them), expire
   after 8 hours idle and 24 hours in total. Every state-changing request needs a custom header
   (CSRF protection). Logins are rate limited per address and per user. The
-  initial `admin` password is written to `initial-admin-password.txt` in the
-  data directory (not to the log) and must be changed at the first login.
+  first start creates `admin` with password `admin`, which must be changed
+  at the first login before anything else is allowed.
   UI logins and every change made through the UI are audited. HTTPS with
   rustls (`ring` provider), using the gateway certificate or PEM files; with
   TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.
@@ -334,6 +356,40 @@ handlers. Page modules never import main.js: they redraw through the hooks in
 formatted with Prettier (`src/web/ui/.prettierrc.json`: width 100, markup in
 templates left as written).
 
+## MCP endpoint
+
+`src/web/mcp.rs` serves the Model Context Protocol on `POST /mcp`, on the web
+UI's listener, for AI assistants. It is a hand-written JSON-RPC handler for
+the Streamable HTTP transport in its simplest form: no sessions and no
+server-sent events, one JSON answer per request (`initialize`, `ping`,
+`tools/list`, `tools/call`; notifications get `202`). That is all the tools
+need, and it keeps an SDK dependency out of the binary.
+
+- **Off by default:** `[mcp] enabled`, switched by an admin on the Settings
+  page (audited, applied at once). Off, `/mcp` answers `404` and every token
+  stops working; the Account page offers no new ones.
+- **HTTPS only:** the token is a password, so the endpoint refuses requests
+  (`403`) over plain HTTP unless the web UI listens on loopback only. The
+  container image has HTTPS on by default.
+- **Authentication:** API tokens (`gwt_<id>_<secret>`) that a user creates on
+  the Account page, in `api_tokens` in `gateway.db`, stored as SHA-256 (the
+  secret is 32 random bytes; a slow hash adds nothing). A token acts as its
+  user with that user's current role and ends with the user. The session
+  cookie is not accepted here, so the endpoint is exempt from the CSRF header
+  check: a cross-site request cannot carry the bearer token.
+- **Read tools:** search the trail (the `/api/audit` filters), one record,
+  the status, the most written nodes, verify.
+- **Change tools, per scope** (`targets`, `certificates`, `settings`,
+  `users`): listed and callable only when the token was created with the
+  scope (by an admin; stored with the token) and its user is still an
+  admin. They call the web API's handlers
+  with the token's user, so role checks, validation and `config_changed`
+  records are the same; the record's `by` says "via MCP, token <id>". None
+  writes to a PLC, and MCP settings, tokens and the web server are not
+  reachable. Password and token arguments are hidden in `mcp_query`.
+- **Audited:** every tool call is an `mcp_query` record with the user, the
+  token id (never the secret), the tool and its arguments.
+
 ## Build and deployment
 
 - One binary per platform: Linux x86_64 / ARM64 / ARMv7 (static musl; ARMv7
@@ -350,7 +406,6 @@ templates left as written).
   binaries for amd64, arm64 and arm/v7, and published to GHCR. Config, PKI,
   users and the audit trail live in `/data`; the config is created from a
   template on first start, so the web UI can update it.
-  `docker-compose.yml` has an optional QuestDB profile.
 - Configuration: one TOML file; relative paths resolve against the file's
   directory.
 

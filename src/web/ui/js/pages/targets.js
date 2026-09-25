@@ -64,6 +64,23 @@ function endpointsTable(endpoints, minSecurity) {
   </div>`;
 }
 
+// The trust problem that stops secure client connections, for the card's
+// head: both sides must trust each other's certificate.
+function trustBadge(g) {
+  switch (g?.state) {
+    case "target_not_trusted":
+      return html`<span class="badge bad" title="The gateway does not trust the target's certificate">
+        Target not trusted</span>`;
+    case "refused":
+      return html`<span class="badge bad" title="The target does not trust the gateway's certificate">
+        Refuses the gateway</span>`;
+    case "failed":
+      return html`<span class="badge warn" title="${g.detail}">Trust not checked</span>`;
+    default:
+      return "";
+  }
+}
+
 // Whether the target accepts the gateway's certificate (checked by the
 // gateway with a secure channel, before any client needs it).
 function gatewayTrust(g) {
@@ -83,8 +100,11 @@ function gatewayTrust(g) {
         Then press Discover to check again.
       </div>`;
     case "target_not_trusted":
-      return html`<div class="alert warn small">
-        Not checked yet: trust the target's certificate first (above).
+      return html`<div class="alert bad small">
+        <b>Secure connections do not work yet.</b> Two steps are needed: (1) the gateway trusts
+        the target's certificate (Trust… above), then (2) the target trusts the gateway's
+        certificate (below). Whether the target accepts the gateway can only be checked after
+        step 1.
       </div>`;
     case "no_secure_endpoint":
       return html`<div class="muted small">
@@ -121,7 +141,7 @@ function securitySection(t, endpoints, { editing = false } = {}) {
       cert
         ? trusted.has(cert.thumbprint)
           ? html`<span class="badge plain ok">target trusted</span>`
-          : html`<span class="badge plain warn">target not trusted</span>`
+          : html`<span class="badge plain bad">target not trusted</span>`
         : ""
     }
     ${
@@ -129,7 +149,9 @@ function securitySection(t, endpoints, { editing = false } = {}) {
         ? html`<span class="badge plain ok">accepts the gateway</span>`
         : g === "refused"
           ? html`<span class="badge plain bad">refuses the gateway</span>`
-          : ""
+          : g === "target_not_trusted"
+            ? html`<span class="badge plain neutral">gateway acceptance not checked yet</span>`
+            : ""
     }`;
 
   // Endpoints: which ones clients get, from the minimum security up.
@@ -149,7 +171,7 @@ function securitySection(t, endpoints, { editing = false } = {}) {
     ? html`${cert.subject} ${
         trusted.has(cert.thumbprint)
           ? html`<span class="badge ok">trusted</span>`
-          : html`<span class="badge warn">not trusted</span>
+          : html`<span class="badge bad">not trusted</span>
               ${when(
                 can("admin") && !editing,
                 html` <button
@@ -316,10 +338,7 @@ function targetCard(t, editing) {
       <div class="inline">
         <h2>${t.name}</h2>
         ${stateBadge(t.status?.state)}
-        ${when(
-          t.status?.gateway_trust?.state === "refused",
-          html`<span class="badge bad">refuses the gateway</span>`,
-        )}
+        ${trustBadge(t.status?.gateway_trust)}
       </div>
       <div class="inline">
         ${when(
@@ -473,6 +492,10 @@ export const actions = {
     const t = state.status.targets.find((x) => x.name === name);
     const trust = t?.status?.gateway_trust?.state;
     if (trust === "refused") toast("The target refuses the gateway's certificate", "bad");
+    else if (trust === "target_not_trusted")
+      toast("Reachable, but the gateway does not trust the target's certificate yet", "bad");
+    else if (trust === "failed")
+      toast(`Reachable, but the trust check failed: ${t.status.gateway_trust.detail}`, "warn");
     else if (trust === "trusted") toast("Target reachable and accepts the gateway");
     else toast("Check done");
   },

@@ -321,15 +321,11 @@ fn user_command(path: &Path, cmd: UserCommand) -> anyhow::Result<ExitCode> {
         // directory), `passwd admin` creates the admin with that password.
         UserCommand::Passwd { username } if username == "admin" && existing.is_empty() => {
             users.create_with("admin", &read_new_password()?, Role::Admin, false)?;
-            let _ = std::fs::remove_file(users::initial_password_file(&config));
             println!("created admin in {} with this password", db.display());
         }
         UserCommand::Passwd { username } => {
             must_exist(&username)?;
             users.set_password(&username, &read_new_password()?)?;
-            if username == "admin" {
-                let _ = std::fs::remove_file(users::initial_password_file(&config));
-            }
             println!("password of {username} changed; their web sessions have ended");
         }
         UserCommand::Role { username, role } => {
@@ -385,16 +381,11 @@ async fn run(
 
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
-        let password = users::random_password();
-        users.create_with("admin", &password, Role::Admin, true)?;
-        // Into a file only the service can read, not into the logs.
-        let file = users::initial_password_file(&config);
-        fsutil::write_atomic(&file, format!("{password}\n").as_bytes(), Some(0o600))
-            .with_context(|| format!("writing {}", file.display()))?;
+        users.create_default_admin()?;
         tracing::warn!(
-            "created web UI user 'admin'; its password is in {} and must be changed at \
-             the first login (or: opcua-audit-gateway user passwd admin)",
-            file.display()
+            "created web UI user 'admin' with password '{}'; it must be changed at the \
+             first login (or: opcua-audit-gateway user passwd admin)",
+            users::DEFAULT_ADMIN_PASSWORD
         );
         let _ = audit
             .record(AuditEntry::new(AuditEvent::ConfigChanged {

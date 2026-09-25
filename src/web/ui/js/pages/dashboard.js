@@ -153,7 +153,7 @@ function exportCard(exports) {
     <td>
       ${
         e.last_error
-          ? html`<span class="badge bad" title="${e.last_error}">Failing</span>
+          ? html`<span class="badge warn" title="${e.last_error}">Failing</span>
             <div class="small muted">${e.last_error}</div>`
           : html`<span class="badge ok">OK</span>`
       }

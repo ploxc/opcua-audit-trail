@@ -3,9 +3,10 @@
 // and read-only information about the web UI and files.
 
 import { flag, html, when } from "../html.js";
-import { get, put } from "../api.js";
+import { get, post, put } from "../api.js";
 import { dialog, formData, menuButton, toast } from "../components.js";
 import { can, renderPage, state } from "../state.js";
+import { time } from "../format.js";
 
 // How an export destination is doing, from the last /status answer.
 function exportState(name) {
@@ -68,6 +69,7 @@ export function settingsView() {
       ${auditCard(st.audit, off, save)}
       ${exportCard(st.export.questdb, off, save)}
       ${gatewayCard(st, off, save)}
+      ${mcpCard(st.mcp, off, save)}
       ${webCard(st)}
     </div>`;
 }
@@ -244,12 +246,52 @@ function gatewayCard(st, off, save) {
   </form>`;
 }
 
+/** What a token can be allowed to change, for people: a name and what it covers. */
+export const SCOPE_LABELS = {
+  targets: ["Targets", "add, change and remove PLCs; summarised nodes"],
+  certificates: ["Certificates", "trust and untrust OPC UA certificates"],
+  settings: ["Settings", "audit trail, export, certificate host names"],
+  users: ["Users", "create, change and delete web UI users"],
+};
+
+function mcpCard(m, off, save) {
+  return html`<form class="card" data-form="settings-mcp">
+    <h2>AI assistants (MCP)</h2>
+    <div class="setting">
+      <label class="inline">
+        <input type="checkbox" name="enabled" ${flag(m.enabled, "checked")} ${off}>
+        MCP endpoint on
+      </label>
+      <p class="help">
+        Lets an AI assistant such as Claude read the audit trail and the gateway status with an
+        <a href="#/account">API token</a>, which each user creates on their Account page. Every
+        question is recorded in the trail. Off: the endpoint
+        answers nothing and tokens stop working.
+      </p>
+      <p class="help">
+        What an assistant may change (targets, certificates, …) is chosen per token when an
+        administrator creates it. Assistants never write to a PLC, and never change these MCP
+        settings or API tokens.
+      </p>
+      ${when(
+        !m.transport_ok,
+        html`<div class="alert bad small">
+          The web UI uses plain HTTP on a network address, so the endpoint refuses requests: the
+          token would cross the network unencrypted. Set <span class="mono">tls = true</span>
+          under <span class="mono">[web]</span> and restart.
+        </div>`,
+      )}
+    </div>
+    ${save}
+  </form>`;
+}
+
 // Settings that only apply at start-up, so they are shown, not edited.
 function webCard(st) {
   const https = st.web.tls
     ? st.web.tls_certificate
       ? html`on, <span class="mono">${st.web.tls_certificate}</span>`
-      : "on, with the gateway certificate"
+      : "on, with its own self-signed certificate"
     : "off";
   return html`<div class="card">
     <h2>Web UI and files</h2>
@@ -257,7 +299,11 @@ function webCard(st) {
       <dt>Listens on</dt>
       <dd class="mono">${st.web.listen}</dd>
       <dt>HTTPS</dt>
-      <dd>${https}</dd>
+      <dd>
+        ${https}
+        ${when(st.web.tls_env, () => html`<span class="muted small">(set by
+          <span class="mono">${st.web.tls_env}</span>)</span>`)}
+      </dd>
       <dt>Certificates</dt>
       <dd class="mono">${st.gateway.pki_dir}</dd>
       <dt>Data</dt>
@@ -268,10 +314,63 @@ function webCard(st) {
       them in the <span class="mono">[web]</span> and <span class="mono">[gateway]</span> sections
       of the config file, then restart the gateway.
     </p>
+    ${when(st.web.certificate && !st.web.tls_certificate, () => webCertificate(st.web.certificate))}
+  </div>`;
+}
+
+// The web UI's own HTTPS certificate: separate from the gateway's OPC UA
+// certificate, so renewing it never concerns a PLC.
+function webCertificate(c) {
+  return html`<div class="setting">
+    <div class="card-head">
+      <span class="title">HTTPS certificate</span>
+      <div class="inline">
+        <a class="button small" href="/api/web-certificate/cert.pem">Download (.pem)</a>
+        <a class="button small" href="/api/web-certificate/cert.der">Download (.der)</a>
+        ${when(
+          can("admin"),
+          html`<button class="small" data-action="regenerate-web-certificate">Regenerate</button>`,
+        )}
+      </div>
+    </div>
+    <dl class="kv small readonly-kv">
+      <dt>Subject</dt>
+      <dd>${c.subject}</dd>
+      <dt>Thumbprint</dt>
+      <dd class="mono">${c.thumbprint}</dd>
+      <dt>Valid</dt>
+      <dd>${time(c.not_before)} – ${time(c.not_after)}</dd>
+    </dl>
+    <p class="help small">
+      Self-signed, so there is no separate root CA: trust this certificate itself. macOS: open the
+      .pem, then in Keychain Access set it to <i>Always Trust</i>. Windows: import it into
+      <i>Trusted Root Certification Authorities</i>. AI assistants (Node):
+      <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>. It
+      names localhost, this machine and the host names under Gateway certificate; after changing
+      those, regenerate it and restart the gateway. This is not the certificate PLCs trust
+      (that is on the <a href="#/certificates">Certificates</a> page).
+    </p>
   </div>`;
 }
 
 // ---------- forms ----------
+
+export const actions = {
+  async "regenerate-web-certificate"() {
+    const ok = await dialog({
+      title: "New HTTPS certificate?",
+      confirm: "Regenerate",
+      body:
+        "The web UI uses it after the gateway restarts. Browsers and AI assistants that " +
+        "trusted the current one must trust the new one. PLCs are not affected.",
+    });
+    if (!ok) return;
+    await post("/web-certificate/regenerate");
+    toast("New certificate: restart the gateway to use it");
+    state.settings = await get("/settings");
+    renderPage();
+  },
+};
 
 export const forms = {
   /** Saves the audit settings; shortening retention or failing closed asks first. */
@@ -344,6 +443,14 @@ export const forms = {
     toast("Export settings saved");
     state.settings = await get("/settings");
     state.status = await get("/status");
+    renderPage();
+  },
+
+  async "settings-mcp"(form) {
+    const enabled = form.elements.enabled.checked;
+    await put("/settings/mcp", { enabled });
+    toast(enabled ? "MCP endpoint on" : "MCP endpoint off");
+    state.settings = await get("/settings");
     renderPage();
   },
 

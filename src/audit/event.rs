@@ -116,6 +116,20 @@ pub enum AuditEvent {
     UiLoginFailed {
         user: String,
     },
+    /// A request to the MCP endpoint with an API token that is unknown,
+    /// deleted or of a user who may no longer use it (`token`: its id part,
+    /// never the secret).
+    ApiTokenRejected {
+        token: String,
+    },
+    /// A tool call on the MCP endpoint (an AI assistant reading the trail
+    /// or the status), with the token's user and the arguments.
+    McpQuery {
+        by: String,
+        token: String,
+        tool: String,
+        arguments: String,
+    },
     /// Discovery of a server that is not (yet) a target, from the web UI.
     Discovery {
         by: String,
@@ -163,6 +177,23 @@ pub enum AuditEvent {
     UpstreamUnavailable {
         endpoint_url: String,
         reason: String,
+    },
+    /// The gateway does not trust the target's certificate: no client can
+    /// connect securely until it is trusted (Targets, Trust…).
+    TargetNotTrusted {
+        endpoint_url: String,
+    },
+    /// The target refuses the gateway's certificate: no client can connect
+    /// securely until the target trusts it.
+    TargetRefusedGateway {
+        endpoint_url: String,
+        detail: String,
+    },
+    /// After one of the two above: the target and the gateway trust each
+    /// other again.
+    TargetTrustRestored {
+        endpoint_url: String,
+        policy: String,
     },
     /// The security the upstream server offers changed (policy, mode,
     /// certificate or login types). The gateway follows it, so this also
@@ -292,9 +323,12 @@ pub enum AuditEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
-    /// Something to look at: a target down, a refused client or login.
+    /// Something to look at while everything still works: a refused client,
+    /// certificate or login, a clock that jumped.
     Warning,
-    /// The audit trail or its copies may be incomplete, or the target's
+    /// Something is broken and needs action: the trail or its copies may be
+    /// incomplete, or clients cannot reach a target through the gateway
+    /// (unreachable, or no trust between the two), or the target's
     /// security changed.
     Error,
 }
@@ -309,13 +343,16 @@ impl Severity {
                 "events_lost",
                 "trail_truncated",
                 "export_gap",
+                "upstream_unavailable",
+                "target_not_trusted",
+                "target_refused_gateway",
                 "upstream_endpoints_changed",
             ],
             Severity::Warning => &[
-                "upstream_unavailable",
                 "certificate_rejected",
                 "authentication_failed",
                 "ui_login_failed",
+                "api_token_rejected",
                 "connections_refused",
                 "clock_jumped",
             ],
@@ -331,6 +368,7 @@ impl AuditEvent {
             AuditEvent::GatewayStopped => "gateway_stopped",
             AuditEvent::ConfigChanged { .. } => "config_changed",
             AuditEvent::UiLogin { .. } => "ui_login",
+            AuditEvent::McpQuery { .. } => "mcp_query",
             AuditEvent::UiLoginFailed { .. } => "ui_login_failed",
             AuditEvent::Discovery { .. } => "discovery",
             AuditEvent::RetentionPruned { .. } => "retention_pruned",
@@ -340,6 +378,10 @@ impl AuditEvent {
             AuditEvent::ExportGap { .. } => "export_gap",
             AuditEvent::UpstreamAvailable { .. } => "upstream_available",
             AuditEvent::UpstreamUnavailable { .. } => "upstream_unavailable",
+            AuditEvent::TargetNotTrusted { .. } => "target_not_trusted",
+            AuditEvent::TargetRefusedGateway { .. } => "target_refused_gateway",
+            AuditEvent::TargetTrustRestored { .. } => "target_trust_restored",
+            AuditEvent::ApiTokenRejected { .. } => "api_token_rejected",
             AuditEvent::UpstreamEndpointsChanged { .. } => "upstream_endpoints_changed",
             AuditEvent::ClientConnected => "client_connected",
             AuditEvent::ConnectionsRefused { .. } => "connections_refused",
@@ -377,6 +419,52 @@ impl AuditEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The web UI colours events with its own copy of the severities, and
+    /// needs a label for every kind: both must follow this file.
+    #[test]
+    fn web_ui_knows_every_kind_and_severity() {
+        let js = include_str!("../web/ui/js/format.js");
+        let set = |name: &str| -> Vec<String> {
+            let start = js
+                .find(&format!("export const {name} = new Set(["))
+                .unwrap_or_else(|| panic!("{name} not in format.js"));
+            let body = &js[start..];
+            let body = &body[..body.find("]);").unwrap()];
+            let mut kinds: Vec<String> = body
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .map(String::from)
+                .collect();
+            kinds.sort();
+            kinds
+        };
+        for (severity, name) in [
+            (Severity::Error, "ERROR_EVENTS"),
+            (Severity::Warning, "WARNING_EVENTS"),
+        ] {
+            let mut expected: Vec<String> =
+                severity.kinds().iter().map(|k| k.to_string()).collect();
+            expected.sort();
+            assert_eq!(set(name), expected, "{name} in format.js");
+        }
+        // Every kind the gateway writes has a label (kind() lists them all).
+        let source = include_str!("event.rs");
+        let start = source.find("pub fn kind(&self)").unwrap();
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").unwrap()];
+        for kind in body
+            .split("=> \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+        {
+            assert!(
+                js.contains(&format!("  {kind}: \"")),
+                "no EVENT_LABELS entry for {kind} in format.js"
+            );
+        }
+    }
 
     #[test]
     fn kind_matches_serde_tag() {

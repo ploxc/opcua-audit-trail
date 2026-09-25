@@ -42,6 +42,9 @@ export const state = {
   certificates: null,
   browser: { target: "", ...BROWSER_EMPTY() },
   users: [],
+  // API tokens of the logged-in user; `newToken` holds a secret just created
+  // (shown once, until the page is left).
+  account: { tokens: [], newToken: null },
   version: "",
 };
 

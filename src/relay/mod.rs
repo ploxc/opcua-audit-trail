@@ -281,12 +281,13 @@ impl RelayTarget {
         self.set_gateway_trust(result).await;
     }
 
-    /// Stores what the trust check, or a client's connection, found. When
-    /// the target starts refusing the gateway, the trail gets one
-    /// upstream_unavailable record (a warning), not one per client.
+    /// Stores what the trust check, or a client's connection, found. A
+    /// change into a trust problem (or out of one) is one record, not one
+    /// per client.
     pub async fn set_gateway_trust(&self, result: crate::discovery::GatewayTrust) {
+        use crate::audit::AuditEvent;
         use crate::discovery::GatewayTrust;
-        let newly_refused = {
+        let event = {
             let mut statuses = self.statuses.write().await;
             let Some(status) = statuses.get_mut(&self.config.name) else {
                 return;
@@ -295,22 +296,40 @@ impl RelayTarget {
                 return;
             }
             tracing::info!(target = %self.config.name, "gateway trust: {result:?}");
-            let was_refused = matches!(status.gateway_trust, GatewayTrust::Refused { .. });
-            status.gateway_trust = result.clone();
+            let problem = |t: &GatewayTrust| {
+                matches!(
+                    t,
+                    GatewayTrust::Refused { .. } | GatewayTrust::TargetNotTrusted
+                )
+            };
+            let before = std::mem::replace(&mut status.gateway_trust, result.clone());
+            let endpoint_url = self.config.endpoint_url.clone();
             match &result {
-                GatewayTrust::Refused { detail } if !was_refused => Some(detail.clone()),
+                GatewayTrust::Refused { detail }
+                    if !matches!(before, GatewayTrust::Refused { .. }) =>
+                {
+                    Some(AuditEvent::TargetRefusedGateway {
+                        endpoint_url,
+                        detail: format!(
+                            "{detail}; the target probably does not trust the gateway's \
+                             certificate yet (trust it on the target, e.g. move it from its \
+                             rejected to its trusted certificates)"
+                        ),
+                    })
+                }
+                GatewayTrust::TargetNotTrusted if before != GatewayTrust::TargetNotTrusted => {
+                    Some(AuditEvent::TargetNotTrusted { endpoint_url })
+                }
+                GatewayTrust::Trusted { policy } if problem(&before) => {
+                    Some(AuditEvent::TargetTrustRestored {
+                        endpoint_url,
+                        policy: policy.clone(),
+                    })
+                }
                 _ => None,
             }
         };
-        if let Some(detail) = newly_refused {
-            let event = crate::audit::AuditEvent::UpstreamUnavailable {
-                endpoint_url: self.config.endpoint_url.clone(),
-                reason: format!(
-                    "the target refused the gateway ({detail}); it probably does not trust \
-                     the gateway's certificate yet (trust it on the target, e.g. move it from \
-                     its rejected to its trusted certificates)"
-                ),
-            };
+        if let Some(event) = event {
             let entry = crate::audit::AuditEntry::new(event).target(self.config.name.clone());
             let _ = self.audit.record(entry).await;
         }
