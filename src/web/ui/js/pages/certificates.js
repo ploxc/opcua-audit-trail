@@ -73,12 +73,8 @@ export function certificatesView() {
         nothing else.
       </p>
       <p class="hint">
-        It is also the web UI's HTTPS certificate, unless another one is configured
-        (<span class="mono">tls_certificate</span>). It is self-signed, so there is no separate
-        root CA: trust this certificate itself. macOS: open the .pem, then in Keychain Access set
-        it to <i>Always Trust</i>. Windows: import it into <i>Trusted Root Certification
-        Authorities</i>. AI assistants (Node): <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway.pem</span>.
-        After regenerating the certificate, trust the new one.
+        For OPC UA only: the web UI's HTTPS certificate is a separate one, on the
+        <a href="#/settings">Settings</a> page.
       </p>
       ${when(state.showImport, importForm)}
     </div>

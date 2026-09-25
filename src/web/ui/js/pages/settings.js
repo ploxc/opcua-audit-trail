@@ -3,9 +3,10 @@
 // and read-only information about the web UI and files.
 
 import { flag, html, when } from "../html.js";
-import { get, put } from "../api.js";
+import { get, post, put } from "../api.js";
 import { dialog, formData, menuButton, toast } from "../components.js";
 import { can, renderPage, state } from "../state.js";
+import { time } from "../format.js";
 
 // How an export destination is doing, from the last /status answer.
 function exportState(name) {
@@ -300,7 +301,7 @@ function webCard(st) {
   const https = st.web.tls
     ? st.web.tls_certificate
       ? html`on, <span class="mono">${st.web.tls_certificate}</span>`
-      : "on, with the gateway certificate"
+      : "on, with its own self-signed certificate"
     : "off";
   return html`<div class="card">
     <h2>Web UI and files</h2>
@@ -323,10 +324,63 @@ function webCard(st) {
       them in the <span class="mono">[web]</span> and <span class="mono">[gateway]</span> sections
       of the config file, then restart the gateway.
     </p>
+    ${when(st.web.certificate && !st.web.tls_certificate, () => webCertificate(st.web.certificate))}
+  </div>`;
+}
+
+// The web UI's own HTTPS certificate: separate from the gateway's OPC UA
+// certificate, so renewing it never concerns a PLC.
+function webCertificate(c) {
+  return html`<div class="setting">
+    <div class="card-head">
+      <span class="title">HTTPS certificate</span>
+      <div class="inline">
+        <a class="button small" href="/api/web-certificate/cert.pem">Download (.pem)</a>
+        <a class="button small" href="/api/web-certificate/cert.der">Download (.der)</a>
+        ${when(
+          can("admin"),
+          html`<button class="small" data-action="regenerate-web-certificate">Regenerate</button>`,
+        )}
+      </div>
+    </div>
+    <dl class="kv small readonly-kv">
+      <dt>Subject</dt>
+      <dd>${c.subject}</dd>
+      <dt>Thumbprint</dt>
+      <dd class="mono">${c.thumbprint}</dd>
+      <dt>Valid</dt>
+      <dd>${time(c.not_before)} – ${time(c.not_after)}</dd>
+    </dl>
+    <p class="help small">
+      Self-signed, so there is no separate root CA: trust this certificate itself. macOS: open the
+      .pem, then in Keychain Access set it to <i>Always Trust</i>. Windows: import it into
+      <i>Trusted Root Certification Authorities</i>. AI assistants (Node):
+      <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>. It
+      names localhost, this machine and the host names under Gateway certificate; after changing
+      those, regenerate it and restart the gateway. This is not the certificate PLCs trust
+      (that is on the <a href="#/certificates">Certificates</a> page).
+    </p>
   </div>`;
 }
 
 // ---------- forms ----------
+
+export const actions = {
+  async "regenerate-web-certificate"() {
+    const ok = await dialog({
+      title: "New HTTPS certificate?",
+      confirm: "Regenerate",
+      body:
+        "The web UI uses it after the gateway restarts. Browsers and AI assistants that " +
+        "trusted the current one must trust the new one. PLCs are not affected.",
+    });
+    if (!ok) return;
+    await post("/web-certificate/regenerate");
+    toast("New certificate: restart the gateway to use it");
+    state.settings = await get("/settings");
+    renderPage();
+  },
+};
 
 export const forms = {
   /** Saves the audit settings; shortening retention or failing closed asks first. */

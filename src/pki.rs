@@ -58,7 +58,7 @@ pub fn cap_rejected(dir: &Path) {
 }
 
 /// Makes the private key readable by the service only.
-fn protect_private_key(store: &CertificateStore) {
+pub(crate) fn protect_private_key(store: &CertificateStore) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

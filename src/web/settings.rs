@@ -77,6 +77,8 @@ struct WebView {
     /// Set when the environment decides `tls` (the variable's name).
     tls_env: Option<&'static str>,
     tls_certificate: Option<String>,
+    /// The web UI's own self-signed certificate, when it has one.
+    certificate: Option<crate::pki::CertificateInfo>,
 }
 
 pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<SettingsView> {
@@ -117,6 +119,10 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
                 .is_some()
                 .then_some(crate::config::WEB_TLS_ENV),
             tls_certificate: c.web.tls_certificate.as_deref().map(path),
+            certificate: super::tls::web_store(&c)
+                .read_own_cert()
+                .ok()
+                .map(|cert| crate::pki::CertificateInfo::from_x509(&cert)),
         },
         mcp: McpView {
             enabled: c.mcp.enabled,

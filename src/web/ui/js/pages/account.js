@@ -180,10 +180,9 @@ function newTokenBox(t) {
     ${when(
       location.protocol === "https:",
       html`<p class="mt small muted">
-        With the gateway's own certificate, the assistant must trust it: download it on the
-        <a href="#/certificates">Certificates</a> page, convert it to PEM
-        (<span class="mono">openssl x509 -inform der -in cert.der -out gateway.pem</span>) and
-        start the assistant with <span class="mono">NODE_EXTRA_CA_CERTS=gateway.pem</span>.
+        With the web UI's self-signed certificate, the assistant must trust it: download the
+        .pem on the <a href="#/settings">Settings</a> page (Web UI) and start the assistant with
+        <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>.
       </p>`,
     )}
   </div>`;

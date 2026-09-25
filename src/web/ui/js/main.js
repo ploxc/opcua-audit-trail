@@ -361,6 +361,7 @@ const actions = {
   ...browser.actions,
   ...users.actions,
   ...account.actions,
+  ...settings.actions,
 };
 
 // `data-form` name → handler(form).

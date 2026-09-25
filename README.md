@@ -266,18 +266,24 @@ volume. On the first start `/data/config.toml` is created from
 ```toml
 [web]
 listen = "0.0.0.0:8443"
-tls = true                          # uses the gateway certificate, or:
+tls = true                          # a self-signed certificate of its own, or:
 # tls_certificate = "web-cert.pem"  # PEM chain, e.g. from your plant CA
 # tls_private_key = "web-key.pem"
 ```
 
 The container image has HTTPS on by default: `OPCUA_GATEWAY_WEB_TLS` in
-`docker-compose.yml` (`true`/`false`) overrides `tls` in the config file. With the gateway certificate,
-browsers ask once to accept it. To avoid that, import `pki/own/cert.der` as
-trusted, or use a certificate from your own CA. With TLS the session cookie
-is `Secure` and `__Host-` prefixed; HSTS is only sent with your own
-certificate (with the gateway's, it would stop browsers from letting you
-accept it). Without TLS, keep the UI on loopback: there it only answers requests for
+`docker-compose.yml` (`true`/`false`) overrides `tls` in the config file.
+
+Without `tls_certificate`, the web UI generates a self-signed certificate of
+its own (`<data_dir>/web-pki`), separate from the gateway's OPC UA
+certificate: renewing it never concerns a PLC. Browsers ask once to accept
+it; to avoid that, download it on the Settings page (Web UI) and trust it
+(macOS Keychain: Always Trust; Windows: Trusted Root Certification
+Authorities), or use a certificate from your own CA. It names localhost, the
+machine and the certificate host names (Settings); after changing those,
+regenerate it there and restart. With TLS the session cookie is `Secure` and
+`__Host-` prefixed; HSTS is only sent with a configured certificate (with a
+self-signed one it would stop browsers from letting you accept it). Without TLS, keep the UI on loopback: there it only answers requests for
 `localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
 rebinding.
 
@@ -436,11 +442,10 @@ only.
    (Claude Desktop) connect through `npx mcp-remote <url> --header
    "Authorization:${AUTH}"` with `AUTH` = `Bearer <token>` in its environment.
 
-   With the gateway's own certificate (the Docker default), the assistant
-   has to trust it: convert it to PEM
-   (`openssl x509 -inform der -in cert.der -out gateway.pem`, the certificate
-   is on the Certificates page) and start the assistant with
-   `NODE_EXTRA_CA_CERTS=gateway.pem`.
+   With the web UI's self-signed certificate (the Docker default), the
+   assistant has to trust it: download the .pem on the Settings page (Web
+   UI) and start the assistant with
+   `NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem`.
 
 Every token can read: `search_audit_trail` (the same filters as the Audit
 trail page), `get_audit_record`, `gateway_status` (targets, connected
