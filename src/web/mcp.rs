@@ -287,7 +287,10 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
         "tools/list" => result(id, json!({"tools": ctx.tools()})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let args = match params.get("arguments") {
+                None | Some(Value::Null) => json!({}),
+                Some(a) => a.clone(),
+            };
             let Some(tool) = ctx.tools().into_iter().find(|t| t["name"] == name) else {
                 let hint = if change_tools().iter().any(|(_, t)| t["name"] == name) {
                     " (this token may not use it: an admin chooses a token's permissions when \
@@ -297,6 +300,11 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
                 };
                 return Some(error(id, -32602, &format!("unknown tool '{name}'{hint}")));
             };
+            // Arguments are an object (or absent); anything else would skip
+            // the check below and run the tool unfiltered.
+            if !args.is_object() {
+                return Some(error(id, -32602, "arguments must be an object"));
+            }
             // An argument the tool does not know would otherwise be ignored
             // silently, and a search would return unfiltered records.
             let known = &tool["inputSchema"]["properties"];

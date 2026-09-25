@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S15 | Low | MCP arguments that are not an object skip the unknown-argument check |
 | S16 | Low | Credentials in a QuestDB URL are recorded unredacted in `mcp_query` |
 | N12 | Low | Browser sessions outlive an untrusted certificate and a password change |
 | N14 | Low | Certificate import writes certificate and key separately |
@@ -39,12 +38,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S15: Non-object MCP arguments skip the argument check
-
-The unknown-argument check only runs when `arguments` is an object; an
-array or string runs a read tool unfiltered (e.g. an unfiltered search).
-**Fix:** refuse arguments that are not an object.
 
 ### S16: Credentials in a QuestDB URL in `mcp_query`
 

@@ -1575,3 +1575,27 @@ async fn mcp_cannot_delete_history_or_open_fail_mode() {
     assert_eq!(settings["audit"]["retention_days"], 0);
     assert_eq!(settings["audit"]["fail_mode"], "closed");
 }
+
+/// Audit finding S15: arguments that are not an object are refused.
+#[tokio::test]
+async fn mcp_arguments_must_be_an_object() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let admin = w.login("admin").await;
+    let (_, token) = w
+        .post("/api/me/tokens", &admin, json!({ "name": "t" }))
+        .await;
+    let secret = token["secret"].as_str().unwrap();
+    let call = |arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "search_audit_trail", "arguments": arguments}})
+    };
+    for bad in [json!(["write"]), json!("write"), json!(5)] {
+        let (_, answer) = w.mcp(secret, call(bad)).await;
+        assert_eq!(answer["error"]["code"], -32602, "{answer}");
+    }
+    for fine in [json!({}), Value::Null] {
+        let (_, answer) = w.mcp(secret, call(fine)).await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+    }
+}
