@@ -214,11 +214,13 @@ impl Stats {
         let errors = self.errors.load(Ordering::Relaxed);
         let notifications = self.notifications.load(Ordering::Relaxed);
         println!("  {label}");
-        println!(
-            "    {what}: {good} good, {bad} bad status, {errors} errors in {secs:.1} s \
-             = {:.0}/s",
-            (good + bad) as f64 / secs
-        );
+        // Monitored items are created once: a rate says nothing there.
+        let rate = if what == "monitored items" {
+            String::new()
+        } else {
+            format!(" = {:.0}/s", (good + bad) as f64 / secs)
+        };
+        println!("    {what}: {good} good, {bad} bad status, {errors} errors in {secs:.1} s{rate}");
         if notifications > 0 {
             println!(
                 "    notifications: {notifications} = {:.0}/s",
@@ -242,6 +244,13 @@ impl Stats {
         }
         if let Some(e) = self.first_error.lock().as_ref() {
             println!("    first error: {e}");
+            if e.contains("BadCertificateUntrusted") || e.contains("BadSecurityChecksFailed") {
+                println!(
+                    "    hint: the server does not trust ./stress-client-pki/own/cert.der yet: \
+                     trust the \"Stress client\" certificate (gateway: Certificates in the \
+                     web UI, or move it from pki/rejected to pki/trusted)"
+                );
+            }
         }
     }
 }
