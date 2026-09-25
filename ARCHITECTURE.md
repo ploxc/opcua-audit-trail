@@ -152,7 +152,11 @@ The gateway generates its own self-signed application instance certificate on
 first start (`pki/own/cert.der`, RSA 2048, 5 years, `subjectAltName` = application
 URI + host names + IPs + `certificate_hostnames` from the config). Importing a
 certificate and key (e.g. one issued by a plant CA) is supported through the
-PKI directory and, later, the web UI.
+PKI directory and the web UI. Import and regenerate first keep the old pair
+as `.<time>.bak`, then write the key and the certificate, each in one step
+(the key created 0600). A start that finds a key that does not belong to the
+certificate (an interruption between the two) restores the newest matching
+backup pair, or refuses to start with an explanation.
 
 The same certificate is used downstream (clients must trust it) and upstream
 (the PLC must trust it, and only it).

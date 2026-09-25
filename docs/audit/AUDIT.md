@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| N14 | Low | Certificate import writes certificate and key separately |
 | N23 | Low | Fail-open accounting: the lost counter is in memory only; a dead writer thread is not restarted |
 | S17 | Info | A failed `mcp_query` record does not stop the tool call |
 | S18 | Info | `/mcp` tells unauthenticated callers whether MCP is on |
@@ -36,11 +35,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### N14: Certificate import is not atomic
-
-Certificate and key are written separately; expiry, URI and a timestamped
-backup were added. See also S10.
 
 ### N23: Fail-open accounting gaps
 

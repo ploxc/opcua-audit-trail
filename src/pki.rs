@@ -166,8 +166,26 @@ impl Pki {
         // async-opcua writes the key with the default mode; also fixes keys
         // written by earlier versions.
         let result =
-            if let (Ok(cert), Ok(_)) = (self.store.read_own_cert(), self.store.read_own_pkey()) {
-                (cert, false)
+            if let (Ok(cert), Ok(key)) = (self.store.read_own_cert(), self.store.read_own_pkey()) {
+                // Certificate and key are two files: an import or regenerate
+                // interrupted between them leaves a pair that does not match.
+                match check_key_pair(&cert, &key) {
+                    Ok(()) => (cert, false),
+                    Err(e) => {
+                        let restored = self.restore_backup().with_context(|| {
+                            format!(
+                                "gateway certificate: {e:#}, and no backup pair matches; \
+                                 import certificate and key again, or regenerate"
+                            )
+                        })?;
+                        tracing::warn!(
+                            "gateway certificate: {e:#} (an interrupted import?); restored \
+                             the last backup pair [{}]",
+                            restored.thumbprint().as_hex_string()
+                        );
+                        (restored, false)
+                    }
+                }
             } else {
                 let cert = create_own(&self.store, &certificate_request(gateway))
                     .context("generating gateway certificate")?;
@@ -298,6 +316,48 @@ impl Pki {
     }
 
     /// Keeps the current pair as `<file>.<timestamp>.bak`.
+    /// Puts back the newest backup pair (`.<stamp>.bak`, taken before every
+    /// import and regenerate) whose key belongs to its certificate.
+    fn restore_backup(&self) -> anyhow::Result<X509> {
+        let cert_path = self.store.own_certificate_path();
+        let key_path = self.store.own_private_key_path();
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let (cert_name, key_name) = (name(&cert_path), name(&key_path));
+        let dir = cert_path.parent().unwrap_or(Path::new("."));
+        let mut stamps: Vec<String> = std::fs::read_dir(dir)?
+            .flatten()
+            .filter_map(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.strip_prefix(&format!("{cert_name}."))?
+                    .strip_suffix(".bak")
+                    .map(String::from)
+            })
+            .collect();
+        stamps.sort();
+        for stamp in stamps.iter().rev() {
+            let cert_bak = dir.join(format!("{cert_name}.{stamp}.bak"));
+            let key_bak = key_path.with_file_name(format!("{key_name}.{stamp}.bak"));
+            let (Ok(cert_der), Ok(key_pem)) = (std::fs::read(&cert_bak), std::fs::read(&key_bak))
+            else {
+                continue;
+            };
+            let (Ok(cert), Ok(key)) = (X509::from_der(&cert_der), PrivateKey::from_pem(&key_pem))
+            else {
+                continue;
+            };
+            if check_key_pair(&cert, &key).is_ok() {
+                crate::fsutil::write_atomic(&key_path, &key_pem, Some(0o600))?;
+                crate::fsutil::write_atomic(&cert_path, &cert_der, Some(0o644))?;
+                return Ok(cert);
+            }
+        }
+        bail!("no matching backup")
+    }
+
     fn backup_own(&self) -> anyhow::Result<()> {
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         for path in [
@@ -394,6 +454,54 @@ mod tests {
             assert_eq!(mode(&key_path), 0o600);
             assert_eq!(mode(key_path.parent().unwrap()), 0o700);
         }
+    }
+
+    #[test]
+    fn interrupted_replacement_restores_the_backup() {
+        // Audit finding N14: a new key without its certificate (a crash
+        // between the two files) brings back the last matching pair.
+        let dir = tempfile::tempdir().unwrap();
+        let gateway = GatewayConfig {
+            application_uri: Some("urn:test:opcua-audit-gateway".into()),
+            ..GatewayConfig::default()
+        };
+        let pki = Pki::open(dir.path()).unwrap();
+        let (first, _) = pki.ensure_own_certificate(&gateway).unwrap();
+        let first_key = std::fs::read(pki.store.own_private_key_path()).unwrap();
+        // A second pair, then only the first's certificate back: mismatch.
+        let second = pki.regenerate_own(&gateway).unwrap();
+        let cert_path = pki.store.own_certificate_path();
+        std::fs::write(&cert_path, first.to_der().unwrap()).unwrap();
+        let (restored, created) = pki.ensure_own_certificate(&gateway).unwrap();
+        assert!(!created);
+        // The backup taken before regenerate holds the first pair.
+        assert_eq!(restored.thumbprint(), first.thumbprint());
+        assert_ne!(restored.thumbprint(), second.thumbprint());
+        assert_eq!(
+            std::fs::read(pki.store.own_private_key_path()).unwrap(),
+            first_key
+        );
+
+        // Without any matching backup it refuses to start.
+        for e in std::fs::read_dir(cert_path.parent().unwrap())
+            .unwrap()
+            .flatten()
+        {
+            if e.file_name().to_string_lossy().ends_with(".bak") {
+                std::fs::remove_file(e.path()).unwrap();
+            }
+        }
+        let key_dir = pki.store.own_private_key_path();
+        for e in std::fs::read_dir(key_dir.parent().unwrap())
+            .unwrap()
+            .flatten()
+        {
+            if e.file_name().to_string_lossy().ends_with(".bak") {
+                std::fs::remove_file(e.path()).unwrap();
+            }
+        }
+        std::fs::write(&cert_path, second.to_der().unwrap()).unwrap();
+        assert!(pki.ensure_own_certificate(&gateway).is_err());
     }
 
     #[test]
