@@ -13,6 +13,12 @@ written by anyone else stay recorded one by one), and the nodes. A write is
 summarised when a group for its client, or one for every client, has the
 node. At most 1000 nodes per target, over all its groups.
 
+A node is in **one group per client**: not in two groups for the same
+client, and a node in a group for every client is not also in a group for
+one client (it would change nothing). The gateway refuses such a change and
+says which group has the node already; the Summarise… dialog greys those
+choices out. A name and client pair is unique per target.
+
 ## In the web UI (admin)
 
 - Each target shows its groups under **Summarised nodes**, with **Add
@@ -50,6 +56,11 @@ nodes = [                           # as shown in the audit trail
 The older form, one `[[targets.ignore]]` table per node, still loads: its
 rules become groups (one per client, one for every client), and the file is
 written with groups the next time the web UI saves it.
+
+A file with a node in two groups for the same client (written by hand)
+still loads: the later group loses the node, the gateway writes the
+corrected file back at start and records it as `config_changed` by
+`gateway`.
 
 ## What is not summarised
 
