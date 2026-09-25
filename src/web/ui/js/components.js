@@ -98,7 +98,9 @@ export const statusBadge = (status) => {
 /** Whether a target is reachable. */
 export const stateBadge = (s) => {
   const map = {
-    available: ["ok", "Connected"],
+    // Discovery reaches the target; whether clients can connect securely is
+    // the trust shown next to it.
+    available: ["ok", "Reachable"],
     unavailable: ["bad", "Unreachable"],
     unknown: ["neutral", "Checking…"],
   };

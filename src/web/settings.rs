@@ -20,6 +20,16 @@ pub struct SettingsView {
     export: ExportView,
     gateway: GatewayView,
     web: WebView,
+    mcp: McpView,
+}
+
+#[derive(Serialize)]
+struct McpView {
+    enabled: bool,
+    /// What a token can be allowed to change.
+    scopes: Vec<&'static str>,
+    /// False over plain HTTP on a non-loopback address: it would not answer.
+    transport_ok: bool,
 }
 
 #[derive(Serialize)]
@@ -62,7 +72,11 @@ struct GatewayView {
 struct WebView {
     listen: String,
     tls: bool,
+    /// Set when the environment decides `tls` (the variable's name).
+    tls_env: Option<&'static str>,
     tls_certificate: Option<String>,
+    /// The web UI's own self-signed certificate, when it has one.
+    certificate: Option<crate::pki::CertificateInfo>,
 }
 
 pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<SettingsView> {
@@ -99,7 +113,19 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
         web: WebView {
             listen: c.web.listen.to_string(),
             tls: c.web.tls,
+            tls_env: std::env::var_os(crate::config::WEB_TLS_ENV)
+                .is_some()
+                .then_some(crate::config::WEB_TLS_ENV),
             tls_certificate: c.web.tls_certificate.as_deref().map(path),
+            certificate: super::tls::web_store(&c)
+                .read_own_cert()
+                .ok()
+                .map(|cert| crate::pki::CertificateInfo::from_x509(&cert)),
+        },
+        mcp: McpView {
+            enabled: c.mcp.enabled,
+            scopes: crate::config::MCP_SCOPES.to_vec(),
+            transport_ok: super::mcp::transport_is_safe(&s.config.web),
         },
     }))
 }
@@ -358,6 +384,31 @@ pub async fn put_gateway(
             ),
         )
         .await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub struct McpInput {
+    enabled: bool,
+}
+
+/// Turns the MCP endpoint for AI assistants on or off, at once.
+pub async fn put_mcp(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Json(input): Json<McpInput>,
+) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    let (old, config) = s
+        .targets
+        .update_settings(|c| c.mcp.enabled = input.enabled)
+        .await
+        .map_err(ApiError::bad_request)?;
+    if old.mcp.enabled != config.mcp.enabled {
+        let state = if config.mcp.enabled { "on" } else { "off" };
+        s.config_changed(&user, format!("MCP endpoint for AI assistants {state}"))
+            .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

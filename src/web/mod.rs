@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod browser;
+mod mcp;
 mod settings;
 pub mod tls;
 
@@ -52,11 +53,11 @@ pub struct AppState {
 impl AppState {
     /// Records a configuration change made through the UI.
     async fn config_changed(&self, user: &AuthUser, summary: String) {
-        tracing::info!(user = %user.username, "{summary}");
+        tracing::info!(user = %user.actor(), "{summary}");
         let _ = self
             .audit
             .record_committed(AuditEntry::new(AuditEvent::ConfigChanged {
-                by: user.username.clone(),
+                by: user.actor(),
                 summary,
             }))
             .await;
@@ -101,6 +102,8 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(auth::logout))
         .route("/me", get(auth::me))
         .route("/me/password", post(auth::change_password))
+        .route("/me/tokens", get(list_tokens).post(create_token))
+        .route("/me/tokens/{id}", delete(delete_token))
         .route("/status", get(status))
         .route("/targets", get(targets).post(create_target))
         .route("/targets/{name}", put(update_target).delete(delete_target))
@@ -112,6 +115,13 @@ pub fn router(state: AppState) -> Router {
         .route("/discover", post(discover_url))
         .route("/certificates", get(certificates))
         .route("/certificates/own/cert.der", get(own_certificate_der))
+        .route("/certificates/own/cert.pem", get(own_certificate_pem))
+        .route("/web-certificate/cert.pem", get(web_certificate_pem))
+        .route("/web-certificate/cert.der", get(web_certificate_der))
+        .route(
+            "/web-certificate/regenerate",
+            post(regenerate_web_certificate),
+        )
         .route("/certificates/own", post(import_own))
         .route("/certificates/own/regenerate", post(regenerate_own))
         .route(
@@ -133,6 +143,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/audit", put(settings::put_audit))
         .route("/settings/export", put(settings::put_export))
         .route("/settings/gateway", put(settings::put_gateway))
+        .route("/settings/mcp", put(settings::put_mcp))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{name}", put(update_user).delete(delete_user))
         .route("/browser/{target}/connect", post(browser::connect))
@@ -148,6 +159,13 @@ pub fn router(state: AppState) -> Router {
         .route("/favicon.svg", get(favicon))
         .route("/fonts/{file}", get(font))
         .nest("/api", api)
+        // For AI assistants: API tokens, not the session cookie.
+        .route(
+            "/mcp",
+            post(mcp::post)
+                .get(mcp::not_allowed)
+                .delete(mcp::not_allowed),
+        )
         .layer(axum::middleware::from_fn(auth::csrf))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -186,14 +204,21 @@ async fn security_headers(
                 .into_response();
         }
     }
-    let api = request.uri().path().starts_with("/api/");
+    let path = request.uri().path();
+    let api = path.starts_with("/api/") || path == "/mcp";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     if api {
         // Audit records, users and certificates must not stay in caches.
         headers.insert(header::CACHE_CONTROL, "no-store".parse().expect("valid"));
+    } else if !headers.contains_key(header::CACHE_CONTROL) {
+        // The UI is embedded in the binary: after an upgrade the browser
+        // must check again instead of running the old scripts.
+        headers.insert(header::CACHE_CONTROL, "no-cache".parse().expect("valid"));
     }
-    if s.config.web.tls {
+    // Not with the gateway's own certificate: browsers do not trust it, and
+    // with HSTS they no longer let the user accept it.
+    if s.config.web.tls && s.config.web.tls_certificate.is_some() {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
             "max-age=31536000".parse().expect("valid"),
@@ -218,8 +243,31 @@ async fn security_headers(
     response
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("ui/index.html"))
+/// The page, pointing at this build's scripts and styles: their URLs carry a
+/// hash of the UI, so a browser never runs an older version after an
+/// upgrade (a relative import in a module keeps the versioned folder).
+async fn index() -> Html<String> {
+    let v = ui_version();
+    Html(
+        include_str!("ui/index.html")
+            .replace("/js/main.js", &format!("/js/{v}/main.js"))
+            .replace("/style.css", &format!("/style.css?v={v}")),
+    )
+}
+
+/// A short hash of every embedded script and the stylesheet.
+fn ui_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for (name, source) in SCRIPTS {
+            hash.update(name.as_bytes());
+            hash.update(source.as_bytes());
+        }
+        hash.update(include_str!("ui/style.css").as_bytes());
+        hex::encode(&hash.finalize()[..6])
+    })
 }
 
 /// The UI's JavaScript modules (`ui/js/`, see ARCHITECTURE.md), by their path
@@ -249,13 +297,29 @@ const SCRIPTS: &[(&str, &str)] = &[
     ("pages/users.js", include_str!("ui/js/pages/users.js")),
 ];
 
+/// `/js/<version>/<module>`: cached for good, since a new build has a new
+/// version. `/js/<module>` (no version) is still served, not cached.
 async fn script(Path(path): Path<String>) -> Response {
+    let (path, versioned) = match path.split_once('/') {
+        Some((v, rest)) if v == ui_version() => (rest.to_string(), true),
+        _ => (path, false),
+    };
     match SCRIPTS.iter().find(|(name, _)| *name == path) {
-        Some((_, source)) => (
-            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-            *source,
-        )
-            .into_response(),
+        Some((_, source)) => {
+            let cache = if versioned {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                    (header::CACHE_CONTROL, cache),
+                ],
+                *source,
+            )
+                .into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -621,7 +685,7 @@ async fn discover_url(
     let _ = s
         .audit
         .record_committed(AuditEntry::new(AuditEvent::Discovery {
-            by: user.username.clone(),
+            by: user.actor(),
             endpoint_url: crate::audit::event::clip(&req.endpoint_url, 1024),
         }))
         .await;
@@ -671,6 +735,98 @@ async fn own_certificate_der(
         der,
     )
         .into_response())
+}
+
+/// The same certificate as PEM, for OPC UA clients that want that format.
+async fn own_certificate_pem(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> Result<Response, ApiError> {
+    user.require(Role::Auditor)?;
+    let der = s.pki.own_certificate_der()?;
+    Ok(certificate_file(&der, "opcua-audit-gateway", true))
+}
+
+/// A certificate as a download, DER or PEM.
+fn certificate_file(der: &[u8], name: &str, pem: bool) -> Response {
+    if !pem {
+        return (
+            [
+                (header::CONTENT_TYPE, "application/pkix-cert".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{name}.der\""),
+                ),
+            ],
+            der.to_vec(),
+        )
+            .into_response();
+    }
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut text = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        text.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        text.push('\n');
+    }
+    text.push_str("-----END CERTIFICATE-----\n");
+    (
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}.pem\""),
+            ),
+        ],
+        text,
+    )
+        .into_response()
+}
+
+/// The web UI's own HTTPS certificate: what browsers, the operating system
+/// and Node (NODE_EXTRA_CA_CERTS) import to trust it.
+async fn web_certificate(s: &AppState, user: &AuthUser, pem: bool) -> Result<Response, ApiError> {
+    user.require(Role::Auditor)?;
+    let cert = tls::web_store(&s.config)
+        .read_own_cert()
+        .map_err(|_| ApiError::not_found("the web UI has no certificate of its own (HTTPS off)"))?;
+    let der = cert.to_der().map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(certificate_file(&der, "opcua-audit-gateway-web", pem))
+}
+
+async fn web_certificate_pem(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> Result<Response, ApiError> {
+    web_certificate(&s, &user, true).await
+}
+
+async fn web_certificate_der(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> Result<Response, ApiError> {
+    web_certificate(&s, &user, false).await
+}
+
+/// A new web UI certificate, e.g. after adding host names. The web server
+/// uses it from the next start.
+async fn regenerate_web_certificate(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<CertificateInfo> {
+    user.require(Role::Admin)?;
+    let config = s.targets.config().await;
+    let cert = tls::regenerate_web_certificate(&config)?;
+    let info = CertificateInfo::from_x509(&cert);
+    s.config_changed(
+        &user,
+        format!(
+            "generated a new web UI certificate [{}] (used after a restart)",
+            info.thumbprint
+        ),
+    )
+    .await;
+    Ok(Json(info))
 }
 
 #[derive(Deserialize)]
@@ -1074,6 +1230,66 @@ async fn delete_user(
     s.sessions.remove_user(&name);
     s.browser.close_user(&s, &name).await;
     s.config_changed(&user, format!("deleted user '{name}'"))
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The logged-in user's API tokens (for the MCP endpoint).
+async fn list_tokens(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Vec<crate::users::ApiToken>> {
+    Ok(Json(s.users.tokens(&user.username)?))
+}
+
+#[derive(Deserialize)]
+struct NewToken {
+    name: String,
+    /// What the token may change through MCP; empty: read only.
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+/// Creates a token; its secret is in this answer only.
+async fn create_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<NewToken>,
+) -> ApiResult<crate::users::NewApiToken> {
+    // Changes need an admin, like in the web UI.
+    if !req.scopes.is_empty() {
+        user.require(Role::Admin)?;
+    }
+    let token = s
+        .users
+        .create_token(&user.username, &req.name, &req.scopes)
+        .map_err(ApiError::bad_request)?;
+    let access = if token.token.scopes.is_empty() {
+        "read only".to_string()
+    } else {
+        format!("may change {}", token.token.scopes.join(", "))
+    };
+    s.config_changed(
+        &user,
+        format!(
+            "created API token '{}' ({}, {access})",
+            token.token.name, token.token.id
+        ),
+    )
+    .await;
+    Ok(Json(token))
+}
+
+async fn delete_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let name = s
+        .users
+        .delete_token(&user.username, &id)
+        .map_err(|e| ApiError::not_found(format!("{e:#}")))?;
+    s.config_changed(&user, format!("deleted API token '{name}' ({id})"))
         .await;
     Ok(StatusCode::NO_CONTENT)
 }

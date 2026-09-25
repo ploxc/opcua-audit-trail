@@ -1,36 +1,35 @@
-# From a checkout: uses the published image, or builds it from this
-# directory when it cannot be pulled (`docker compose build` forces a local
-# build). Without a checkout, use docker/compose/docker-compose.yml.
+# OPC UA Audit Gateway with the published image: needs nothing else than
+# this file. Start with `docker compose up -d`, then open https://127.0.0.1:8080
+# and log in as admin / admin (you must choose a new password at the first
+# login). Add targets in the web UI.
+#
+# In a checkout, `docker compose build` builds the image from the source
+# instead (also used when the published image cannot be pulled).
 services:
   gateway:
+    # Pin a version (e.g. :0.2.0) for production.
     image: ghcr.io/ploxc/opcua-audit-trail:latest
     build: .
     restart: unless-stopped
+    environment:
+      # HTTPS for the web UI and the MCP endpoint (the gateway certificate).
+      # "false" only behind a TLS reverse proxy: MCP then refuses requests.
+      OPCUA_GATEWAY_WEB_TLS: "true"
     ports:
-      # Web UI: loopback only (plain HTTP); use a TLS proxy for remote access.
+      # Web UI (HTTPS, the gateway certificate): loopback only. For access
+      # from other machines publish "8080:8080" and add the host name or IP
+      # to certificate_hostnames (Settings), or use your own certificate.
       - "127.0.0.1:8080:8080"
-      # One port per target (OPC UA clients connect here).
+      # One port per target (OPC UA clients connect here); add a line for
+      # every further target, e.g. "4842:4842".
       - "4841:4841"
     # Config, certificates, users and the audit trail live in /data. On the
-    # first start /data/config.toml is created from docker/config.toml (baked
-    # into the image). Targets are managed in the web UI; to edit other
-    # settings: docker compose cp gateway:/data/config.toml . (edit),
-    # docker compose cp config.toml gateway:/data/config.toml, restart.
+    # first start /data/config.toml is created with defaults. To edit it:
+    # docker compose cp gateway:/data/config.toml . (edit),
+    # docker compose cp config.toml gateway:/data/config.toml,
+    # docker compose restart gateway.
     volumes:
       - gateway-data:/data
 
-  # Optional long-term store: `docker compose --profile questdb up -d`, then set
-  # [export.questdb] url = "http://questdb:9000" in /data/config.toml.
-  # QuestDB's console is on http://127.0.0.1:9000.
-  questdb:
-    image: questdb/questdb:latest   # pin a version for production
-    profiles: ["questdb"]
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9000:9000"
-    volumes:
-      - questdb-data:/var/lib/questdb
-
 volumes:
   gateway-data:
-  questdb-data:

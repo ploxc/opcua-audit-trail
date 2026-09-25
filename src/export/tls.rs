@@ -64,15 +64,14 @@ pub mod tests {
     use super::*;
     use crate::config::Config;
 
-    /// A TLS server configuration for `localhost` (the gateway's own
+    /// A TLS server configuration for `localhost` (the web UI's own
     /// self-signed certificate) and a PEM file that trusts it.
     pub fn localhost_server(dir: &Path) -> (Arc<rustls::ServerConfig>, PathBuf) {
         let path = dir.join("config.toml");
         std::fs::write(&path, crate::config::EXAMPLE_CONFIG).unwrap();
         let mut config = Config::load(&path).unwrap();
         config.gateway.certificate_hostnames = vec!["localhost".into()];
-        let pki = crate::pki::Pki::open(&config.gateway.pki_dir).unwrap();
-        let (cert, _) = pki.ensure_own_certificate(&config.gateway).unwrap();
+        let (cert, _) = crate::web::tls::ensure_web_certificate(&config).unwrap();
         let base64 = base64::engine::general_purpose::STANDARD.encode(cert.to_der().unwrap());
         let lines: Vec<&str> = base64
             .as_bytes()

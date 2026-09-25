@@ -94,11 +94,21 @@ function eventSummary(e, target) {
       return `${e.destination}: ${e.reason}`;
     case "upstream_unavailable":
       return e.reason;
+    case "target_not_trusted":
+      return `${e.endpoint_url}: the gateway does not trust its certificate`;
+    case "target_refused_gateway":
+      return `${e.endpoint_url}: ${e.detail}`;
+    case "target_trust_restored":
+      return `${e.endpoint_url} (${e.policy})`;
+    case "api_token_rejected":
+      return `token ${e.token}`;
     case "config_changed":
       return html`<b>${e.by}</b>: ${e.summary}`;
     case "ui_login":
     case "ui_login_failed":
       return e.user;
+    case "mcp_query":
+      return html`<b>${e.by}</b>: ${e.tool} <span class="muted mono">${e.arguments}</span>`;
     case "retention_pruned":
       return `${e.deleted} records removed`;
     case "events_lost":

@@ -68,6 +68,9 @@ pub struct UserStore {
 
 const MIN_PASSWORD_LENGTH: usize = 8;
 
+/// Password of the `admin` user created on the first start.
+pub const DEFAULT_ADMIN_PASSWORD: &str = "admin";
+
 fn hash(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -106,6 +109,30 @@ impl UserStore {
                 created_at    TEXT NOT NULL
             );",
         )?;
+        // Tokens for the MCP endpoint: only a SHA-256 of the secret is
+        // kept (the secret is 32 random bytes, so a slow hash adds nothing).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS api_tokens (
+                id         TEXT PRIMARY KEY,
+                username   TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                hash       TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used  TEXT
+            );",
+        )?;
+        // What the token may change through MCP (comma separated scopes),
+        // added later.
+        let scopes: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('api_tokens') WHERE name = 'scopes'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !scopes {
+            conn.execute_batch(
+                "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT ''",
+            )?;
+        }
         // Columns added later.
         for (column, definition) in [
             ("session_epoch", "INTEGER NOT NULL DEFAULT 0"),
@@ -163,6 +190,25 @@ impl UserStore {
         )?;
         if inserted == 0 {
             bail!("user '{username}' already exists");
+        }
+        Ok(())
+    }
+
+    /// Creates `admin` with the well-known default password, which has to be
+    /// changed at the first login. It is shorter than the minimum length, so
+    /// it can never be kept as the new password.
+    pub fn create_default_admin(&self) -> anyhow::Result<()> {
+        let inserted = self.conn.lock().execute(
+            "INSERT OR IGNORE INTO users (username, password_hash, role, created_at, must_change_password)
+             VALUES ('admin', ?1, ?2, ?3, 1)",
+            params![
+                hash(DEFAULT_ADMIN_PASSWORD)?,
+                Role::Admin.as_str(),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        if inserted == 0 {
+            bail!("user 'admin' already exists");
         }
         Ok(())
     }
@@ -322,7 +368,132 @@ impl UserStore {
         if n == 0 {
             bail!("no user '{username}'");
         }
+        conn.execute("DELETE FROM api_tokens WHERE username = ?1", [username])?;
         Ok(())
+    }
+
+    /// Creates an API token for a user. Returns it with its secret, which is
+    /// shown once and not stored.
+    pub fn create_token(
+        &self,
+        username: &str,
+        name: &str,
+        scopes: &[String],
+    ) -> anyhow::Result<NewApiToken> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 {
+            bail!("a token needs a name of 1 to 64 characters");
+        }
+        if let Some(bad) = scopes
+            .iter()
+            .find(|s| !crate::config::MCP_SCOPES.contains(&s.as_str()))
+        {
+            bail!("unknown scope '{bad}'");
+        }
+        let mut scopes = scopes.to_vec();
+        scopes.sort();
+        scopes.dedup();
+        let id = random_hex(6);
+        let secret = format!("gwt_{id}_{}", random_hex(32));
+        let conn = self.conn.lock();
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM users WHERE username = ?1",
+            [username],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            bail!("no user '{username}'");
+        }
+        let created_at = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO api_tokens (id, username, name, hash, created_at, scopes) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                username,
+                name,
+                token_hash(&secret),
+                created_at,
+                scopes.join(",")
+            ],
+        )?;
+        Ok(NewApiToken {
+            token: ApiToken {
+                id,
+                name: name.to_string(),
+                scopes,
+                created_at,
+                last_used: None,
+            },
+            secret,
+        })
+    }
+
+    pub fn tokens(&self, username: &str) -> anyhow::Result<Vec<ApiToken>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, created_at, last_used, scopes FROM api_tokens \
+             WHERE username = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([username], |r| {
+            Ok(ApiToken {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                created_at: r.get(2)?,
+                last_used: r.get(3)?,
+                scopes: split_scopes(&r.get::<_, String>(4)?),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Deletes one of a user's tokens; returns its name.
+    pub fn delete_token(&self, username: &str, id: &str) -> anyhow::Result<String> {
+        let conn = self.conn.lock();
+        let name: Option<String> = conn
+            .query_row(
+                "SELECT name FROM api_tokens WHERE id = ?1 AND username = ?2",
+                [id, username],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(name) = name else {
+            bail!("no such token");
+        };
+        conn.execute("DELETE FROM api_tokens WHERE id = ?1", [id])?;
+        Ok(name)
+    }
+
+    /// The user a token belongs to and its scopes, if it is valid; notes
+    /// its use.
+    pub fn verify_token(&self, secret: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
+        // gwt_<12 hex id>_<64 hex secret>
+        let Some(id) = secret
+            .strip_prefix("gwt_")
+            .and_then(|rest| rest.split_once('_'))
+            .map(|(id, _)| id)
+        else {
+            return Ok(None);
+        };
+        let conn = self.conn.lock();
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT username, hash, scopes FROM api_tokens WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((username, hash, scopes)) = row else {
+            return Ok(None);
+        };
+        if !constant_time_eq(hash.as_bytes(), token_hash(secret).as_bytes()) {
+            return Ok(None);
+        }
+        conn.execute(
+            "UPDATE api_tokens SET last_used = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(Some((username, split_scopes(&scopes))))
     }
 
     /// Refuses changes that would leave nobody able to administer the gateway.
@@ -354,14 +525,50 @@ impl UserStore {
     }
 }
 
-/// Where the first admin password is written (readable by the service only).
-/// Removed once the password is changed.
-pub fn initial_password_file(config: &crate::config::Config) -> std::path::PathBuf {
-    config.gateway.data_dir.join("initial-admin-password.txt")
+/// An API token as listed (never with its secret).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub name: String,
+    /// What the token may change through MCP; empty: read only.
+    pub scopes: Vec<String>,
+    pub created_at: String,
+    pub last_used: Option<String>,
 }
 
-/// A random password for the first admin account.
-pub fn random_password() -> String {
+/// A token just created, with the secret the user must copy now.
+#[derive(Debug, Clone, Serialize)]
+pub struct NewApiToken {
+    #[serde(flatten)]
+    pub token: ApiToken,
+    pub secret: String,
+}
+
+fn random_hex(bytes: usize) -> String {
+    use argon2::password_hash::rand_core::RngCore;
+    let mut buf = vec![0u8; bytes];
+    OsRng.fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+fn split_scopes(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn token_hash(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(secret.as_bytes()))
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// A random password (for the dummy hash that evens out login timing).
+fn random_password() -> String {
     use argon2::password_hash::rand_core::RngCore;
     const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bytes = [0u8; 20];
@@ -452,6 +659,19 @@ mod tests {
                 .unwrap()
                 .must_change_password
         );
+    }
+
+    #[test]
+    fn default_admin_must_change_password() {
+        let (_dir, users) = store();
+        users.create_default_admin().unwrap();
+        let admin = users
+            .verify("admin", DEFAULT_ADMIN_PASSWORD)
+            .unwrap()
+            .unwrap();
+        assert!(admin.must_change_password);
+        assert!(users.set_password("admin", DEFAULT_ADMIN_PASSWORD).is_err());
+        assert!(users.create_default_admin().is_err());
     }
 
     #[test]

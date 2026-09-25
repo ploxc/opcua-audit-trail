@@ -83,7 +83,7 @@ function render() {
   }
   if (state.user.must_change_password) {
     app.innerHTML = account.mustChangeView().s;
-    app.querySelector("input[name=current]")?.focus();
+    app.querySelector("input[name=new]")?.focus();
     return;
   }
   const page = currentPage();
@@ -98,12 +98,12 @@ function render() {
 function targetsDot() {
   const targets = state.status?.targets || [];
   const down = targets.filter(
-    (t) => t.status?.state === "unavailable" || t.status?.gateway_trust?.state === "refused",
+    (t) =>
+      t.status?.state === "unavailable" ||
+      ["refused", "target_not_trusted"].includes(t.status?.gateway_trust?.state),
   );
   const other = targets.filter(
-    (t) =>
-      !down.includes(t) &&
-      ["failed", "target_not_trusted"].includes(t.status?.gateway_trust?.state),
+    (t) => !down.includes(t) && t.status?.gateway_trust?.state === "failed",
   );
   const list = down.length ? down : other;
   if (!list.length) return "";
@@ -254,6 +254,12 @@ async function load() {
       case "users":
         state.users = await get("/users");
         break;
+      case "account":
+        // A new token's secret is shown once: not again after navigating.
+        state.account.newToken = null;
+        state.account.tokens = await get("/me/tokens");
+        state.account.mcp = (await get("/settings")).mcp;
+        break;
       case "settings":
         state.settings = await get("/settings");
         state.status = await get("/status");
@@ -273,6 +279,7 @@ function schedule(pageId) {
   // Calls `fn` every `ms` and redraws, unless it returns false.
   const every = (ms, fn) => {
     refreshTimer = setInterval(async () => {
+      if (!state.user) return;
       try {
         if ((await fn()) !== false) renderPage();
       } catch (e) {
@@ -353,6 +360,8 @@ const actions = {
   ...certificates.actions,
   ...browser.actions,
   ...users.actions,
+  ...account.actions,
+  ...settings.actions,
 };
 
 // `data-form` name → handler(form).

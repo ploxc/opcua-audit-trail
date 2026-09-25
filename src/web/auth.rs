@@ -205,9 +205,21 @@ pub struct AuthUser {
     pub username: String,
     pub role: Role,
     pub must_change_password: bool,
+    /// Set when an AI assistant acts through MCP: the token's id.
+    #[serde(skip)]
+    pub via_token: Option<String>,
 }
 
 impl AuthUser {
+    /// Who did it, for audit records: the user, and the token when an AI
+    /// assistant acted through MCP.
+    pub fn actor(&self) -> String {
+        match &self.via_token {
+            Some(token) => format!("{} (via MCP, token {token})", self.username),
+            None => self.username.clone(),
+        }
+    }
+
     pub fn require(&self, role: Role) -> Result<(), ApiError> {
         if self.role >= role {
             Ok(())
@@ -254,6 +266,7 @@ impl FromRequestParts<AppState> for AuthUser {
             username,
             role: current.role,
             must_change_password: current.must_change_password,
+            via_token: None,
         };
         let path = parts.uri.path();
         let allowed = ["/me", "/me/password", "/logout"]
@@ -279,7 +292,10 @@ pub async fn csrf(request: Request, next: Next) -> Response {
         .headers()
         .get(CSRF_HEADER)
         .is_some_and(|v| v == CSRF_VALUE);
-    if safe || marked {
+    // The MCP endpoint ignores cookies and needs a bearer token, which a
+    // cross-site request cannot carry.
+    let mcp = request.uri().path() == "/mcp";
+    if safe || marked || mcp {
         next.run(request).await
     } else {
         ApiError(StatusCode::FORBIDDEN, "missing CSRF header".into()).into_response()
@@ -389,6 +405,7 @@ pub async fn login(
             username: user.username,
             role: state.role,
             must_change_password: state.must_change_password,
+            via_token: None,
         }),
     ))
 }
@@ -410,12 +427,15 @@ pub async fn me(user: AuthUser) -> Json<AuthUser> {
 
 #[derive(Deserialize)]
 pub struct PasswordChange {
-    current: String,
+    /// Not needed for a forced change: the user just logged in with it.
+    #[serde(default)]
+    current: Option<String>,
     new: String,
 }
 
-/// Any user may change their own password. All their other sessions end;
-/// this one continues with a new cookie.
+/// Any user may change their own password, giving the current one unless
+/// the change is forced. All their other sessions end; this one continues
+/// with a new cookie.
 pub async fn change_password(
     State(s): State<AppState>,
     user: AuthUser,
@@ -424,9 +444,13 @@ pub async fn change_password(
 ) -> Result<(CookieJar, StatusCode), ApiError> {
     let users = s.users.clone();
     let name = user.username.clone();
+    let forced = user.must_change_password;
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        if users.verify(&name, &req.current)?.is_none() {
-            anyhow::bail!("the current password is wrong");
+        if !forced {
+            let current = req.current.unwrap_or_default();
+            if users.verify(&name, &current)?.is_none() {
+                anyhow::bail!("the current password is wrong");
+            }
         }
         users.set_password(&name, &req.new)
     })
@@ -439,8 +463,6 @@ pub async fn change_password(
         .session_state(&user.username)?
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "user was just deleted".into()))?;
     let token = s.sessions.create(&user.username, state.epoch);
-    // The generated first password is no longer needed.
-    let _ = std::fs::remove_file(crate::users::initial_password_file(&s.config));
     s.config_changed(&user, format!("changed own password ({})", user.username))
         .await;
     Ok((
