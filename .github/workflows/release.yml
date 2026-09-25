@@ -106,10 +106,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
+      # The compose example that runs the published image.
+      - run: cp docker/compose/docker-compose.yml dist/docker-compose.yml
       - run: cd dist && sha256sum * > SHA256SUMS
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
@@ -128,7 +133,21 @@ jobs:
             chmod +x opcua-audit-gateway
             ```
 
-            Use the `x86_64` archive on an Intel Mac. Checksums are in `SHA256SUMS`.
+            Use the `x86_64` archive on an Intel Mac.
+
+            ### Docker
+
+            Download `docker-compose.yml` from the assets below, then:
+
+            ```sh
+            docker compose up -d
+            docker compose cp gateway:/data/initial-admin-password.txt .   # first login
+            ```
+
+            The web UI is on http://127.0.0.1:8080. The image is
+            `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7).
+
+            Checksums are in `SHA256SUMS`.
 
   image:
     needs: [linux]
@@ -168,6 +187,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          # No .dockerbuild build record in the artifacts; the job summary stays.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: Dockerfile.release

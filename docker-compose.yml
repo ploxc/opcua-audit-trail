@@ -1,7 +1,10 @@
+# From a checkout: uses the published image, or builds it from this
+# directory when it cannot be pulled (`docker compose build` forces a local
+# build). Without a checkout, use docker/compose/docker-compose.yml.
 services:
   gateway:
+    image: ghcr.io/ploxc/opcua-audit-trail:latest
     build: .
-    image: opcua-audit-gateway:dev
     restart: unless-stopped
     ports:
       # Web UI: loopback only (plain HTTP); use a TLS proxy for remote access.
@@ -17,7 +20,7 @@ services:
       - gateway-data:/data
 
   # Optional long-term store: `docker compose --profile questdb up -d`, then set
-  # [export.questdb] url = "http://questdb:9000" in docker/config.toml.
+  # [export.questdb] url = "http://questdb:9000" in /data/config.toml.
   # QuestDB's console is on http://127.0.0.1:9000.
   questdb:
     image: questdb/questdb:latest   # pin a version for production
