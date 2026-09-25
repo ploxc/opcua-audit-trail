@@ -34,6 +34,17 @@ const groupName = (g) => g.name || "Unnamed group";
 const groupFrom = (g) => (g.client ? `from ${g.client}` : "from every client");
 const api = (target, rest = "") => `/targets/${encodeURIComponent(target)}/summarise${rest}`;
 
+// A group by its position, with the group shown to the user: the gateway
+// refuses the change if the list changed meanwhile (another admin), instead
+// of changing another group.
+const groupApi = (target, index, rest = "") => {
+  const g = groupsOf(target)[index] || {};
+  const q = new URLSearchParams({ check: "true" });
+  if (g.name) q.set("name", g.name);
+  if (g.client) q.set("client", g.client);
+  return api(target, `/${index}${rest}?${q}`);
+};
+
 async function refresh(message) {
   state.status = await get("/status");
   toast(message);
@@ -271,7 +282,7 @@ export const actions = {
     if (!choice?.to) return;
     const nodes = [{ node_id: node, name: name || null }];
     if (choice.to.startsWith("g")) {
-      await post(api(target, `/${choice.to.slice(1)}/add`), nodes);
+      await post(groupApi(target, choice.to.slice(1), "/add"), nodes);
     } else {
       await post(api(target), {
         name: choice.name || null,
@@ -285,7 +296,7 @@ export const actions = {
   /** Removes a node from a group: its writes are recorded again. */
   async "unsummarise-node"(el) {
     const { target, group, node } = el.dataset;
-    await post(api(target, `/${group}/remove`), { nodes: [node] });
+    await post(groupApi(target, group, "/remove"), { nodes: [node] });
     await refresh("Removed from the group");
   },
 
@@ -339,7 +350,7 @@ export const actions = {
       .map((n) => ({ node_id: n.node_id, name: n.display_name || null }))
       .concat(pasted(d.paste).map((id) => ({ node_id: id })));
     if (!nodes.length) return;
-    const r = await post(api(target, `/${group}/add`), nodes);
+    const r = await post(groupApi(target, group, "/add"), nodes);
     await refresh(`${plural(r.changed, "node")} added`);
   },
 
@@ -355,7 +366,7 @@ export const actions = {
       confirm: "Rename",
     });
     if (!d) return;
-    await put(api(target, `/${group}`), { name: d.name || null });
+    await put(groupApi(target, group), { name: d.name || null });
     await refresh("Group renamed");
   },
 
@@ -373,7 +384,7 @@ export const actions = {
       danger: true,
     });
     if (!ok) return;
-    await del(api(target, `/${group}`));
+    await del(groupApi(target, group));
     await refresh("Group removed");
   },
 

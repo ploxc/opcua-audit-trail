@@ -581,14 +581,46 @@ fn trimmed(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// The group the caller saw at that position (`?check=true&name=…&client=…`,
+/// empty = none): refused when the list changed meanwhile, so a change never
+/// lands on another group.
+#[derive(Deserialize, Default)]
+pub(crate) struct GroupCheck {
+    #[serde(default)]
+    check: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    client: Option<String>,
+}
+
+impl GroupCheck {
+    pub(crate) fn expecting(name: Option<String>, client: Option<String>) -> Self {
+        GroupCheck {
+            check: true,
+            name,
+            client,
+        }
+    }
+}
+
 fn group_mut<'a>(
     groups: &'a mut [SummariseGroup],
     index: usize,
     target: &str,
+    expect: &GroupCheck,
 ) -> Result<&'a mut SummariseGroup, ApiError> {
-    groups
+    let g = groups
         .get_mut(index)
-        .ok_or_else(|| ApiError::not_found(format!("target '{target}' has no group {index}")))
+        .ok_or_else(|| ApiError::not_found(format!("target '{target}' has no group {index}")))?;
+    let same = |a: &Option<String>, b: &Option<String>| trimmed(a.clone()) == trimmed(b.clone());
+    if expect.check && !(same(&g.name, &expect.name) && same(&g.client, &expect.client)) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!("the summarise groups of '{target}' changed meanwhile; reload and try again"),
+        ));
+    }
+    Ok(g)
 }
 
 /// Adds nodes to a group, skipping those already in it. Returns how many
@@ -667,13 +699,14 @@ async fn rename_group(
     State(s): State<AppState>,
     user: AuthUser,
     Path((name, index)): Path<(String, usize)>,
+    Query(expect): Query<GroupCheck>,
     Json(new): Json<GroupName>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
     let (old, new) = s
         .targets
         .update_summarise(&name, |groups| {
-            let g = group_mut(groups, index, &name)?;
+            let g = group_mut(groups, index, &name, &expect)?;
             let old = g.label();
             g.name = trimmed(new.name);
             Ok::<_, ApiError>((old, g.label()))
@@ -694,12 +727,13 @@ async fn delete_group(
     State(s): State<AppState>,
     user: AuthUser,
     Path((name, index)): Path<(String, usize)>,
+    Query(expect): Query<GroupCheck>,
 ) -> Result<StatusCode, ApiError> {
     user.require(Role::Admin)?;
     let g = s
         .targets
         .update_summarise(&name, |groups| {
-            group_mut(groups, index, &name)?;
+            group_mut(groups, index, &name, &expect)?;
             Ok::<_, ApiError>(groups.remove(index))
         })
         .await
@@ -720,13 +754,14 @@ async fn add_nodes(
     State(s): State<AppState>,
     user: AuthUser,
     Path((name, index)): Path<(String, usize)>,
+    Query(expect): Query<GroupCheck>,
     Json(nodes): Json<Vec<NodeRef>>,
 ) -> ApiResult<GroupChange> {
     user.require(Role::Admin)?;
     let (added, label) = s
         .targets
         .update_summarise(&name, |groups| {
-            let g = group_mut(groups, index, &name)?;
+            let g = group_mut(groups, index, &name, &expect)?;
             Ok::<_, ApiError>((add_to_group(g, nodes)?, g.label()))
         })
         .await
@@ -748,6 +783,7 @@ async fn remove_nodes(
     State(s): State<AppState>,
     user: AuthUser,
     Path((name, index)): Path<(String, usize)>,
+    Query(expect): Query<GroupCheck>,
     Json(req): Json<NodeIds>,
 ) -> ApiResult<GroupChange> {
     user.require(Role::Admin)?;
@@ -759,7 +795,7 @@ async fn remove_nodes(
     let (removed, label) = s
         .targets
         .update_summarise(&name, |groups| {
-            let g = group_mut(groups, index, &name)?;
+            let g = group_mut(groups, index, &name, &expect)?;
             let before = g.nodes.len();
             g.nodes
                 .retain(|n| parse_node(n).map_or(true, |n| !remove.contains(&n)));

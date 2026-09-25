@@ -721,8 +721,11 @@ fn change_tools() -> Vec<(&'static str, Value)> {
     let mut update_fields = target_fields.clone();
     update_fields["new_name"] = text("Rename the target.");
     update_fields["name"] = text("The target to change.");
-    let group = json!({"type": "integer", "minimum": 0,
-        "description": "The group's position in the target's summarise list (list_targets), from 0."});
+    // A group is named by its name and client, exactly as list_targets shows
+    // them (a name and client pair is unique per target), never by position.
+    let group_name = text("The group's name as list_targets shows it; omit for an unnamed group.");
+    let group_client =
+        text("The group's client as list_targets shows it; omit for a group for every client.");
     let node_ids = json!({"type": "array", "items": {"type": "string"},
         "description": "Nodes as in the audit trail, e.g. ns=3;s=\"DB1\".\"Life\"."});
     let thumbprint = json!({"thumbprint": text("The certificate's SHA-1 thumbprint (hex).")});
@@ -794,8 +797,9 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             change_tool(
                 "add_summarised_nodes",
                 "Adds nodes to a summarise group; nodes already in it are skipped.",
-                json!({"target": text("Target name."), "group": group, "node_ids": node_ids}),
-                &["target", "group", "node_ids"],
+                json!({"target": text("Target name."), "group_name": group_name,
+                       "group_client": group_client, "node_ids": node_ids}),
+                &["target", "node_ids"],
             ),
         ),
         (
@@ -804,8 +808,9 @@ fn change_tools() -> Vec<(&'static str, Value)> {
                 "remove_summarised_nodes",
                 "Removes nodes from a summarise group: their writes are recorded one by one \
              again (unless another group for the client has them).",
-                json!({"target": text("Target name."), "group": group, "node_ids": node_ids}),
-                &["target", "group", "node_ids"],
+                json!({"target": text("Target name."), "group_name": group_name,
+                       "group_client": group_client, "node_ids": node_ids}),
+                &["target", "node_ids"],
             ),
         ),
         (
@@ -813,8 +818,9 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             change_tool(
                 "rename_summarise_group",
                 "Renames a summarise group.",
-                json!({"target": text("Target name."), "group": group, "name": text("New name.")}),
-                &["target", "group", "name"],
+                json!({"target": text("Target name."), "group_name": group_name,
+                       "group_client": group_client, "new_name": text("New name.")}),
+                &["target", "new_name"],
             ),
         ),
         (
@@ -822,8 +828,9 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             change_tool(
                 "delete_summarise_group",
                 "Removes a summarise group: writes to its nodes are recorded one by one again.",
-                json!({"target": text("Target name."), "group": group}),
-                &["target", "group"],
+                json!({"target": text("Target name."), "group_name": group_name,
+                       "group_client": group_client}),
+                &["target"],
             ),
         ),
         (
@@ -1020,11 +1027,35 @@ fn required(args: &Value, key: &str) -> anyhow::Result<String> {
     string(args, key).ok_or_else(|| anyhow::anyhow!("'{key}' is required"))
 }
 
-fn group_index(args: &Value) -> anyhow::Result<usize> {
-    args.get("group")
-        .and_then(Value::as_u64)
-        .map(|g| g as usize)
-        .ok_or_else(|| anyhow::anyhow!("'group' is required (a number from 0)"))
+/// The target, the position of the group named by `group_name` and
+/// `group_client`, and the check that it is still there when changed.
+async fn find_group(
+    s: &AppState,
+    args: &Value,
+) -> anyhow::Result<(
+    axum::extract::Path<(String, usize)>,
+    axum::extract::Query<super::GroupCheck>,
+)> {
+    let target = required(args, "target")?;
+    let (name, client) = (string(args, "group_name"), string(args, "group_client"));
+    let groups = super::target_config(s, &target)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e.1))?
+        .summarise;
+    let index = groups
+        .iter()
+        .position(|g| g.name == name && g.client == client)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "target '{target}' has no summarise group with name {name:?} and client \
+                 {client:?} (list_targets shows them)"
+            )
+        })?;
+    let check = super::GroupCheck::expecting(name, client);
+    Ok((
+        axum::extract::Path((target, index)),
+        axum::extract::Query(check),
+    ))
 }
 
 /// `node_ids` as the web API's node list.
@@ -1069,23 +1100,23 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
             reply(super::create_group(st(), user, Path(target), Json(arg(&body)?)).await).await
         }
         "add_summarised_nodes" => {
-            let path = Path((required(&args, "target")?, group_index(&args)?));
+            let (path, check) = find_group(s, &args).await?;
             let body = arg(&json!(node_refs(&args)?))?;
-            reply(super::add_nodes(st(), user, path, Json(body)).await).await
+            reply(super::add_nodes(st(), user, path, check, Json(body)).await).await
         }
         "remove_summarised_nodes" => {
-            let path = Path((required(&args, "target")?, group_index(&args)?));
+            let (path, check) = find_group(s, &args).await?;
             let body = arg(&json!({"nodes": args.get("node_ids")}))?;
-            reply(super::remove_nodes(st(), user, path, Json(body)).await).await
+            reply(super::remove_nodes(st(), user, path, check, Json(body)).await).await
         }
         "rename_summarise_group" => {
-            let path = Path((required(&args, "target")?, group_index(&args)?));
-            let body = arg(&json!({"name": args.get("name")}))?;
-            reply(super::rename_group(st(), user, path, Json(body)).await).await
+            let (path, check) = find_group(s, &args).await?;
+            let body = arg(&json!({"name": args.get("new_name")}))?;
+            reply(super::rename_group(st(), user, path, check, Json(body)).await).await
         }
         "delete_summarise_group" => {
-            let path = Path((required(&args, "target")?, group_index(&args)?));
-            reply(super::delete_group(st(), user, path).await).await
+            let (path, check) = find_group(s, &args).await?;
+            reply(super::delete_group(st(), user, path, check).await).await
         }
         "list_certificates" => reply(super::certificates(st(), user).await).await,
         "trust_server_certificate" => {

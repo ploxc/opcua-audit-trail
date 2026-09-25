@@ -1378,16 +1378,48 @@ async fn mcp_changes_need_token_scope_and_admin() {
         ),
         (
             "add_summarised_nodes",
-            json!({"target": "plc9", "group": 0, "node_ids": ["ns=3;i=2", "ns=3;i=3"]}),
+            json!({"target": "plc9", "group_name": "Life bits", "node_ids": ["ns=3;i=2", "ns=3;i=3"]}),
         ),
         (
             "remove_summarised_nodes",
-            json!({"target": "plc9", "group": 0, "node_ids": ["ns=3;i=1"]}),
+            json!({"target": "plc9", "group_name": "Life bits", "node_ids": ["ns=3;i=1"]}),
         ),
     ] {
         let (_, done) = w.mcp(&config, call(tool, args)).await;
         assert_eq!(done["result"]["isError"], false, "{tool}: {done}");
     }
+    // A group that is not there (wrong name) is refused, not guessed.
+    let (_, wrong) = w
+        .mcp(
+            &config,
+            call(
+                "delete_summarise_group",
+                json!({"target": "plc9", "group_name": "Other"}),
+            ),
+        )
+        .await;
+    assert_eq!(wrong["result"]["isError"], true, "{wrong}");
+    // A second group with the same name and client is refused.
+    let (_, twin) = w
+        .mcp(
+            &config,
+            call(
+                "create_summarise_group",
+                json!({"target": "plc9", "name": "Life bits"}),
+            ),
+        )
+        .await;
+    assert_eq!(twin["result"]["isError"], true, "{twin}");
+    // The web UI names the group it showed: a changed list is refused.
+    let (status, _, _) = w
+        .send(
+            Method::DELETE,
+            "/api/targets/plc9/summarise/0?check=true&name=Someone%20else",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
     let (_, targets) = w.get("/api/targets", &admin).await;
     let plc9 = targets
         .as_array()

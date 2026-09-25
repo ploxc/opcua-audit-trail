@@ -312,7 +312,14 @@ fn validate_summarise(t: &TargetConfig) -> anyhow::Result<()> {
     if total > MAX_SUMMARISED_NODES {
         bail!("target '{name}': at most {MAX_SUMMARISED_NODES} summarised nodes (got {total})");
     }
+    let mut seen = HashSet::new();
     for g in &t.summarise {
+        if !seen.insert((g.name.clone(), g.client.clone())) {
+            bail!(
+                "target '{name}': two summarise groups {}; give one another name",
+                g.label()
+            );
+        }
         if g.name
             .as_ref()
             .is_some_and(|n| n.trim().is_empty() || n.chars().count() > 100)
