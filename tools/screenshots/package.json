@@ -1,0 +1,12 @@
+{
+  "name": "opcua-audit-gateway-screenshots",
+  "private": true,
+  "description": "Makes the README screenshots: npm install && npm run shoot",
+  "type": "module",
+  "scripts": {
+    "shoot": "node shoot.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}
