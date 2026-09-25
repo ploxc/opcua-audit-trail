@@ -99,6 +99,8 @@ function eventSummary(e, target) {
     case "ui_login":
     case "ui_login_failed":
       return e.user;
+    case "mcp_query":
+      return html`<b>${e.by}</b>: ${e.tool} <span class="muted mono">${e.arguments}</span>`;
     case "retention_pruned":
       return `${e.deleted} records removed`;
     case "events_lost":

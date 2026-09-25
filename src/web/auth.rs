@@ -279,7 +279,10 @@ pub async fn csrf(request: Request, next: Next) -> Response {
         .headers()
         .get(CSRF_HEADER)
         .is_some_and(|v| v == CSRF_VALUE);
-    if safe || marked {
+    // The MCP endpoint ignores cookies and needs a bearer token, which a
+    // cross-site request cannot carry.
+    let mcp = request.uri().path() == "/mcp";
+    if safe || marked || mcp {
         next.run(request).await
     } else {
         ApiError(StatusCode::FORBIDDEN, "missing CSRF header".into()).into_response()

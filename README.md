@@ -406,6 +406,34 @@ requests also need the header `X-Requested-With: opcua-audit-gateway`.
 By default the web UI serves plain HTTP on `127.0.0.1`. For remote access,
 enable HTTPS (see above).
 
+## AI assistants (MCP)
+
+An AI assistant such as Claude can answer questions about the trail ("who
+changed Line1.Setpoint yesterday?", "which clients are connected?", "is the
+trail intact?") through the [Model Context Protocol](https://modelcontextprotocol.io)
+endpoint at `/mcp`, on the same address as the web UI.
+
+1. On the **Account** page, create an API token. It acts as you and is shown
+   once.
+2. Add the server to the assistant, e.g. Claude Code:
+
+   ```sh
+   claude mcp add --transport http opcua-audit http://127.0.0.1:8080/mcp \
+     --header "Authorization: Bearer gwt_…"
+   ```
+
+   Other MCP clients: Streamable HTTP transport, URL `…/mcp`, header
+   `Authorization: Bearer <token>`.
+
+The tools only read: `search_audit_trail` (the same filters as the Audit
+trail page), `get_audit_record`, `gateway_status` (targets, connected
+clients, unacknowledged warnings, exports), `most_written_nodes` and
+`verify_audit_trail`. Every tool call is recorded in the trail as
+`mcp_query`, with the token's user and the arguments. Tokens are stored as a
+SHA-256 hash; delete one on the Account page, and deleting a user deletes
+theirs. The endpoint does not accept the web UI's session cookie. For an
+assistant on another machine, enable HTTPS: the token is a password.
+
 ## Development
 
 ```sh

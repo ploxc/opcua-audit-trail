@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod browser;
+mod mcp;
 mod settings;
 pub mod tls;
 
@@ -101,6 +102,8 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(auth::logout))
         .route("/me", get(auth::me))
         .route("/me/password", post(auth::change_password))
+        .route("/me/tokens", get(list_tokens).post(create_token))
+        .route("/me/tokens/{id}", delete(delete_token))
         .route("/status", get(status))
         .route("/targets", get(targets).post(create_target))
         .route("/targets/{name}", put(update_target).delete(delete_target))
@@ -148,6 +151,13 @@ pub fn router(state: AppState) -> Router {
         .route("/favicon.svg", get(favicon))
         .route("/fonts/{file}", get(font))
         .nest("/api", api)
+        // For AI assistants: API tokens, not the session cookie.
+        .route(
+            "/mcp",
+            post(mcp::post)
+                .get(mcp::not_allowed)
+                .delete(mcp::not_allowed),
+        )
         .layer(axum::middleware::from_fn(auth::csrf))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -186,7 +196,8 @@ async fn security_headers(
                 .into_response();
         }
     }
-    let api = request.uri().path().starts_with("/api/");
+    let path = request.uri().path();
+    let api = path.starts_with("/api/") || path == "/mcp";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     if api {
@@ -1078,6 +1089,54 @@ async fn delete_user(
     s.sessions.remove_user(&name);
     s.browser.close_user(&s, &name).await;
     s.config_changed(&user, format!("deleted user '{name}'"))
+        .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The logged-in user's API tokens (for the MCP endpoint).
+async fn list_tokens(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Vec<crate::users::ApiToken>> {
+    Ok(Json(s.users.tokens(&user.username)?))
+}
+
+#[derive(Deserialize)]
+struct NewToken {
+    name: String,
+}
+
+/// Creates a token; its secret is in this answer only.
+async fn create_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<NewToken>,
+) -> ApiResult<crate::users::NewApiToken> {
+    let token = s
+        .users
+        .create_token(&user.username, &req.name)
+        .map_err(ApiError::bad_request)?;
+    s.config_changed(
+        &user,
+        format!(
+            "created API token '{}' ({})",
+            token.token.name, token.token.id
+        ),
+    )
+    .await;
+    Ok(Json(token))
+}
+
+async fn delete_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let name = s
+        .users
+        .delete_token(&user.username, &id)
+        .map_err(|e| ApiError::not_found(format!("{e:#}")))?;
+    s.config_changed(&user, format!("deleted API token '{name}' ({id})"))
         .await;
     Ok(StatusCode::NO_CONTENT)
 }

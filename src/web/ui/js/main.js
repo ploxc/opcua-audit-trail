@@ -254,6 +254,11 @@ async function load() {
       case "users":
         state.users = await get("/users");
         break;
+      case "account":
+        // A new token's secret is shown once: not again after navigating.
+        state.account.newToken = null;
+        state.account.tokens = await get("/me/tokens");
+        break;
       case "settings":
         state.settings = await get("/settings");
         state.status = await get("/status");
@@ -353,6 +358,7 @@ const actions = {
   ...certificates.actions,
   ...browser.actions,
   ...users.actions,
+  ...account.actions,
 };
 
 // `data-form` name → handler(form).

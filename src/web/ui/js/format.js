@@ -80,6 +80,7 @@ export const EVENT_LABELS = {
   config_changed: "Configuration changed",
   ui_login: "UI login",
   ui_login_failed: "UI login failed",
+  mcp_query: "MCP query",
   retention_pruned: "Retention",
   events_lost: "Events lost",
   upstream_endpoints_changed: "Target security changed",
@@ -173,6 +174,7 @@ export const EVENT_GROUPS = [
     ],
   ],
   ["ui", "Web UI logins", ["ui_login", "ui_login_failed"]],
+  ["mcp", "AI assistants (MCP)", ["mcp_query"]],
 ];
 
 /** [type, label] of every event type, sorted by label: the "Event" filter. */

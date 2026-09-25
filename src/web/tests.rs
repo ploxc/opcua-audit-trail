@@ -882,3 +882,189 @@ async fn warnings_and_errors_until_acknowledged() {
     let (_, alarms) = w.get("/api/alarms", &auditor).await;
     assert_eq!(count(&alarms, "warning"), 1);
 }
+
+impl Web {
+    /// A JSON-RPC request to /mcp with a bearer token (no cookie, no CSRF
+    /// header: MCP clients send neither).
+    async fn mcp(&self, token: &str, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header(header::HOST, "127.0.0.1:8080")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = self.app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn mcp_tool(&self, token: &str, name: &str, arguments: Value) -> Value {
+        let (status, answer) = self
+            .mcp(
+                token,
+                json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        answer["result"]["structuredContent"].clone()
+    }
+}
+
+#[tokio::test]
+async fn mcp_reads_the_trail_with_a_token_and_records_every_call() {
+    let w = web().await;
+    let auditor = w.login("auditor").await;
+
+    // Any role may create its own tokens; the secret is in this answer only.
+    let (status, token) = w
+        .post("/api/me/tokens", &auditor, json!({ "name": "Claude" }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let secret = token["secret"].as_str().unwrap().to_string();
+    assert!(secret.starts_with("gwt_"));
+    let (_, list) = w.get("/api/me/tokens", &auditor).await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert!(list[0].get("secret").is_none());
+
+    // No token, a wrong one, or only the session cookie: refused.
+    assert_eq!(
+        w.mcp("gwt_nope_nope", json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, _, _) = w
+        .send(
+            Method::POST,
+            "/mcp",
+            Some(&auditor),
+            Some(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Handshake, notification, tool list.
+    let (status, init) = w
+        .mcp(
+            &secret,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                              "clientInfo": {"name": "test", "version": "1"}}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+    assert!(init["result"]["capabilities"]["tools"].is_object());
+    let (status, _) = w
+        .mcp(
+            &secret,
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, tools) = w
+        .mcp(
+            &secret,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        )
+        .await;
+    let names: Vec<_> = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"search_audit_trail"));
+    assert!(names.contains(&"verify_audit_trail"));
+
+    // The auditor's login is in the trail; the tools find it.
+    let found = w
+        .mcp_tool(
+            &secret,
+            "search_audit_trail",
+            json!({"event": "ui_login", "user": "auditor"}),
+        )
+        .await;
+    assert!(!found["records"].as_array().unwrap().is_empty(), "{found}");
+    let status = w.mcp_tool(&secret, "gateway_status", json!({})).await;
+    assert!(status["targets"].is_array());
+    let verify = w.mcp_tool(&secret, "verify_audit_trail", json!({})).await;
+    assert_eq!(verify["intact"], true);
+
+    // Every tool call is itself a record, with the token's user.
+    let calls = w
+        .mcp_tool(&secret, "search_audit_trail", json!({"event": "mcp_query"}))
+        .await;
+    let calls = calls["records"].as_array().unwrap();
+    assert!(calls.len() >= 3, "{calls:?}");
+    assert!(calls.iter().all(|r| r["event"]["by"] == "auditor"));
+
+    // A deleted token no longer works.
+    let id = token["id"].as_str().unwrap();
+    let (status, _, _) = w
+        .send(
+            Method::DELETE,
+            &format!("/api/me/tokens/{id}"),
+            Some(&auditor),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        w.mcp(
+            &secret,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn mcp_tokens_end_with_their_user() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let (status, _) = w
+        .post(
+            "/api/users",
+            &admin,
+            json!({ "username": "jens", "password": "jens-password", "role": "auditor" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let jens = w.login("jens").await;
+    // A password an admin chose must be changed first, also for tokens.
+    let (status, _) = w
+        .post("/api/me/tokens", &jens, json!({ "name": "x" }))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, cookie) = w
+        .send(
+            Method::POST,
+            "/api/me/password",
+            Some(&jens),
+            Some(json!({ "current": "jens-password", "new": "jens-password-2" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let jens = cookie.unwrap();
+    let (_, token) = w
+        .post("/api/me/tokens", &jens, json!({ "name": "x" }))
+        .await;
+    let secret = token["secret"].as_str().unwrap().to_string();
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::OK);
+
+    let (status, _, _) = w
+        .send(Method::DELETE, "/api/users/jens", Some(&admin), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::UNAUTHORIZED);
+}

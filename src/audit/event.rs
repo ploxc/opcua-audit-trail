@@ -116,6 +116,14 @@ pub enum AuditEvent {
     UiLoginFailed {
         user: String,
     },
+    /// A tool call on the MCP endpoint (an AI assistant reading the trail
+    /// or the status), with the token's user and the arguments.
+    McpQuery {
+        by: String,
+        token: String,
+        tool: String,
+        arguments: String,
+    },
     /// Discovery of a server that is not (yet) a target, from the web UI.
     Discovery {
         by: String,
@@ -331,6 +339,7 @@ impl AuditEvent {
             AuditEvent::GatewayStopped => "gateway_stopped",
             AuditEvent::ConfigChanged { .. } => "config_changed",
             AuditEvent::UiLogin { .. } => "ui_login",
+            AuditEvent::McpQuery { .. } => "mcp_query",
             AuditEvent::UiLoginFailed { .. } => "ui_login_failed",
             AuditEvent::Discovery { .. } => "discovery",
             AuditEvent::RetentionPruned { .. } => "retention_pruned",

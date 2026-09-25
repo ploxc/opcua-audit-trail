@@ -894,6 +894,11 @@ button:disabled {
   background: var(--warn-soft);
   color: var(--warn);
 }
+/* A new API token and the command that uses it: long, so they wrap. */
+.token-secret {
+  overflow-wrap: anywhere;
+  user-select: all;
+}
 .alert.ok {
   background: var(--ok-soft);
   color: var(--ok);
