@@ -295,8 +295,8 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
             };
             let Some(tool) = ctx.tools().into_iter().find(|t| t["name"] == name) else {
                 let hint = if change_tools().iter().any(|(_, t)| t["name"] == name) {
-                    " (this token may not use it: an admin chooses a token's permissions when \
-                     creating it)"
+                    " (this token may not use it: its permissions are chosen when it is \
+                     created, on the Account page)"
                 } else {
                     ""
                 };
