@@ -90,12 +90,18 @@ impl Default for Sessions {
 }
 
 impl Sessions {
-    fn create(&self, username: &str, epoch: i64) -> String {
-        let token = hex::encode(
-            opcua::crypto::random::byte_string(32)
-                .value
-                .unwrap_or_default(),
-        );
+    /// A new session. Fails when the system's random generator does, rather
+    /// than hand out a guessable (empty) token.
+    fn create(&self, username: &str, epoch: i64) -> Result<String, ApiError> {
+        use argon2::password_hash::rand_core::{OsRng, RngCore};
+        let mut bytes = [0u8; 32];
+        OsRng.try_fill_bytes(&mut bytes).map_err(|e| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("no random numbers for a session: {e}"),
+            )
+        })?;
+        let token = hex::encode(bytes);
         let mut map = self.map.lock();
         map.retain(|_, s| {
             s.last_seen.elapsed() < IDLE_TIMEOUT && s.created.elapsed() < MAX_LIFETIME
@@ -110,7 +116,7 @@ impl Sessions {
                 last_seen: now,
             },
         );
-        token
+        Ok(token)
     }
 
     /// The user name and epoch of a live session.
@@ -439,7 +445,7 @@ pub async fn login(
         .users
         .session_state(&user.username)?
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "user was just deleted".into()))?;
-    let token = s.sessions.create(&user.username, state.epoch);
+    let token = s.sessions.create(&user.username, state.epoch)?;
     let _ = s
         .audit
         .record_committed(
@@ -512,7 +518,7 @@ pub async fn change_password(
         .users
         .session_state(&user.username)?
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "user was just deleted".into()))?;
-    let token = s.sessions.create(&user.username, state.epoch);
+    let token = s.sessions.create(&user.username, state.epoch)?;
     s.config_changed(&user, format!("changed own password ({})", user.username))
         .await;
     Ok((
