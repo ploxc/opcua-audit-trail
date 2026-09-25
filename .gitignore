@@ -26,3 +26,4 @@ target
 /config.toml
 /demo-plc-pki/
 /demo-client-pki/
+/stress-client-pki/
