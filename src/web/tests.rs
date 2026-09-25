@@ -1309,3 +1309,35 @@ async fn scripts_have_versioned_urls() {
     let (_, account) = get(main.replace("main.js", "pages/account.js")).await;
     assert!(account.contains("tokensCard"));
 }
+
+/// Audit finding S2: stored QuestDB credentials are not sent to a new server.
+#[tokio::test]
+async fn export_credentials_stay_with_their_server() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let put = |url: &str, password: Option<&str>| {
+        let mut q = json!({"url": url, "table": "t", "username": "u", "interval_secs": 5});
+        if let Some(p) = password {
+            q["password"] = json!(p);
+        }
+        json!({ "questdb": q })
+    };
+    let send = |body: Value| {
+        let (w, admin) = (&w, &admin);
+        async move {
+            let (status, v, _) = w
+                .send(Method::PUT, "/api/settings/export", Some(admin), Some(body))
+                .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{v}");
+            let (_, settings) = w.get("/api/settings", admin).await;
+            settings["export"]["questdb"]["password_set"] == true
+        }
+    };
+    assert!(send(put("http://127.0.0.1:9000", Some("pw"))).await);
+    // Same server, another table: kept.
+    assert!(send(put("http://127.0.0.1:9000/", None)).await);
+    // Another host: forgotten unless given again.
+    assert!(!send(put("http://localhost:9000", None)).await);
+    assert!(send(put("http://localhost:9000", Some("pw2"))).await);
+    assert!(!send(put("http://localhost:9001", None)).await);
+}

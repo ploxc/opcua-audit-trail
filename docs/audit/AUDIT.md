@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S2 | High | Changing the export URL sends the stored credentials and the whole trail to the new host |
 | S3 | Medium | API tokens survive a password reset; an admin cannot revoke another user's tokens |
 | S4 | Medium | MCP accepts unbounded JSON-RPC batches |
 | S5 | Medium | No Host check when the web UI listens on a non-loopback address (DNS rebinding) |
@@ -51,20 +50,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S18 | Info | `/mcp` tells unauthenticated callers whether MCP is on |
 | S19 | Info | Export status clamps `pending`, so a stalled export can look healthy |
 | S20 | Info | A failed random generator would give an empty session token |
-
-## High
-
-### S2: Changing the export URL sends the stored credentials to the new host
-
-- **Issue:** `put_export` keeps the stored password and token when they are
-  not sent again (`settings.rs` `secret()`), also when the URL changes. The
-  exporter sends them as `Authorization` to the new URL (`questdb.rs`),
-  followed by every audit record.
-- **Scenario:** an admin session (or an MCP token with `settings`) sets the
-  URL to `http://attacker:9000` without a password: the attacker receives
-  the QuestDB credentials, which the UI never shows, and the trail.
-- **Recommendation:** when scheme, host or port change, drop the stored
-  password and token unless new ones are given (UI and MCP alike).
 
 ## Medium
 

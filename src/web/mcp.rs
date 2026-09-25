@@ -802,7 +802,7 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             change_tool(
                 "update_export_settings",
                 "Sets or removes (null) the QuestDB export. Omitted password/token keep \
-             the stored one.",
+             the stored one while the URL's scheme, host and port stay the same.",
                 json!({"questdb": {"type": ["object", "null"], "properties": {
                 "url": text("e.g. http://questdb:9000"),
                 "table": text("Table name, e.g. opcua_audit."),

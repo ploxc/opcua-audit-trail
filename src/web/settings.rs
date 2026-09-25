@@ -212,6 +212,23 @@ fn secret(input: Option<String>, stored: Option<String>) -> Option<String> {
     }
 }
 
+/// Whether two URLs name the same server: scheme, host and port (with the
+/// scheme's default port). Unparseable URLs never match.
+fn same_server(a: &str, b: &str) -> bool {
+    let origin = |url: &str| {
+        let uri: axum::http::Uri = url.trim().parse().ok()?;
+        let scheme = uri.scheme_str()?.to_ascii_lowercase();
+        let host = uri.host()?.to_ascii_lowercase();
+        let port = uri.port_u16().or(match scheme.as_str() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        });
+        Some((scheme, host, port))
+    };
+    matches!((origin(a), origin(b)), (Some(x), Some(y)) if x == y)
+}
+
 fn non_empty(v: Option<String>) -> Option<String> {
     v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
@@ -262,8 +279,12 @@ pub async fn put_export(
             }
             std::fs::write(&ca, format!("{pem}\n")).map_err(|e| ApiError::bad_request(e.into()))?;
         }
+        let url = q.url.trim().trim_end_matches('/').to_string();
+        // Stored credentials only go to the server they were given for: a
+        // new scheme, host or port needs them again.
+        let stored = stored.filter(|st| same_server(&st.url, &url));
         export.questdb = Some(QuestDbConfig {
-            url: q.url.trim().trim_end_matches('/').to_string(),
+            url,
             table: q.table.trim().to_string(),
             username: non_empty(q.username),
             password: secret(q.password, stored.as_ref().and_then(|s| s.password.clone())),
@@ -411,4 +432,21 @@ pub async fn put_mcp(
             .await;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_server;
+
+    #[test]
+    fn credentials_follow_the_server() {
+        // Audit finding S2: a new scheme, host or port drops the stored
+        // credentials; a new path or table keeps them.
+        assert!(same_server("http://questdb:9000", "http://QuestDB:9000/"));
+        assert!(same_server("https://q", "https://q:443/exec"));
+        assert!(!same_server("http://questdb:9000", "http://attacker:9000"));
+        assert!(!same_server("http://questdb:9000", "https://questdb:9000"));
+        assert!(!same_server("http://questdb:9000", "http://questdb:9001"));
+        assert!(!same_server("not a url", "not a url"));
+    }
 }
