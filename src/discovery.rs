@@ -226,72 +226,84 @@ pub async fn monitor_target(
             r = discover_raw(&client, &target.endpoint_url) => r,
         };
 
-        let mut map = statuses.write().await;
-        let Some(status) = map.get_mut(&target.name) else {
-            return;
-        };
-        let previous = status.state;
-        status.last_check = Some(Utc::now());
-        let event = match result {
-            Ok(endpoints) => {
-                let before: Vec<String> = status
-                    .raw_endpoints
-                    .iter()
-                    .map(crate::relay::endpoints::summary)
-                    .collect();
-                let after: Vec<String> = endpoints
-                    .iter()
-                    .map(crate::relay::endpoints::summary)
-                    .collect();
-                let event = if previous != UpstreamState::Available {
-                    Some(AuditEvent::UpstreamAvailable {
-                        endpoint_url: target.endpoint_url.clone(),
-                        endpoints: endpoints.len(),
-                    })
-                } else {
-                    None
-                };
-                // The gateway follows the server, so a change in what the
-                // server offers changes what clients are offered.
-                let changed = (!before.is_empty() && before != after).then(|| {
-                    tracing::warn!(
-                        target = %target.name,
-                        "the upstream server's endpoints changed: {before:?} -> {after:?}"
-                    );
-                    AuditEvent::UpstreamEndpointsChanged {
-                        endpoint_url: target.endpoint_url.clone(),
-                        before,
-                        after,
-                    }
-                });
-                let event = event.into_iter().chain(changed).collect::<Vec<_>>();
-                status.state = UpstreamState::Available;
-                status.last_error = None;
-                status.endpoints = endpoints.iter().map(EndpointInfo::from).collect();
-                status.raw_endpoints = endpoints;
-                event
-            }
-            Err(e) => {
-                let reason = format!("{e:#}");
-                tracing::warn!(target = %target.name, "{reason}");
-                let event = (previous != UpstreamState::Unavailable)
-                    .then(|| AuditEvent::UpstreamUnavailable {
-                        endpoint_url: target.endpoint_url.clone(),
-                        reason: reason.clone(),
-                    })
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                status.state = UpstreamState::Unavailable;
-                status.last_error = Some(reason);
-                event
-            }
-        };
-        drop(map);
-        for event in event {
-            let _ = audit
-                .record(AuditEntry::new(event).target(target.name.clone()))
-                .await;
+        apply_discovery(&target, &statuses, &audit, result).await;
+    }
+}
+
+/// Stores the result of discovering a target in its status and audits a
+/// change in availability or endpoints. Used by the periodic monitor and by
+/// "Check now".
+pub async fn apply_discovery(
+    target: &TargetConfig,
+    statuses: &TargetStatuses,
+    audit: &AuditHandle,
+    result: anyhow::Result<Vec<EndpointDescription>>,
+) {
+    let mut map = statuses.write().await;
+    let Some(status) = map.get_mut(&target.name) else {
+        return;
+    };
+    let previous = status.state;
+    status.last_check = Some(Utc::now());
+    let event = match result {
+        Ok(endpoints) => {
+            let before: Vec<String> = status
+                .raw_endpoints
+                .iter()
+                .map(crate::relay::endpoints::summary)
+                .collect();
+            let after: Vec<String> = endpoints
+                .iter()
+                .map(crate::relay::endpoints::summary)
+                .collect();
+            let event = if previous != UpstreamState::Available {
+                Some(AuditEvent::UpstreamAvailable {
+                    endpoint_url: target.endpoint_url.clone(),
+                    endpoints: endpoints.len(),
+                })
+            } else {
+                None
+            };
+            // The gateway follows the server, so a change in what the
+            // server offers changes what clients are offered.
+            let changed = (!before.is_empty() && before != after).then(|| {
+                tracing::warn!(
+                    target = %target.name,
+                    "the upstream server's endpoints changed: {before:?} -> {after:?}"
+                );
+                AuditEvent::UpstreamEndpointsChanged {
+                    endpoint_url: target.endpoint_url.clone(),
+                    before,
+                    after,
+                }
+            });
+            let event = event.into_iter().chain(changed).collect::<Vec<_>>();
+            status.state = UpstreamState::Available;
+            status.last_error = None;
+            status.endpoints = endpoints.iter().map(EndpointInfo::from).collect();
+            status.raw_endpoints = endpoints;
+            event
         }
+        Err(e) => {
+            let reason = format!("{e:#}");
+            tracing::warn!(target = %target.name, "{reason}");
+            let event = (previous != UpstreamState::Unavailable)
+                .then(|| AuditEvent::UpstreamUnavailable {
+                    endpoint_url: target.endpoint_url.clone(),
+                    reason: reason.clone(),
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            status.state = UpstreamState::Unavailable;
+            status.last_error = Some(reason);
+            event
+        }
+    };
+    drop(map);
+    for event in event {
+        let _ = audit
+            .record(AuditEntry::new(event).target(target.name.clone()))
+            .await;
     }
 }
 

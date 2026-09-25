@@ -488,6 +488,13 @@ impl Connection {
                 let hint = if text.contains("BadSecurityChecksFailed")
                     || text.contains("BadCertificateUntrusted")
                 {
+                    // Show it on the target's card and in the trail now,
+                    // not at the next periodic trust check.
+                    target
+                        .set_gateway_trust(crate::discovery::GatewayTrust::Refused {
+                            detail: text.clone(),
+                        })
+                        .await;
                     "; the target refused the gateway: it probably does not trust the \
                      gateway's certificate yet (trust it on the target, e.g. move it from \
                      its rejected to its trusted certificates)"

@@ -185,7 +185,7 @@ few secure channels.
 ## Installation
 
 Release archives (Linux x86_64/ARM64/ARMv7 static, Windows, macOS) and
-multi-arch images (`ghcr.io/harted/opcua-audit-trail`) are built for every
+multi-arch images (`ghcr.io/ploxc/opcua-audit-trail`) are built for every
 `v*` tag.
 
 ### Linux (systemd)
@@ -224,12 +224,36 @@ password is in `initial-admin-password.txt` in the data directory.
 from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
 to files instead of the console.
 
-### Docker
+### macOS
+
+The binaries are not signed or notarized, so macOS quarantines them after a
+download. Remove that and make the file executable:
 
 ```sh
+tar xzf opcua-audit-gateway-*-macos-arm64.tar.gz && cd opcua-audit-gateway-*
+xattr -d com.apple.quarantine opcua-audit-gateway   # "No such xattr" is fine
+chmod +x opcua-audit-gateway
+./opcua-audit-gateway init && ./opcua-audit-gateway run
+```
+
+Use the `x86_64` archive on an Intel Mac.
+
+### Docker
+
+The image `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7) is
+published for every release, with the tags `latest`, `X.Y` and `X.Y.Z`. All
+you need is [`docker/compose/docker-compose.yml`](docker/compose/docker-compose.yml)
+(also attached to every release):
+
+```sh
+curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker/compose/docker-compose.yml
 docker compose up -d
 docker compose cp gateway:/data/initial-admin-password.txt .   # first login
 ```
+
+The web UI is on http://127.0.0.1:8080. In a checkout, `docker compose up -d`
+uses the `docker-compose.yml` there: the same image, or a local build when it
+cannot be pulled (`docker compose build` forces one).
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
 volume. On the first start `/data/config.toml` is created from

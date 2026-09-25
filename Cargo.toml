@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Transparent OPC UA gateway that records an audit trail of every write, method call and client session."
-repository = "https://github.com/harted/opcua-audit-trail"
+repository = "https://github.com/ploxc/opcua-audit-trail"
 
 [[bin]]
 name = "opcua-audit-gateway"

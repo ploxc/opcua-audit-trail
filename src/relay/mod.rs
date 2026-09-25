@@ -278,12 +278,41 @@ impl RelayTarget {
                 }
             }
         };
-        let mut statuses = self.statuses.write().await;
-        if let Some(status) = statuses.get_mut(&self.config.name) {
-            if status.gateway_trust != result {
-                tracing::info!(target = %self.config.name, "gateway trust: {result:?}");
+        self.set_gateway_trust(result).await;
+    }
+
+    /// Stores what the trust check, or a client's connection, found. When
+    /// the target starts refusing the gateway, the trail gets one
+    /// upstream_unavailable record (a warning), not one per client.
+    pub async fn set_gateway_trust(&self, result: crate::discovery::GatewayTrust) {
+        use crate::discovery::GatewayTrust;
+        let newly_refused = {
+            let mut statuses = self.statuses.write().await;
+            let Some(status) = statuses.get_mut(&self.config.name) else {
+                return;
+            };
+            if status.gateway_trust == result {
+                return;
             }
-            status.gateway_trust = result;
+            tracing::info!(target = %self.config.name, "gateway trust: {result:?}");
+            let was_refused = matches!(status.gateway_trust, GatewayTrust::Refused { .. });
+            status.gateway_trust = result.clone();
+            match &result {
+                GatewayTrust::Refused { detail } if !was_refused => Some(detail.clone()),
+                _ => None,
+            }
+        };
+        if let Some(detail) = newly_refused {
+            let event = crate::audit::AuditEvent::UpstreamUnavailable {
+                endpoint_url: self.config.endpoint_url.clone(),
+                reason: format!(
+                    "the target refused the gateway ({detail}); it probably does not trust \
+                     the gateway's certificate yet (trust it on the target, e.g. move it from \
+                     its rejected to its trusted certificates)"
+                ),
+            };
+            let entry = crate::audit::AuditEntry::new(event).target(self.config.name.clone());
+            let _ = self.audit.record(entry).await;
         }
     }
 
