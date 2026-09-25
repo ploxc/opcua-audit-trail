@@ -56,4 +56,8 @@ image. Merge only when all checks are green.
 - Code, comments and docs in English; short sentences, no more than needed.
 - User docs live in `docs/manual/` (one page per topic); the README is an
   overview with a Docker quick start. Update the manual with the behaviour.
+- **CHANGELOG.md** ([Keep a Changelog](https://keepachangelog.com)): every
+  change a user notices goes under `[Unreleased]` in the same PR. A release
+  moves it to a version section; then tag `vX.Y.Z` (the tag publishes the
+  GitHub release and the images at once; its notes link to the changelog).
 - Match the surrounding code; doc comments say why, not what.
