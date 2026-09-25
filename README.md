@@ -410,29 +410,6 @@ password still gets in. Behind a reverse proxy, set `trusted_proxies =
 ["<proxy address>"]` under `[web]` so the limit applies per client (from
 `X-Forwarded-For`), not to everyone at once.
 
-## REST API
-
-All routes need a session cookie from `POST /api/login`. State-changing
-requests also need the header `X-Requested-With: opcua-audit-gateway`.
-
-| Method | Path | |
-|---|---|---|
-| GET | `/api/status` | Version, certificate, targets with upstream state and endpoints |
-| GET | `/api/targets` | Target status only |
-| GET | `/api/targets/{name}/clients` | Clients connected through the gateway |
-| POST | `/api/targets/{name}/discover` | Discover a configured target now |
-| POST | `/api/discover` | `{"endpoint_url": "opc.tcp://…"}`: discover any server (admin, audited) |
-| GET | `/api/certificates` | Own, trusted and rejected certificates |
-| GET | `/api/audit` | Audit records, newest first. Filters: `target`, `kind`, `user`, `node_id`, `since`, `until`, `before_seq`, `limit` |
-| GET | `/api/audit.csv` | The same filters, as CSV |
-| GET | `/api/audit/verify` | Verify the hash chain |
-| GET | `/api/audit/most-written` | Nodes with the most recorded writes (`hours`, default 24) |
-| POST | `/api/targets/{name}/ignore`, `…/ignore/remove` | `{"node_id": "…", "client": "…"}`: summarise a node's writes, or record them again (admin, audited) |
-| | `/api/targets`, `/api/certificates/…`, `/api/users`, `/api/browser/{target}/…` | Used by the UI; see `src/web/mod.rs` |
-
-By default the web UI serves plain HTTP on `127.0.0.1`. For remote access,
-enable HTTPS (see above).
-
 ## AI assistants (MCP)
 
 An AI assistant such as Claude can answer questions about the trail ("who

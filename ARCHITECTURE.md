@@ -288,6 +288,12 @@ produces everything, also for ARMv7. A strict Content-Security-Policy (no
 inline scripts) applies. All rendering goes through an escaping template
 helper.
 
+The UI talks to the gateway through `/api/*`. That is the UI's own API, not
+a public interface: it only takes a web session cookie (plus the CSRF
+header) and changes with the UI; the routes are in `src/web/mod.rs`.
+Programs use the MCP endpoint (API tokens with their own permissions);
+monitoring can use `GET /api/health`, which needs no login.
+
 The look follows the Ploxc brand, as in Modbux and on ploxc.com: primary
 `#5b9279`, dark `#181818`/`#1F1F1F`, light `#fafafa`/`#ffffff`, the Inter
 font and Material icons. Light or dark follows the system until the user
