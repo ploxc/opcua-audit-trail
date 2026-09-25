@@ -29,7 +29,7 @@ In **Settings** (admin) or `[audit]` in `config.toml`:
 ```toml
 [audit]
 retention_days = 365      # 0 keeps everything; shortening deletes older records at once
-fail_mode = "open"        # or "closed"
+fail_mode = "open"        # or "closed" (the default in the Docker image)
 record_old_value = true   # read the value before each write, for old → new
 ```
 

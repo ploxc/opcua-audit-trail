@@ -20,8 +20,7 @@ table = "opcua_audit"         # created on first write
 - Changing the URL's host drops the stored password or token, unless new ones
   are given: they are never sent to another server.
 - QuestDB is not bundled with the gateway; use one you run.
-- Syslog export is not supported (any more): see
-  [docs/export/SYSLOG.md](../export/SYSLOG.md).
+- Syslog: not supported (see [docs/export/SYSLOG.md](../export/SYSLOG.md)).
 
 ## Tamper evidence
 

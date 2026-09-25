@@ -10,7 +10,7 @@ Where the first password comes from:
 |---|---|
 | Docker | `OPCUA_GATEWAY_ADMIN_PASSWORD` in `docker-compose.yml` when set; otherwise a random one, shown once by `docker compose logs gateway` |
 | Linux (systemd) | Random, in the journal: `sudo journalctl -u opcua-audit-gateway \| grep "first login"` |
-| Windows (service) | A service has no console: set it before the first start with `user passwd admin` (see [Windows](installation/windows.md)) |
+| Windows (service) | A service has no console: set it before the first start (or later, to reset) with `user passwd admin` (see [Windows](installation/windows.md)) |
 | A terminal (`run`, macOS, from source) | Random, printed in the terminal at the first start |
 
 The random password is printed to the console (stdout) only, never to a log

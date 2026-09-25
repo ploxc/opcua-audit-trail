@@ -15,4 +15,4 @@ Use the `x86_64` archive on an Intel Mac.
 `run` prints the first admin password in the terminal (see
 [First login](../first-login.md)); the web UI is on http://127.0.0.1:8080.
 `init` writes `config.toml` in the current directory; data and certificates
-go next to it.
+go next to it. To upgrade, replace the binary; config and data are kept.

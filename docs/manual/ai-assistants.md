@@ -53,7 +53,7 @@ to `PATH` in `env`.
 `Authorization: Bearer <token>`.
 
 **The self-signed certificate:** Node-based clients must trust it:
-download it on **Settings → Web UI** and set `NODE_EXTRA_CA_CERTS` (see
+download it on **Settings → Web UI and files** and set `NODE_EXTRA_CA_CERTS` (see
 [HTTPS](https.md)). Download it again after it is regenerated.
 
 ## What an assistant can do
@@ -69,10 +69,8 @@ What a token may **change** is chosen when it is created, per area:
 - **Certificates:** trust and untrust OPC UA certificates.
 - **Settings:** audit, export and certificate host names. Retention only
   longer, and fail-closed not off: those stay in the web UI.
-- **Alarms** (operators too, as in the web UI): acknowledge errors and
-  warnings. The assistant is told to show the records and ask first, and it
-  only acknowledges up to the last record it showed, so newer ones stay
-  open; afterwards it says what it acknowledged.
+- **Alarms** (operators too): acknowledge errors and warnings; the assistant
+  shows them and asks first.
 
 A token with nothing ticked only reads, so a leaked read token cannot change
 anything. Give a token only what it needs, and delete it when the work is

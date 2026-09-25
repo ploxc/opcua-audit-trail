@@ -14,6 +14,8 @@ How to install, set up and use the OPC UA Audit Gateway. For the design, see
   [macOS](installation/macos.md) ·
   [From source](installation/from-source.md)
 - [First login](first-login.md): where the first admin password comes from.
+- [Your first PLC](first-target.md): from a fresh gateway to a client writing
+  through it.
 - [HTTPS](https.md): the web UI's certificate and how to trust it.
 
 ## Connecting PLCs and clients

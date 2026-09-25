@@ -20,10 +20,8 @@ opcua-audit-gateway user role <name> admin
 opcua-audit-gateway user delete <name>
 ```
 
-Use the same `--config` as the gateway. A user that does not exist is
-reported before any password is asked, with the path of the user database,
-so a command run against the wrong config is noticed at once. `user passwd
-admin` also creates the admin if the gateway has not run yet.
+Use the same `--config` as the gateway. `user passwd admin` also creates the
+admin if the gateway has not run yet.
 
 ## Sessions and logins
 
@@ -37,7 +35,5 @@ admin` also creates the admin if the gateway has not run yet.
 
 ## API tokens
 
-Each user can create API tokens for AI assistants on the **Account** page;
-admins see and revoke everyone's on the **Users** page. Resetting a user's
-password or deleting the user deletes their tokens. See
+Each user creates API tokens for AI assistants on the **Account** page; see
 [AI assistants](ai-assistants.md).
