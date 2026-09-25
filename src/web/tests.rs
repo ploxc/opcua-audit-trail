@@ -1093,11 +1093,60 @@ async fn mcp_tokens_end_with_their_user() {
     w.enable_mcp(true).await;
     assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::OK);
 
+    // Audit finding S3: admins see every token and revoke any of them...
+    let (_, second) = w
+        .post("/api/me/tokens", &jens, json!({ "name": "y" }))
+        .await;
+    let second_secret = second["secret"].as_str().unwrap().to_string();
+    let (status, _) = w.get("/api/tokens", &jens).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, all) = w.get("/api/tokens", &admin).await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+    assert!(all.to_string().contains("\"username\":\"jens\""));
+    assert!(!all.to_string().contains(&second_secret));
+    let id = second["id"].as_str().unwrap();
+    let (status, _, _) = w
+        .send(
+            Method::DELETE,
+            &format!("/api/users/jens/tokens/{id}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        w.mcp(&second_secret, ping.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, records) = w
+        .get("/api/audit?kind=config_changed&limit=5", &admin)
+        .await;
+    assert!(
+        records.to_string().contains("revoked API token"),
+        "{records}"
+    );
+
+    // ...and a password reset by an admin deletes the user's tokens.
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/jens",
+            Some(&admin),
+            Some(json!({ "password": "reset-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        w.mcp(&secret, ping.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, all) = w.get("/api/tokens", &admin).await;
+    assert!(all.as_array().unwrap().is_empty(), "{all}");
+
     let (status, _, _) = w
         .send(Method::DELETE, "/api/users/jens", Some(&admin), None)
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::UNAUTHORIZED);
 }
 
 /// The token is a password: plain HTTP only on a loopback-only web UI.

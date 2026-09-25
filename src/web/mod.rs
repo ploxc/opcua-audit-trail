@@ -104,6 +104,8 @@ pub fn router(state: AppState) -> Router {
         .route("/me/password", post(auth::change_password))
         .route("/me/tokens", get(list_tokens).post(create_token))
         .route("/me/tokens/{id}", delete(delete_token))
+        .route("/tokens", get(all_tokens))
+        .route("/users/{name}/tokens/{id}", delete(revoke_token))
         .route("/status", get(status))
         .route("/targets", get(targets).post(create_target))
         .route("/targets/{name}", put(update_target).delete(delete_target))
@@ -1231,6 +1233,34 @@ async fn delete_user(
     s.browser.close_user(&s, &name).await;
     s.config_changed(&user, format!("deleted user '{name}'"))
         .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Every user's API tokens (admins): to see and revoke them.
+async fn all_tokens(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Vec<crate::users::UserToken>> {
+    user.require(Role::Admin)?;
+    Ok(Json(s.users.all_tokens()?))
+}
+
+/// Revokes any user's API token (admins).
+async fn revoke_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((name, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    let token = s
+        .users
+        .delete_token(&name, &id)
+        .map_err(|e| ApiError::not_found(format!("{e:#}")))?;
+    s.config_changed(
+        &user,
+        format!("revoked API token '{token}' ({id}) of user '{name}'"),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

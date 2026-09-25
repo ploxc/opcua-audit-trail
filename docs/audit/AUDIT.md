@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S3 | Medium | API tokens survive a password reset; an admin cannot revoke another user's tokens |
 | S4 | Medium | MCP accepts unbounded JSON-RPC batches |
 | S5 | Medium | No Host check when the web UI listens on a non-loopback address (DNS rebinding) |
 | N8 | Medium | Fail-open, the default, drops write records under load |
@@ -52,18 +51,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Medium
-
-### S3: API tokens survive a password reset
-
-- **Issue:** tokens are only deleted with their user or one by one by their
-  owner (`users.rs`). A password change or reset only ends web sessions.
-  `list_tokens` and `delete_token` only work on the caller's own tokens.
-- **Scenario:** an account is compromised; the admin resets its password.
-  The attacker's token works again as soon as the user has chosen a new
-  password.
-- **Recommendation:** delete a user's tokens when an admin resets their
-  password (and offer it on the user's own change). Let admins list and
-  revoke any user's tokens (Users page).
 
 ### S4: MCP accepts unbounded JSON-RPC batches
 

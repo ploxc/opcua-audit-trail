@@ -477,8 +477,9 @@ with the token's id; passwords in their arguments are not recorded.
 Assistants never write values to a PLC, and never change users, the MCP
 settings, API tokens or the web server. Every tool call is recorded in the trail as
 `mcp_query`, with the token's user and the arguments. Tokens are stored as a
-SHA-256 hash; delete one on the Account page, and deleting a user deletes
-theirs. The endpoint does not accept the web UI's session cookie. Turning
+SHA-256 hash; delete one on the Account page. Admins see every user's
+tokens on the Users page and can revoke any of them; resetting a user's
+password or deleting the user deletes theirs. The endpoint does not accept the web UI's session cookie. Turning
 the endpoint off stops every token at once.
 
 ## Development

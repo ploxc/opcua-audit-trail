@@ -377,7 +377,9 @@ need, and it keeps an SDK dependency out of the binary.
 - **Authentication:** API tokens (`gwt_<id>_<secret>`) that a user creates on
   the Account page, in `api_tokens` in `gateway.db`, stored as SHA-256 (the
   secret is 32 random bytes; a slow hash adds nothing). A token acts as its
-  user with that user's current role and ends with the user. The session
+  user with that user's current role and ends with the user or with a
+  password reset by an admin; admins list and revoke any user's tokens
+  (`GET /api/tokens`, `DELETE /api/users/{name}/tokens/{id}`). The session
   cookie is not accepted here, so the endpoint is exempt from the CSRF header
   check: a cross-site request cannot carry the bearer token.
 - **Read tools:** search the trail (the `/api/audit` filters), one record,

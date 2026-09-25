@@ -1,11 +1,12 @@
 // Users page (admins only): the users with their roles, and adding,
-// resetting and deleting users.
+// resetting and deleting users; every user's API tokens, to revoke them.
 
 import { flag, html, when } from "../html.js";
 import { del, post, put } from "../api.js";
 import { dialog, formData, menuButton, toast } from "../components.js";
 import { time } from "../format.js";
 import { load, state } from "../state.js";
+import { SCOPE_LABELS } from "./settings.js";
 
 export function usersView() {
   // The last admin stays: without one, nobody can manage the gateway.
@@ -69,6 +70,7 @@ export function usersView() {
         </p>`,
       )}
     </div>
+    ${tokensCard()}
     <form class="card" data-form="new-user">
       <h2>Add user</h2>
       <div class="form-grid">
@@ -97,7 +99,76 @@ export function usersView() {
     </form>`;
 }
 
+// Every user's API tokens for the MCP endpoint: an admin revokes one here,
+// e.g. when an account may be compromised.
+function tokensCard() {
+  const tokens = state.userTokens;
+  return html`<div class="card">
+    <h2>API tokens</h2>
+    ${
+      tokens.length
+        ? html`<div class="table-wrap">
+            <table class="middle">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Token</th>
+                  <th>May change</th>
+                  <th>Last used</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${tokens.map(
+                  (t) => html`<tr>
+                    <td>${t.username}</td>
+                    <td>${t.name} <span class="muted mono">${t.id}</span></td>
+                    <td class="small">
+                      ${t.scopes.length
+                        ? t.scopes.map((x) => SCOPE_LABELS[x]?.[0] || x).join(", ")
+                        : html`<span class="muted">read only</span>`}
+                    </td>
+                    <td class="small nowrap">
+                      ${t.last_used ? time(t.last_used) : html`<span class="muted">never</span>`}
+                    </td>
+                    <td class="actions-cell">
+                      <button
+                        class="small danger"
+                        data-action="revoke-token"
+                        data-user="${t.username}"
+                        data-id="${t.id}"
+                        data-name="${t.name}"
+                      >Revoke</button>
+                    </td>
+                  </tr>`,
+                )}
+              </tbody>
+            </table>
+          </div>`
+        : html`<p class="empty">No API tokens.</p>`
+    }
+    <p class="hint">
+      Users create their own tokens on their Account page. Resetting a user's password also deletes
+      their tokens.
+    </p>
+  </div>`;
+}
+
 export const actions = {
+  async "revoke-token"(el) {
+    const { user, id, name } = el.dataset;
+    const confirmed = await dialog({
+      title: `Revoke token "${name}" of ${user}?`,
+      body: "Assistants that use it can no longer connect.",
+      confirm: "Revoke",
+      danger: true,
+    });
+    if (!confirmed) return;
+    await del(`/users/${encodeURIComponent(user)}/tokens/${encodeURIComponent(id)}`);
+    toast("Token revoked");
+    await load();
+  },
+
   async "set-role"(el) {
     await put(`/users/${encodeURIComponent(el.dataset.user)}`, { role: el.value });
     toast("Role changed");
@@ -120,11 +191,14 @@ export const actions = {
             autocomplete="new-password"
           >
         </div>
-        <p class="muted small">The user's sessions end; they log in with the new password.</p>`,
+        <p class="muted small">
+          The user's sessions and API tokens end; they log in with the new password.
+        </p>`,
     });
     if (!input) return;
     await put(`/users/${encodeURIComponent(el.dataset.user)}`, { password: input.password });
     toast("Password reset");
+    await load();
   },
 
   async "delete-user"(el) {

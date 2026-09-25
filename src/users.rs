@@ -349,6 +349,14 @@ impl UserStore {
                 params![username, hash, must_change_password],
             )?;
             changes.push("password".into());
+            // A reset by an admin (the user must choose a new password) also
+            // ends the user's API tokens: a compromised account keeps none.
+            if must_change_password {
+                let n = tx.execute("DELETE FROM api_tokens WHERE username = ?1", [username])?;
+                if n > 0 {
+                    changes.push(format!("{n} API token(s) deleted"));
+                }
+            }
         }
         tx.execute(
             "UPDATE users SET session_epoch = session_epoch + 1 WHERE username = ?1",
@@ -424,6 +432,21 @@ impl UserStore {
             },
             secret,
         })
+    }
+
+    /// Every user's tokens, for admins.
+    pub fn all_tokens(&self) -> anyhow::Result<Vec<UserToken>> {
+        let names: Vec<String> = self.list()?.into_iter().map(|u| u.username).collect();
+        let mut all = Vec::new();
+        for username in names {
+            for token in self.tokens(&username)? {
+                all.push(UserToken {
+                    username: username.clone(),
+                    token,
+                });
+            }
+        }
+        Ok(all)
     }
 
     pub fn tokens(&self, username: &str) -> anyhow::Result<Vec<ApiToken>> {
@@ -531,6 +554,14 @@ pub struct ApiToken {
     pub scopes: Vec<String>,
     pub created_at: String,
     pub last_used: Option<String>,
+}
+
+/// A token with its user, as admins see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UserToken {
+    pub username: String,
+    #[serde(flatten)]
+    pub token: ApiToken,
 }
 
 /// A token just created, with the secret the user must copy now.
