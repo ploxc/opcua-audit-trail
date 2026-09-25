@@ -354,7 +354,8 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
     })
 }
 
-/// Arguments without secrets (passwords, tokens), for the trail.
+/// Arguments without secrets (passwords, tokens, user info in URLs), for
+/// the trail.
 fn redact(args: &Value) -> Value {
     match args {
         Value::Object(map) => Value::Object(
@@ -371,7 +372,22 @@ fn redact(args: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(items) => Value::Array(items.iter().map(redact).collect()),
+        Value::String(text) => Value::String(strip_userinfo(text)),
         other => other.clone(),
+    }
+}
+
+/// A URL without user and password (`http://u:p@host` -> `http://(hidden)@host`);
+/// other text unchanged.
+fn strip_userinfo(text: &str) -> String {
+    let Some(start) = text.find("://").map(|i| i + 3) else {
+        return text.to_string();
+    };
+    let rest = &text[start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{}(hidden){}", &text[..start], &rest[at..]),
+        None => text.to_string(),
     }
 }
 
@@ -952,5 +968,32 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
             reply(super::settings::put_gateway(st(), user, Json(arg(&args)?)).await).await
         }
         other => anyhow::bail!("unknown tool '{other}'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn redacts_credentials_in_urls() {
+        // Audit finding S16.
+        let args = json!({"questdb": {"url": "https://audit:s3cret@questdb:9000/x?a=b@c",
+                                      "password": "pw", "table": "t"}});
+        let text = super::redact(&args).to_string();
+        assert!(
+            !text.contains("s3cret") && !text.contains("audit:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("https://(hidden)@questdb:9000/x?a=b@c"),
+            "{text}"
+        );
+        assert!(!text.contains("\"pw\""));
+        assert_eq!(
+            super::strip_userinfo("http://questdb:9000"),
+            "http://questdb:9000"
+        );
+        assert_eq!(super::strip_userinfo("a@b"), "a@b");
     }
 }

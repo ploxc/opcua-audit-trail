@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S16 | Low | Credentials in a QuestDB URL are recorded unredacted in `mcp_query` |
 | N12 | Low | Browser sessions outlive an untrusted certificate and a password change |
 | N14 | Low | Certificate import writes certificate and key separately |
 | N23 | Low | Fail-open accounting: the lost counter is in memory only; a dead writer thread is not restarted |
@@ -38,12 +37,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S16: Credentials in a QuestDB URL in `mcp_query`
-
-`redact()` hides `password` and `token` keys, not user info in a URL
-(`http://u:p@host`). The config refuses such URLs, but the arguments are
-recorded before that. **Fix:** strip user info from URLs in `redact()`.
 
 ### N12: Browser sessions outlive changes
 
