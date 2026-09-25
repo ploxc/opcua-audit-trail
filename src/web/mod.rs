@@ -394,6 +394,8 @@ async fn health() -> Json<serde_json::Value> {
 #[derive(Serialize)]
 struct StatusResponse {
     version: &'static str,
+    /// Hash of the embedded UI: an open page that has another one reloads.
+    ui_version: &'static str,
     application_name: String,
     application_uri: String,
     certificate: Option<CertificateInfo>,
@@ -438,6 +440,7 @@ async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusRe
     let exports = s.exports.statuses().read().values().cloned().collect();
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
+        ui_version: ui_version(),
         application_name: s.config.gateway.application_name.clone(),
         application_uri: s.config.gateway.application_uri(),
         certificate: s

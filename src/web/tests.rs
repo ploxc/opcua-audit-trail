@@ -1394,6 +1394,13 @@ async fn scripts_have_versioned_urls() {
         .unwrap()
         .to_string();
     assert_ne!(main, "/js/main.js", "{page}");
+    // The status reports the same version, so an open page can tell it is old.
+    let admin = w.login("admin").await;
+    let (_, status) = w.get("/api/status", &admin).await;
+    assert_eq!(
+        format!("/js/{}/main.js", status["ui_version"].as_str().unwrap()),
+        main
+    );
     let (cache, source) = get(main.clone()).await;
     assert!(cache.unwrap().contains("immutable"));
     assert!(source.contains("import"));
