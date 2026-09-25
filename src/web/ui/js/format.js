@@ -75,6 +75,10 @@ export const EVENT_LABELS = {
   certificate_rejected: "Certificate rejected",
   upstream_available: "Target reachable",
   upstream_unavailable: "Target unreachable",
+  target_not_trusted: "Target not trusted",
+  target_refused_gateway: "Target refuses gateway",
+  target_trust_restored: "Target trust restored",
+  api_token_rejected: "API token refused",
   gateway_started: "Gateway started",
   gateway_stopped: "Gateway stopped",
   config_changed: "Configuration changed",
@@ -104,18 +108,23 @@ export const CHANGE_EVENTS = new Set([
   "ignored_writes",
 ]);
 
-// The same as the gateway's severities (src/audit/event.rs).
+// The same as the gateway's severities (Severity in src/audit/event.rs; a
+// test checks they match). Error: something is broken (audit, or clients
+// cannot reach a target). Warning: something to look at.
 export const ERROR_EVENTS = new Set([
   "events_lost",
   "trail_truncated",
   "export_gap",
+  "upstream_unavailable",
+  "target_not_trusted",
+  "target_refused_gateway",
   "upstream_endpoints_changed",
 ]);
 export const WARNING_EVENTS = new Set([
-  "upstream_unavailable",
   "certificate_rejected",
   "authentication_failed",
   "ui_login_failed",
+  "api_token_rejected",
   "connections_refused",
   "clock_jumped",
 ]);
@@ -155,7 +164,14 @@ export const EVENT_GROUPS = [
   [
     "targets",
     "Targets",
-    ["upstream_available", "upstream_unavailable", "upstream_endpoints_changed"],
+    [
+      "upstream_available",
+      "upstream_unavailable",
+      "upstream_endpoints_changed",
+      "target_not_trusted",
+      "target_refused_gateway",
+      "target_trust_restored",
+    ],
   ],
   [
     "gateway",
@@ -174,7 +190,7 @@ export const EVENT_GROUPS = [
     ],
   ],
   ["ui", "Web UI logins", ["ui_login", "ui_login_failed"]],
-  ["mcp", "AI assistants (MCP)", ["mcp_query"]],
+  ["mcp", "AI assistants (MCP)", ["mcp_query", "api_token_rejected"]],
 ];
 
 /** [type, label] of every event type, sorted by label: the "Event" filter. */

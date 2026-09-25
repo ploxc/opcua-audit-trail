@@ -171,7 +171,7 @@ function securitySection(t, endpoints, { editing = false } = {}) {
     ? html`${cert.subject} ${
         trusted.has(cert.thumbprint)
           ? html`<span class="badge ok">trusted</span>`
-          : html`<span class="badge warn">not trusted</span>
+          : html`<span class="badge bad">not trusted</span>
               ${when(
                 can("admin") && !editing,
                 html` <button
@@ -494,7 +494,8 @@ export const actions = {
     if (trust === "refused") toast("The target refuses the gateway's certificate", "bad");
     else if (trust === "target_not_trusted")
       toast("Reachable, but the gateway does not trust the target's certificate yet", "bad");
-    else if (trust === "failed") toast(`Reachable, but the trust check failed: ${t.status.gateway_trust.detail}`, "bad");
+    else if (trust === "failed")
+      toast(`Reachable, but the trust check failed: ${t.status.gateway_trust.detail}`, "warn");
     else if (trust === "trusted") toast("Target reachable and accepts the gateway");
     else toast("Check done");
   },

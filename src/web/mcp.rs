@@ -63,6 +63,7 @@ pub async fn post(
             .into_response();
     }
     let Some(user) = authenticate(&s, &headers) else {
+        rejected(&s, &headers, address).await;
         return (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer")],
@@ -171,6 +172,49 @@ impl Caller {
         );
         all
     }
+}
+
+/// A refused API token is a warning in the trail, like a failed login: at
+/// most one record per address a minute, so a flood cannot fill the trail
+/// (the log has every one). Requests without a token are not recorded.
+async fn rejected(s: &AppState, headers: &HeaderMap, address: Option<std::net::IpAddr>) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<HashMap<std::net::IpAddr, Instant>>> = Mutex::new(None);
+    let Some(secret) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return;
+    };
+    // The id part only: never the secret.
+    let token = secret
+        .trim()
+        .strip_prefix("gwt_")
+        .and_then(|rest| rest.split('_').next())
+        .map(|id| clip(id, 32))
+        .unwrap_or_else(|| "(not a gateway token)".into());
+    if let Some(ip) = address {
+        let mut last = LAST.lock().expect("not poisoned");
+        let last = last.get_or_insert_with(HashMap::new);
+        let now = Instant::now();
+        last.retain(|_, t| now.duration_since(*t) < Duration::from_secs(60));
+        if last.contains_key(&ip) {
+            return;
+        }
+        last.insert(ip, now);
+    }
+    let client = ClientContext {
+        remote_addr: address.map(|a| a.to_string()).unwrap_or_default(),
+        application_name: Some("MCP".into()),
+        ..Default::default()
+    };
+    let _ = s
+        .audit
+        .record(AuditEntry::new(AuditEvent::ApiTokenRejected { token }).client(client))
+        .await;
 }
 
 /// The token's user, if the token is valid and the user may read the trail.
@@ -348,18 +392,25 @@ async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
 }
 
 fn tools() -> Vec<Value> {
-    let kinds = "Event types: write (a value written; old and new value), call \
-        (a method called), history_update, node_management, change_intent (a \
-        write the gateway could not audit fully), ignored_writes (summary of \
-        writes to summarised noisy nodes), client_connected, \
-        client_disconnected, secure_channel_opened, session_created, \
-        session_activated, session_closed, authentication_failed, \
-        certificate_rejected, connections_refused, upstream_available, \
-        upstream_unavailable, upstream_endpoints_changed, \
-        subscriptions_transferred, alarms_acknowledged, gateway_started, \
-        gateway_stopped, config_changed, ui_login, ui_login_failed, \
-        mcp_query, discovery, retention_pruned, events_lost, trail_truncated, \
-        clock_jumped, export_gap.";
+    use crate::audit::event::Severity;
+    let kinds = format!(
+        "Event types: write (a value written; old and new value), call (a method \
+         called), history_update, node_management, change_intent (fail-closed mode: \
+         recorded before a change is forwarded; its outcome follows as a write/call \
+         record with the same request_handle), ignored_writes (summary of writes to \
+         summarised noisy nodes), client_connected, client_disconnected, \
+         secure_channel_opened, session_created, session_activated, session_closed, \
+         authentication_failed, certificate_rejected, connections_refused, \
+         upstream_available, upstream_unavailable, upstream_endpoints_changed, \
+         target_not_trusted, target_refused_gateway, target_trust_restored, \
+         subscriptions_transferred, alarms_acknowledged, gateway_started, \
+         gateway_stopped, config_changed, ui_login, ui_login_failed, \
+         api_token_rejected, mcp_query, discovery, retention_pruned, events_lost, \
+         trail_truncated, clock_jumped, export_gap. Errors (something is broken: \
+         audit or client connections): {}. Warnings (something to look at): {}.",
+        Severity::Error.kinds().join(", "),
+        Severity::Warning.kinds().join(", "),
+    );
     vec![
         json!({
             "name": "search_audit_trail",

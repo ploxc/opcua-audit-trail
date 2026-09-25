@@ -960,6 +960,10 @@ button:disabled {
   background: #ca0902;
   color: #fff;
 }
+.toast.warn {
+  background: #b26a00;
+  color: #fff;
+}
 
 /* ---------- Login page ----------
    The Modbux start screen, a faint logo behind the form. */

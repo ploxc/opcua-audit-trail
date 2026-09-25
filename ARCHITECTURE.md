@@ -247,6 +247,28 @@ records `export_gap` and the dashboard shows it.
 - `closed`: a write is only forwarded after its audit record has been committed.
   If that fails, the client gets `BadInternalError` and the PLC is not touched.
 
+### Errors and warnings
+
+Some event kinds are errors or warnings (`Severity` in `src/audit/event.rs`);
+they are counted in the sidebar until acknowledged, and coloured the same
+everywhere (red, orange). The web UI has a copy of the lists in
+`js/format.js`; a test keeps the two equal.
+
+- **Error: something is broken and needs action.** The trail or its copies
+  may be incomplete (`events_lost`, `trail_truncated`, `export_gap`), or
+  clients cannot reach a target through the gateway (`upstream_unavailable`,
+  `target_not_trusted`, `target_refused_gateway`), or the target's security
+  changed (`upstream_endpoints_changed`).
+- **Warning: something to look at while everything works.** A refused
+  client certificate, login or API token (`certificate_rejected`,
+  `authentication_failed`, `ui_login_failed`, `api_token_rejected`), refused
+  connections (`connections_refused`), a clock that jumped (`clock_jumped`).
+
+Live status follows the same rule: a target that is unreachable or lacks
+trust is red; an export that fails but keeps its records is orange.
+Changes of trust are recorded once per change (`target_trust_restored` when
+solved), not once per client.
+
 ## Web UI
 
 Served by the same binary (axum). The frontend is plain JavaScript without a
