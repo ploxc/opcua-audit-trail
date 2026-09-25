@@ -115,6 +115,7 @@ pub fn router(state: AppState) -> Router {
         .route("/discover", post(discover_url))
         .route("/certificates", get(certificates))
         .route("/certificates/own/cert.der", get(own_certificate_der))
+        .route("/certificates/own/cert.pem", get(own_certificate_pem))
         .route("/certificates/own", post(import_own))
         .route("/certificates/own/regenerate", post(regenerate_own))
         .route(
@@ -687,6 +688,35 @@ async fn own_certificate_der(
             ),
         ],
         der,
+    )
+        .into_response())
+}
+
+/// The same certificate as PEM: what browsers, operating systems and Node
+/// (NODE_EXTRA_CA_CERTS) import to trust the web UI's HTTPS.
+async fn own_certificate_pem(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> Result<Response, ApiError> {
+    user.require(Role::Auditor)?;
+    use base64::Engine;
+    let der = s.pki.own_certificate_der()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"opcua-audit-gateway.pem\"",
+            ),
+        ],
+        pem,
     )
         .into_response())
 }

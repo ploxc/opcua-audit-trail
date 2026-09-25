@@ -47,7 +47,8 @@ export function certificatesView() {
       <div class="card-head">
         <h2>Gateway certificate</h2>
         <div class="inline">
-          <a class="button small" href="/api/certificates/own/cert.der">Download</a>
+          <a class="button small" href="/api/certificates/own/cert.pem">Download (.pem)</a>
+          <a class="button small" href="/api/certificates/own/cert.der">Download (.der)</a>
           ${when(
             admin,
             html`<button class="small" data-action="show-import">Import…</button>
@@ -70,6 +71,14 @@ export function certificatesView() {
       <p class="hint">
         Clients trust this certificate to connect securely; each PLC must trust it too, and ideally
         nothing else.
+      </p>
+      <p class="hint">
+        It is also the web UI's HTTPS certificate, unless another one is configured
+        (<span class="mono">tls_certificate</span>). It is self-signed, so there is no separate
+        root CA: trust this certificate itself. macOS: open the .pem, then in Keychain Access set
+        it to <i>Always Trust</i>. Windows: import it into <i>Trusted Root Certification
+        Authorities</i>. AI assistants (Node): <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway.pem</span>.
+        After regenerating the certificate, trust the new one.
       </p>
       ${when(state.showImport, importForm)}
     </div>

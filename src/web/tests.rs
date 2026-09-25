@@ -1236,3 +1236,16 @@ async fn mcp_changes_need_gateway_token_and_role() {
     let tools = names(w.mcp(&weak, list).await.1);
     assert!(!tools.contains(&"add_target".to_string()));
 }
+
+/// The gateway certificate as PEM, to trust the web UI's HTTPS.
+#[tokio::test]
+async fn own_certificate_as_pem() {
+    let w = web().await;
+    let auditor = w.login("auditor").await;
+    let (status, pem) = w.get("/api/certificates/own/cert.pem", &auditor).await;
+    assert_eq!(status, StatusCode::OK);
+    let pem = pem.as_str().unwrap();
+    assert!(pem.starts_with("-----BEGIN CERTIFICATE-----\n"), "{pem}");
+    assert!(pem.trim_end().ends_with("-----END CERTIFICATE-----"));
+    assert!(pem.lines().all(|l| l.len() <= 64));
+}
