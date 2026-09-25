@@ -91,15 +91,24 @@ const mcpUrl = () => `${location.origin}/mcp`;
 // API tokens: an AI assistant (Claude Desktop, Claude Code, …) reads the
 // audit trail and the status through /mcp with one of these.
 function tokensCard() {
-  const { tokens, newToken } = state.account;
+  const { tokens, newToken, mcp } = state.account;
+  // Off: existing tokens can still be deleted, new ones are not offered.
+  const on = mcp?.enabled && mcp?.transport_ok;
   return html`<div class="card">
     <h2>API tokens for AI assistants (MCP)</h2>
-    <p class="section-note">
-      An AI assistant can search the audit trail and read the gateway's status
-      at <span class="mono">${mcpUrl()}</span>, with a token that acts as you.
-      It can only read, and every question it asks is recorded in the trail.
-    </p>
-    ${when(newToken, () => newTokenBox(newToken))}
+    ${
+      on
+        ? html`<p class="section-note">
+            An AI assistant can search the audit trail and read the gateway's status
+            at <span class="mono">${mcpUrl()}</span>, with a token that acts as you.
+            It can only read, and every question it asks is recorded in the trail.
+          </p>`
+        : html`<p class="section-note">
+            The MCP endpoint is ${mcp?.enabled ? "on but needs HTTPS" : "off"}: an administrator
+            can change that on the <a href="#/settings">Settings</a> page.
+          </p>`
+    }
+    ${when(on && newToken, () => newTokenBox(newToken))}
     ${when(
       tokens.length,
       () => html`<table class="mt">
@@ -119,13 +128,16 @@ function tokensCard() {
         </tbody>
       </table>`,
     )}
-    <form data-form="token" class="form-grid mt">
-      <div>
-        <label>New token</label>
-        <input name="name" required maxlength="64" placeholder="e.g. Claude Desktop on my laptop">
-      </div>
-      <div><button class="primary" type="submit">Create token</button></div>
-    </form>
+    ${when(
+      on,
+      () => html`<form data-form="token" class="form-grid mt">
+        <div>
+          <label>New token</label>
+          <input name="name" required maxlength="64" placeholder="e.g. Claude Desktop on my laptop">
+        </div>
+        <div><button class="primary" type="submit">Create token</button></div>
+      </form>`,
+    )}
   </div>`;
 }
 
@@ -149,6 +161,15 @@ function newTokenBox(t) {
       Other MCP clients: server URL <span class="mono">${mcpUrl()}</span> (Streamable HTTP),
       header <span class="mono">Authorization: Bearer &lt;token&gt;</span>.
     </p>
+    ${when(
+      location.protocol === "https:",
+      html`<p class="mt small muted">
+        With the gateway's own certificate, the assistant must trust it: download it on the
+        <a href="#/certificates">Certificates</a> page, convert it to PEM
+        (<span class="mono">openssl x509 -inform der -in cert.der -out gateway.pem</span>) and
+        start the assistant with <span class="mono">NODE_EXTRA_CA_CERTS=gateway.pem</span>.
+      </p>`,
+    )}
   </div>`;
 }
 

@@ -15,9 +15,17 @@ application_uri = "urn:opcua-audit-gateway:docker"
 # certificate_hostnames = ["gateway.local", "192.168.0.20"]
 
 [web]
-# Plain HTTP: publish this port on the host's loopback only (see
-# docker-compose.yml) or put a TLS reverse proxy in front.
+# HTTPS with the gateway certificate: browsers ask once to accept it. Use
+# your own (e.g. from the plant CA) with tls_certificate / tls_private_key.
 listen = "0.0.0.0:8080"
+tls = true
+# tls_certificate = "/data/web-cert.pem"  # PEM chain
+# tls_private_key = "/data/web-key.pem"
+
+# The MCP endpoint for AI assistants: off until an admin turns it on
+# (Settings page).
+# [mcp]
+# enabled = false
 
 [audit]
 retention_days = 365

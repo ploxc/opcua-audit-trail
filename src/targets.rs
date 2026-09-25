@@ -251,7 +251,7 @@ impl TargetManager {
     }
 }
 
-/// Writes the `[audit]` and `[export]` settings and the gateway's
+/// Writes the `[audit]`, `[export]` and `[mcp]` settings and the gateway's
 /// certificate host names into the config file, changing only those keys
 /// (comments and everything else stay as they are).
 fn write_settings(path: &std::path::Path, config: &Config) -> anyhow::Result<()> {
@@ -323,6 +323,10 @@ fn write_settings(path: &std::path::Path, config: &Config) -> anyhow::Result<()>
             t["interval_secs"] = value(q.interval_secs as i64);
         }
     }
+    if config.mcp.enabled || root.contains_key("mcp") {
+        table(root, "mcp")["enabled"] = value(config.mcp.enabled);
+    }
+    let export = table(root, "export");
     // Syslog export is no longer supported.
     export.remove("syslog");
     if export.is_empty() {

@@ -343,6 +343,12 @@ server-sent events, one JSON answer per request (`initialize`, `ping`,
 `tools/list`, `tools/call`; notifications get `202`). That is all the tools
 need, and it keeps an SDK dependency out of the binary.
 
+- **Off by default:** `[mcp] enabled`, switched by an admin on the Settings
+  page (audited, applied at once). Off, `/mcp` answers `404` and every token
+  stops working; the Account page offers no new ones.
+- **HTTPS only:** the token is a password, so the endpoint refuses requests
+  (`403`) over plain HTTP unless the web UI listens on loopback only. The
+  container image has HTTPS on by default.
 - **Authentication:** API tokens (`gwt_<id>_<secret>`) that a user creates on
   the Account page, in `api_tokens` in `gateway.db`, stored as SHA-256 (the
   secret is 32 random bytes; a slow hash adds nothing). A token acts as its

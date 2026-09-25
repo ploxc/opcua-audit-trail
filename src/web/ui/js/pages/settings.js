@@ -68,6 +68,7 @@ export function settingsView() {
       ${auditCard(st.audit, off, save)}
       ${exportCard(st.export.questdb, off, save)}
       ${gatewayCard(st, off, save)}
+      ${mcpCard(st.mcp, off, save)}
       ${webCard(st)}
     </div>`;
 }
@@ -244,6 +245,32 @@ function gatewayCard(st, off, save) {
   </form>`;
 }
 
+function mcpCard(m, off, save) {
+  return html`<form class="card" data-form="settings-mcp">
+    <h2>AI assistants (MCP)</h2>
+    <div class="setting">
+      <label class="inline">
+        <input type="checkbox" name="enabled" ${flag(m.enabled, "checked")} ${off}>
+        MCP endpoint on
+      </label>
+      <p class="help">
+        Lets an AI assistant such as Claude read the audit trail and the gateway status with an
+        API token (Account page). Read-only, and every question is recorded in the trail. Off:
+        the endpoint answers nothing and tokens stop working.
+      </p>
+      ${when(
+        !m.transport_ok,
+        html`<div class="alert bad small">
+          The web UI uses plain HTTP on a network address, so the endpoint refuses requests: the
+          token would cross the network unencrypted. Set <span class="mono">tls = true</span>
+          under <span class="mono">[web]</span> and restart.
+        </div>`,
+      )}
+    </div>
+    ${save}
+  </form>`;
+}
+
 // Settings that only apply at start-up, so they are shown, not edited.
 function webCard(st) {
   const https = st.web.tls
@@ -344,6 +371,14 @@ export const forms = {
     toast("Export settings saved");
     state.settings = await get("/settings");
     state.status = await get("/status");
+    renderPage();
+  },
+
+  async "settings-mcp"(form) {
+    const enabled = form.elements.enabled.checked;
+    await put("/settings/mcp", { enabled });
+    toast(enabled ? "MCP endpoint on" : "MCP endpoint off");
+    state.settings = await get("/settings");
     renderPage();
   },
 

@@ -23,7 +23,17 @@ pub struct Config {
     #[serde(default)]
     pub export: ExportConfig,
     #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// The MCP endpoint for AI assistants. Off unless an admin turns it on; it
+/// only answers over HTTPS, or on a loopback-only web UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct McpConfig {
+    pub enabled: bool,
 }
 
 /// Copies of the audit trail outside the gateway. Every record carries its

@@ -250,7 +250,8 @@ curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker-c
 docker compose up -d
 ```
 
-The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
+The web UI is on https://127.0.0.1:8080 (HTTPS with the gateway certificate:
+accept it once in the browser); the first login is `admin` / `admin`.
 In a checkout, `docker compose build` builds the image from the source instead.
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
@@ -270,10 +271,12 @@ tls = true                          # uses the gateway certificate, or:
 # tls_private_key = "web-key.pem"
 ```
 
-With the gateway certificate, browsers ask once to accept it. To avoid that,
-import `pki/own/cert.der` as trusted, or use a certificate from your own CA.
-With TLS the session cookie is `Secure` and `__Host-` prefixed, and HSTS is
-sent. Without TLS, keep the UI on loopback: there it only answers requests for
+The container image has HTTPS on by default. With the gateway certificate,
+browsers ask once to accept it. To avoid that, import `pki/own/cert.der` as
+trusted, or use a certificate from your own CA. With TLS the session cookie
+is `Secure` and `__Host-` prefixed; HSTS is only sent with your own
+certificate (with the gateway's, it would stop browsers from letting you
+accept it). Without TLS, keep the UI on loopback: there it only answers requests for
 `localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
 rebinding.
 
@@ -413,6 +416,11 @@ changed Line1.Setpoint yesterday?", "which clients are connected?", "is the
 trail intact?") through the [Model Context Protocol](https://modelcontextprotocol.io)
 endpoint at `/mcp`, on the same address as the web UI.
 
+The endpoint is **off** until an administrator turns it on (Settings page, or
+`[mcp] enabled = true`). The token is a password, so the endpoint only
+answers over HTTPS, or over plain HTTP when the web UI listens on loopback
+only.
+
 1. On the **Account** page, create an API token. It acts as you and is shown
    once.
 2. Add the server to the assistant, e.g. Claude Code:
@@ -423,7 +431,15 @@ endpoint at `/mcp`, on the same address as the web UI.
    ```
 
    Other MCP clients: Streamable HTTP transport, URL `…/mcp`, header
-   `Authorization: Bearer <token>`.
+   `Authorization: Bearer <token>`. Clients that only run local servers
+   (Claude Desktop) connect through `npx mcp-remote <url> --header
+   "Authorization:${AUTH}"` with `AUTH` = `Bearer <token>` in its environment.
+
+   With the gateway's own certificate (the Docker default), the assistant
+   has to trust it: convert it to PEM
+   (`openssl x509 -inform der -in cert.der -out gateway.pem`, the certificate
+   is on the Certificates page) and start the assistant with
+   `NODE_EXTRA_CA_CERTS=gateway.pem`.
 
 The tools only read: `search_audit_trail` (the same filters as the Audit
 trail page), `get_audit_record`, `gateway_status` (targets, connected
@@ -431,8 +447,8 @@ clients, unacknowledged warnings, exports), `most_written_nodes` and
 `verify_audit_trail`. Every tool call is recorded in the trail as
 `mcp_query`, with the token's user and the arguments. Tokens are stored as a
 SHA-256 hash; delete one on the Account page, and deleting a user deletes
-theirs. The endpoint does not accept the web UI's session cookie. For an
-assistant on another machine, enable HTTPS: the token is a password.
+theirs. The endpoint does not accept the web UI's session cookie. Turning
+the endpoint off stops every token at once.
 
 ## Development
 

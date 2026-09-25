@@ -258,6 +258,7 @@ async function load() {
         // A new token's secret is shown once: not again after navigating.
         state.account.newToken = null;
         state.account.tokens = await get("/me/tokens");
+        state.account.mcp = (await get("/settings")).mcp;
         break;
       case "settings":
         state.settings = await get("/settings");

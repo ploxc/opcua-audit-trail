@@ -886,6 +886,20 @@ async fn warnings_and_errors_until_acknowledged() {
 impl Web {
     /// A JSON-RPC request to /mcp with a bearer token (no cookie, no CSRF
     /// header: MCP clients send neither).
+    /// MCP is off until an admin turns it on.
+    async fn enable_mcp(&self, on: bool) {
+        let admin = self.login("admin").await;
+        let (status, _, _) = self
+            .send(
+                Method::PUT,
+                "/api/settings/mcp",
+                Some(&admin),
+                Some(json!({ "enabled": on })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
     async fn mcp(&self, token: &str, body: Value) -> (StatusCode, Value) {
         let request = Request::builder()
             .method(Method::POST)
@@ -933,6 +947,12 @@ async fn mcp_reads_the_trail_with_a_token_and_records_every_call() {
     let (_, list) = w.get("/api/me/tokens", &auditor).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert!(list[0].get("secret").is_none());
+
+    // Off by default, for everyone.
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::NOT_FOUND);
+    w.enable_mcp(true).await;
+    assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::OK);
 
     // No token, a wrong one, or only the session cookie: refused.
     assert_eq!(
@@ -1070,6 +1090,7 @@ async fn mcp_tokens_end_with_their_user() {
         .await;
     let secret = token["secret"].as_str().unwrap().to_string();
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    w.enable_mcp(true).await;
     assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::OK);
 
     let (status, _, _) = w
@@ -1077,4 +1098,18 @@ async fn mcp_tokens_end_with_their_user() {
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::UNAUTHORIZED);
+}
+
+/// The token is a password: plain HTTP only on a loopback-only web UI.
+#[test]
+fn mcp_needs_https_off_loopback() {
+    use crate::config::WebConfig;
+    let web = |listen: &str, tls: bool| WebConfig {
+        listen: listen.parse().unwrap(),
+        tls,
+        ..Default::default()
+    };
+    assert!(super::mcp::transport_is_safe(&web("127.0.0.1:8080", false)));
+    assert!(!super::mcp::transport_is_safe(&web("0.0.0.0:8080", false)));
+    assert!(super::mcp::transport_is_safe(&web("0.0.0.0:8080", true)));
 }

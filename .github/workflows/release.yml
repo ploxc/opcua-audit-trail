@@ -143,7 +143,7 @@ jobs:
             docker compose up -d
             ```
 
-            The web UI is on http://127.0.0.1:8080 (first login: admin / admin,
+            The web UI is on https://127.0.0.1:8080 (first login: admin / admin,
             then choose a new password). The image is
             `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7).
 

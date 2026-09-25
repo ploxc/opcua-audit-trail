@@ -136,6 +136,7 @@ pub fn router(state: AppState) -> Router {
         .route("/settings/audit", put(settings::put_audit))
         .route("/settings/export", put(settings::put_export))
         .route("/settings/gateway", put(settings::put_gateway))
+        .route("/settings/mcp", put(settings::put_mcp))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{name}", put(update_user).delete(delete_user))
         .route("/browser/{target}/connect", post(browser::connect))
@@ -208,7 +209,9 @@ async fn security_headers(
         // must check again instead of running the old scripts.
         headers.insert(header::CACHE_CONTROL, "no-cache".parse().expect("valid"));
     }
-    if s.config.web.tls {
+    // Not with the gateway's own certificate: browsers do not trust it, and
+    // with HSTS they no longer let the user accept it.
+    if s.config.web.tls && s.config.web.tls_certificate.is_some() {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
             "max-age=31536000".parse().expect("valid"),

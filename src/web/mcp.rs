@@ -6,6 +6,10 @@
 //! in with an API token (`Authorization: Bearer gwt_…`) that a user creates
 //! on their Account page; the token acts as that user. Every tool only reads,
 //! and every tool call is itself recorded in the trail (`mcp_query`).
+//!
+//! Off unless an admin turns it on (`[mcp] enabled`, Settings page). The
+//! token is a password: the endpoint refuses plain HTTP unless the web UI
+//! only listens on loopback.
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -41,6 +45,20 @@ pub async fn post(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    if !s.targets.config().await.mcp.enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "the MCP endpoint is turned off (Settings, AI assistants)"})),
+        )
+            .into_response();
+    }
+    if !transport_is_safe(&s.config.web) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "the MCP endpoint needs HTTPS: set tls = true under [web]"})),
+        )
+            .into_response();
+    }
     let Some(user) = authenticate(&s, &headers) else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -86,6 +104,12 @@ pub async fn post(
         },
     };
     Json(answers).into_response()
+}
+
+/// Whether MCP may answer: over HTTPS always, over plain HTTP only when the
+/// web UI listens on loopback, so the token cannot cross a network in clear.
+pub fn transport_is_safe(web: &crate::config::WebConfig) -> bool {
+    web.tls || web.listen.ip().is_loopback()
 }
 
 /// GET and DELETE /mcp: no server-sent events and no sessions here.
