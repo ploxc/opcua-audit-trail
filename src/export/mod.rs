@@ -465,18 +465,25 @@ pub async fn run(
             Ok(records.len())
         }
         .await;
-        let head = reader.head_seq().await.unwrap_or(position.seq);
+        // Unreadable, the head is an error, not "nothing pending": a stalled
+        // export must not look healthy.
+        let head = reader.head_seq().await;
         let delay = {
             let mut map = statuses.write();
             let status = map.get_mut(name).expect("inserted above");
             status.exported_seq = position.seq;
-            status.pending = (head - position.seq).max(0);
+            if let Ok(head) = &head {
+                status.pending = (head - position.seq).max(0);
+            }
             match &result {
                 Ok(n) => {
                     if *n > 0 {
                         status.last_success = Some(Utc::now());
                     }
-                    status.last_error = None;
+                    status.last_error = head
+                        .as_ref()
+                        .err()
+                        .map(|e| format!("reading the audit trail: {e:#}"));
                     failures = 0;
                     // A full batch means there is more: continue right away.
                     if *n as u32 == sink.batch_size() {

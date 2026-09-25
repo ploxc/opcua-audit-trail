@@ -28,13 +28,10 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S19 | Info | Export status clamps `pending`, so a stalled export can look healthy |
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Info
 
-- **S19:** export status clamps `pending`; `gap` and `last_error` do show a
-  stall.
 - **S20:** the session token is `byte_string(32).value.unwrap_or_default()`;
   a failed random generator would give an empty token. Fail the request
   instead.
