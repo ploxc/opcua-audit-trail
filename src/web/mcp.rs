@@ -631,7 +631,9 @@ async fn call(s: &AppState, tool: &str, args: &Value) -> anyhow::Result<Value> {
                 .unwrap_or(24)
                 .clamp(1, 24 * 366);
             let since = chrono::Utc::now() - chrono::Duration::hours(hours);
-            Ok(json!({"since": since, "nodes": s.reader.most_written(since, 10).await?}))
+            Ok(
+                json!({"since": since, "nodes": s.reader.most_written(since, 10, Default::default()).await?}),
+            )
         }
         "verify_audit_trail" => {
             let anchors =
@@ -719,13 +721,10 @@ fn change_tools() -> Vec<(&'static str, Value)> {
     let mut update_fields = target_fields.clone();
     update_fields["new_name"] = text("Rename the target.");
     update_fields["name"] = text("The target to change.");
-    let rule = json!({
-        "target": text("Target name."),
-        "node_id": text("The node as in the audit trail, e.g. ns=3;s=\"DB1\".\"Life\"."),
-        "client": text("Only writes from this client (IP address or application URI)."),
-    });
-    let mut rule_add = rule.clone();
-    rule_add["name"] = text("Display name, for people reading the list.");
+    let group = json!({"type": "integer", "minimum": 0,
+        "description": "The group's position in the target's summarise list (list_targets), from 0."});
+    let node_ids = json!({"type": "array", "items": {"type": "string"},
+        "description": "Nodes as in the audit trail, e.g. ns=3;s=\"DB1\".\"Life\"."});
     let thumbprint = json!({"thumbprint": text("The certificate's SHA-1 thumbprint (hex).")});
     vec![
         (
@@ -777,20 +776,54 @@ fn change_tools() -> Vec<(&'static str, Value)> {
         (
             "targets",
             change_tool(
-                "summarise_node",
-                "Writes to this node are summarised periodically instead of recorded one \
-             by one (for noisy nodes such as a life bit).",
-                rule_add,
-                &["target", "node_id"],
+                "create_summarise_group",
+                "Creates a group of nodes whose value writes are summarised periodically \
+             instead of recorded one by one (for noisy nodes such as life bits). Without \
+             client it applies to writes from every client.",
+                json!({
+                    "target": text("Target name."),
+                    "name": text("Group name, for people, e.g. HMI line 1."),
+                    "client": text("Only writes from this client (IP address or application URI)."),
+                    "node_ids": node_ids,
+                }),
+                &["target"],
             ),
         ),
         (
             "targets",
             change_tool(
-                "record_node_again",
-                "Undoes summarise_node: every write to the node is recorded again.",
-                rule,
-                &["target", "node_id"],
+                "add_summarised_nodes",
+                "Adds nodes to a summarise group; nodes already in it are skipped.",
+                json!({"target": text("Target name."), "group": group, "node_ids": node_ids}),
+                &["target", "group", "node_ids"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "remove_summarised_nodes",
+                "Removes nodes from a summarise group: their writes are recorded one by one \
+             again (unless another group for the client has them).",
+                json!({"target": text("Target name."), "group": group, "node_ids": node_ids}),
+                &["target", "group", "node_ids"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "rename_summarise_group",
+                "Renames a summarise group.",
+                json!({"target": text("Target name."), "group": group, "name": text("New name.")}),
+                &["target", "group", "name"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "delete_summarise_group",
+                "Removes a summarise group: writes to its nodes are recorded one by one again.",
+                json!({"target": text("Target name."), "group": group}),
+                &["target", "group"],
             ),
         ),
         (
@@ -987,6 +1020,22 @@ fn required(args: &Value, key: &str) -> anyhow::Result<String> {
     string(args, key).ok_or_else(|| anyhow::anyhow!("'{key}' is required"))
 }
 
+fn group_index(args: &Value) -> anyhow::Result<usize> {
+    args.get("group")
+        .and_then(Value::as_u64)
+        .map(|g| g as usize)
+        .ok_or_else(|| anyhow::anyhow!("'group' is required (a number from 0)"))
+}
+
+/// `node_ids` as the web API's node list.
+fn node_refs(args: &Value) -> anyhow::Result<Vec<Value>> {
+    let ids: Vec<String> = match args.get("node_ids") {
+        Some(v) => arg(v)?,
+        None => Vec::new(),
+    };
+    Ok(ids.into_iter().map(|id| json!({"node_id": id})).collect())
+}
+
 async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::Result<Value> {
     use axum::extract::{Path, State};
     let st = || State(s.clone());
@@ -1010,14 +1059,33 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
             let name = required(&args, "name")?;
             reply(super::delete_target(st(), user, Path(name)).await).await
         }
-        "summarise_node" | "record_node_again" => {
+        "create_summarise_group" => {
             let target = required(&args, "target")?;
-            let rule = overlay(json!({}), &args, &["target"]);
-            if tool == "summarise_node" {
-                reply(super::ignore_node(st(), user, Path(target), Json(arg(&rule)?)).await).await
-            } else {
-                reply(super::unignore_node(st(), user, Path(target), Json(arg(&rule)?)).await).await
-            }
+            let body = json!({
+                "name": args.get("name"),
+                "client": args.get("client"),
+                "nodes": node_refs(&args)?,
+            });
+            reply(super::create_group(st(), user, Path(target), Json(arg(&body)?)).await).await
+        }
+        "add_summarised_nodes" => {
+            let path = Path((required(&args, "target")?, group_index(&args)?));
+            let body = arg(&json!(node_refs(&args)?))?;
+            reply(super::add_nodes(st(), user, path, Json(body)).await).await
+        }
+        "remove_summarised_nodes" => {
+            let path = Path((required(&args, "target")?, group_index(&args)?));
+            let body = arg(&json!({"nodes": args.get("node_ids")}))?;
+            reply(super::remove_nodes(st(), user, path, Json(body)).await).await
+        }
+        "rename_summarise_group" => {
+            let path = Path((required(&args, "target")?, group_index(&args)?));
+            let body = arg(&json!({"name": args.get("name")}))?;
+            reply(super::rename_group(st(), user, path, Json(body)).await).await
+        }
+        "delete_summarise_group" => {
+            let path = Path((required(&args, "target")?, group_index(&args)?));
+            reply(super::delete_group(st(), user, path).await).await
         }
         "list_certificates" => reply(super::certificates(st(), user).await).await,
         "trust_server_certificate" => {

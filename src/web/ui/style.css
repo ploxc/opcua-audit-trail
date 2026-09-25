@@ -1135,6 +1135,25 @@ dialog.dialog h2 {
   margin-top: 16px;
 }
 
+/* A summarise group on the targets page */
+.summarise-group {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.summarise-group .card-head {
+  margin-bottom: 6px;
+}
+.summarise-group td:first-child {
+  width: 100%;
+}
+/* The most written nodes to pick from, in the "Add nodes" dialog */
+fieldset.pick-list {
+  max-height: 320px;
+  overflow: auto;
+}
+
 /* Radio choices with an explanation (dialogs and settings) */
 fieldset.choice {
   border: 1px solid var(--line);

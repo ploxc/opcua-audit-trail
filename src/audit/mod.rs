@@ -447,8 +447,9 @@ impl AuditReader {
         &self,
         since: DateTime<Utc>,
         limit: u32,
+        filter: store::WrittenFilter,
     ) -> anyhow::Result<Vec<store::WrittenNode>> {
-        self.with_conn(move |c| store::most_written(c, &since, limit))
+        self.with_conn(move |c| store::most_written(c, &since, limit, &filter))
             .await
     }
 

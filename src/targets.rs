@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::AuditHandle;
-use crate::config::{Config, IgnoreRule, TargetConfig};
+use crate::config::{Config, SummariseGroup, TargetConfig};
 use crate::discovery::{self, TargetStatus, TargetStatuses};
 use crate::relay::{self, GatewayIdentity, RelayTarget};
 
@@ -193,22 +193,29 @@ impl TargetManager {
         result
     }
 
-    /// Replaces a target's ignored nodes. Applied to the running target
-    /// directly: connected clients stay connected.
-    pub async fn set_ignore(&self, name: &str, rules: Vec<IgnoreRule>) -> anyhow::Result<()> {
+    /// Changes a target's summarise groups with `change`, under the lock,
+    /// so concurrent changes do not undo each other. Applied to the running
+    /// target directly: connected clients stay connected. Nothing changes if
+    /// `change` fails or the result is not valid.
+    pub async fn update_summarise<T, E: From<anyhow::Error>>(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut Vec<SummariseGroup>) -> Result<T, E>,
+    ) -> Result<T, E> {
         let mut config = self.config.lock().await;
         let mut new_config = config.clone();
         let Some(target) = new_config.targets.iter_mut().find(|t| t.name == name) else {
-            bail!("unknown target '{name}'");
+            return Err(anyhow::anyhow!("unknown target '{name}'").into());
         };
-        target.ignore = rules.clone();
+        let out = change(&mut target.summarise)?;
+        let groups = target.summarise.clone();
         new_config.validate()?;
         write_targets(&self.config_path, &new_config.targets)?;
         if let Some(running) = self.running.lock().await.get(name) {
-            running.relay.ignore.set(&rules);
+            running.relay.summarise.set(&groups);
         }
         *config = new_config;
-        Ok(())
+        Ok(out)
     }
 
     pub async fn remove(&self, name: &str) -> anyhow::Result<()> {
@@ -367,20 +374,34 @@ fn write_targets(path: &std::path::Path, targets: &[TargetConfig]) -> anyhow::Re
             table["max_connections_per_address"] =
                 toml_edit::value(t.max_connections_per_address as i64);
         }
-        if !t.ignore.is_empty() {
-            let mut rules = toml_edit::ArrayOfTables::new();
-            for rule in &t.ignore {
-                let mut r = toml_edit::Table::new();
-                r["node_id"] = toml_edit::value(rule.node_id.as_str());
-                if let Some(client) = &rule.client {
-                    r["client"] = toml_edit::value(client.as_str());
+        if !t.summarise.is_empty() {
+            let mut groups = toml_edit::ArrayOfTables::new();
+            for g in &t.summarise {
+                let mut table = toml_edit::Table::new();
+                if let Some(name) = &g.name {
+                    table["name"] = toml_edit::value(name.as_str());
                 }
-                if let Some(name) = &rule.name {
-                    r["name"] = toml_edit::value(name.as_str());
+                if let Some(client) = &g.client {
+                    table["client"] = toml_edit::value(client.as_str());
                 }
-                rules.push(r);
+                // One node per line: a group can hold hundreds.
+                let mut nodes: toml_edit::Array = g.nodes.iter().map(String::as_str).collect();
+                for node in nodes.iter_mut() {
+                    node.decor_mut().set_prefix("\n  ");
+                }
+                nodes.set_trailing("\n");
+                nodes.set_trailing_comma(true);
+                table["nodes"] = toml_edit::value(nodes);
+                if !g.names.is_empty() {
+                    let mut names = toml_edit::Table::new();
+                    for (node, name) in &g.names {
+                        names[node.as_str()] = toml_edit::value(name.as_str());
+                    }
+                    table["names"] = toml_edit::Item::Table(names);
+                }
+                groups.push(table);
             }
-            table["ignore"] = toml_edit::Item::ArrayOfTables(rules);
+            table["summarise"] = toml_edit::Item::ArrayOfTables(groups);
         }
         array.push(table);
     }
@@ -409,6 +430,7 @@ mod tests {
             min_security: Default::default(),
             max_connections: 50,
             max_connections_per_address: 10,
+            summarise: Vec::new(),
             ignore: Vec::new(),
         }
     }
@@ -474,47 +496,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ignored_nodes_are_saved_and_applied_live() {
+    async fn summarise_groups_are_saved_and_applied_live() {
         let dir = tempfile::tempdir().unwrap();
         let m = manager(dir.path()).await;
         let path = dir.path().join("config.toml");
         m.upsert(target("plc1", free_port()), None).await.unwrap();
         let relay = m.relay("plc1").await.unwrap();
 
-        let rules = vec![
-            IgnoreRule {
-                node_id: "ns=3;s=\"DB1\".\"Life\"".into(),
-                client: None,
-                name: Some("Life".into()),
+        let groups = vec![
+            SummariseGroup {
+                name: Some("Life bits".into()),
+                nodes: vec!["ns=3;s=\"DB1\".\"Life\"".into(), "ns=3;i=8".into()],
+                names: [("ns=3;i=8".to_string(), "Clock".to_string())].into(),
+                ..Default::default()
             },
-            IgnoreRule {
-                node_id: "ns=3;i=7".into(),
+            SummariseGroup {
                 client: Some("10.0.0.5".into()),
-                name: None,
+                nodes: vec!["ns=3;i=7".into()],
+                ..Default::default()
             },
         ];
-        m.set_ignore("plc1", rules.clone()).await.unwrap();
-        // The same relay (no restart), with the new rules.
+        let set = |g: Vec<SummariseGroup>| {
+            move |groups: &mut Vec<SummariseGroup>| -> anyhow::Result<()> {
+                *groups = g;
+                Ok(())
+            }
+        };
+        m.update_summarise("plc1", set(groups.clone()))
+            .await
+            .unwrap();
+        // The same relay (no restart), with the new groups.
         let same = m.relay("plc1").await.unwrap();
         assert!(Arc::ptr_eq(&relay, &same));
         let life = "ns=3;s=\"DB1\".\"Life\"".parse().unwrap();
-        assert!(same.ignore.matches(&life, &Default::default()));
+        assert!(same.summarise.matches(&life, &Default::default()));
         // Saved, and read back identically.
-        assert_eq!(Config::load(&path).unwrap().targets[0].ignore, rules);
+        assert_eq!(Config::load(&path).unwrap().targets[0].summarise, groups);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[targets.summarise]]"), "{text}");
 
-        // Invalid rules change nothing.
-        let bad = vec![IgnoreRule {
-            node_id: "not a node".into(),
-            client: None,
-            name: None,
-        }];
-        assert!(m.set_ignore("plc1", bad).await.is_err());
-        assert_eq!(Config::load(&path).unwrap().targets[0].ignore, rules);
-        assert!(m.set_ignore("nope", Vec::new()).await.is_err());
+        // Invalid groups change nothing.
+        let mut bad = groups.clone();
+        bad[1].nodes.push("ns=3;i=7".into());
+        assert!(m.update_summarise("plc1", set(bad)).await.is_err());
+        assert_eq!(Config::load(&path).unwrap().targets[0].summarise, groups);
+        assert!(m.update_summarise("nope", set(Vec::new())).await.is_err());
 
-        m.set_ignore("plc1", Vec::new()).await.unwrap();
-        assert!(Config::load(&path).unwrap().targets[0].ignore.is_empty());
-        assert!(same.ignore.is_empty());
+        m.update_summarise("plc1", set(Vec::new())).await.unwrap();
+        assert!(Config::load(&path).unwrap().targets[0].summarise.is_empty());
+        assert!(same.summarise.is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_ignore_rules_are_written_as_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "{EXAMPLE_CONFIG}
+[[targets]]
+name = \"plc1\"
+listen = \"127.0.0.1:{}\"
+endpoint_url = \"opc.tcp://127.0.0.1:1/\"
+
+[[targets.ignore]]
+node_id = \"ns=3;i=1\"
+name = \"Life\"
+
+[[targets.ignore]]
+node_id = \"ns=3;i=2\"
+client = \"10.0.0.5\"
+",
+                free_port()
+            ),
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let t = &config.targets[0];
+        assert!(t.ignore.is_empty());
+        assert_eq!(t.summarise.len(), 2);
+        write_targets(&path, &config.targets).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("targets.ignore"), "{text}");
+        assert_eq!(
+            Config::load(&path).unwrap().targets[0].summarise,
+            t.summarise
+        );
     }
 
     #[tokio::test]

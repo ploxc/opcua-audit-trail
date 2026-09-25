@@ -332,20 +332,35 @@ pub struct WrittenNode {
 }
 
 /// The nodes with the most recorded writes since `since`, most first.
+/// Which writes `most_written` counts.
+#[derive(Debug, Default, Clone)]
+pub struct WrittenFilter {
+    pub target: Option<String>,
+    /// Only writes from this client: its IP address or application URI.
+    pub client: Option<String>,
+}
+
 pub fn most_written(
     conn: &Connection,
     since: &DateTime<Utc>,
     limit: u32,
+    filter: &WrittenFilter,
 ) -> anyhow::Result<Vec<WrittenNode>> {
     let mut stmt = conn.prepare(
         "SELECT a.target, a.node_id, c.n, a.seq, a.hash, a.body, a.prev_hash
          FROM (SELECT target, node_id, COUNT(*) AS n, MAX(seq) AS last FROM audit
-               WHERE kind = 'write' AND ts >= ?1 GROUP BY target, node_id
+               WHERE kind = 'write' AND ts >= ?1
+                 AND (?3 IS NULL OR target = ?3)
+                 AND (?4 IS NULL OR application_uri = ?4 OR remote_addr = ?4
+                      OR substr(remote_addr, 1, length(?4) + 1) = ?4 || ':'
+                      OR substr(remote_addr, 1, length(?4) + 3) = '[' || ?4 || ']:')
+               GROUP BY target, node_id
                ORDER BY n DESC LIMIT ?2) AS c
          JOIN audit AS a ON a.seq = c.last
          ORDER BY c.n DESC",
     )?;
-    let rows = stmt.query_map(params![ts_column(since), limit], |r| {
+    let args = params![ts_column(since), limit, filter.target, filter.client];
+    let rows = stmt.query_map(args, |r| {
         Ok((
             r.get::<_, Option<String>>(0)?,
             r.get::<_, Option<String>>(1)?,
@@ -852,12 +867,37 @@ mod tests {
 
         let reader = open_reader(&path).unwrap();
         let since = Utc::now() - chrono::Duration::days(1);
-        let top = most_written(&reader, &since, 10).unwrap();
+        let all = WrittenFilter::default();
+        let top = most_written(&reader, &since, 10, &all).unwrap();
         let summary: Vec<_> = top.iter().map(|n| (n.node_id.as_str(), n.count)).collect();
         assert_eq!(summary, [("ns=2;s=Life", 5), ("ns=2;s=Set", 2)]);
         assert_eq!(top[0].target.as_deref(), Some("plc1"));
         assert_eq!(top[0].last.seq, 5, "the most recent write");
-        assert_eq!(most_written(&reader, &since, 1).unwrap().len(), 1);
+        assert_eq!(most_written(&reader, &since, 1, &all).unwrap().len(), 1);
+        let count = |target: Option<&str>, client: Option<&str>| {
+            let filter = WrittenFilter {
+                target: target.map(Into::into),
+                client: client.map(Into::into),
+            };
+            most_written(&reader, &since, 10, &filter).unwrap().len()
+        };
+        let addr = top[0]
+            .last
+            .entry
+            .client
+            .as_ref()
+            .unwrap()
+            .remote_addr
+            .clone();
+        let ip = addr
+            .rsplit_once(':')
+            .unwrap()
+            .0
+            .trim_matches(['[', ']'])
+            .to_string();
+        assert_eq!(count(Some("plc1"), Some(&ip)), 2);
+        assert_eq!(count(Some("plc2"), None), 0);
+        assert_eq!(count(None, Some("10.9.9.9")), 0);
     }
 
     #[test]

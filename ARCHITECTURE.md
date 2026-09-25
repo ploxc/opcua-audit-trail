@@ -118,12 +118,14 @@ only changes what is bound to certificates or to the channel:
 The status comes from the upstream response, so **rejected writes are audited
 too** (`BadUserAccessDenied` is valuable information).
 
-**Summarised nodes.** Value writes to nodes on a target's ignore list (a life
-bit, a seconds counter), optionally only from one client, are taken out of
+**Summarised nodes.** Value writes to nodes in a target's summarise groups (a
+life bit, a seconds counter), each group for one client or every client,
+are looked up in a hash set per client plus one for everyone (built when the
+groups change, `relay/ignore.rs`) and taken out of
 the write before it is audited: they skip the old-value read and are counted
 per node instead. Every `ignored_summary_secs` (and when the target stops)
 one `ignored_writes` record per node gives the count, the failures, the
-clients, the time span and the last value. The list can change while clients
+clients, the time span and the last value. The groups can change while clients
 are connected; changes are audited. Everything else in the same request is
 recorded as usual, with its own result.
 
@@ -372,7 +374,7 @@ checks that every file in `js/` is served).
 | `js/state.js` | The shared `state`, the role check `can`, and the `render`/`renderPage`/`load`/`schedule` hooks that main.js implements |
 | `js/format.js` | Times, values, user labels, event labels and groups |
 | `js/components.js` | Icons, logos, header buttons, badges, foldable sections, dialog, toast, form helpers |
-| `js/ignore.js` | Summarised (ignored) nodes: badge, controls and their actions |
+| `js/summarise.js` | Summarised nodes: badge, controls, the groups on the Targets page and their actions |
 | `js/alarms.js` | Unacknowledged warning and error counts in the sidebar |
 | `js/pages/*.js` | One module per page (dashboard, audit, targets, certificates, browser, users, settings, account with the login screens): its view, and its `actions` and `forms` |
 

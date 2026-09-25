@@ -11,7 +11,7 @@ import { html, when } from "./html.js";
 import { get, post } from "./api.js";
 import { alarmCounts, refreshAlarms } from "./alarms.js";
 import { THEME_KEY, gatewayLogo, icon, ploxcLink, themeButton, toast } from "./components.js";
-import * as ignore from "./ignore.js";
+import * as summarise from "./summarise.js";
 import { BROWSER_EMPTY, can, setHooks, state } from "./state.js";
 import * as account from "./pages/account.js";
 import * as audit from "./pages/audit.js";
@@ -373,7 +373,7 @@ const shellActions = {
 // `data-action` name → handler(element, event).
 const actions = {
   ...shellActions,
-  ...ignore.actions,
+  ...summarise.actions,
   ...audit.actions,
   ...targets.actions,
   ...certificates.actions,

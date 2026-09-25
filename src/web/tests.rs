@@ -578,51 +578,82 @@ async fn own_password_change() {
 }
 
 #[tokio::test]
-async fn ignore_list_is_admin_only_audited_and_kept_on_edit() {
+async fn summarise_groups_are_admin_only_audited_and_kept_on_edit() {
     let w = web().await;
     let admin = w.login("admin").await;
     let operator = w.login("operator").await;
     assert_eq!(w.add_target(&admin).await, StatusCode::CREATED);
-    let life = json!({ "node_id": " ns=3;s=\"DB1\".\"Life\" ", "client": "" });
+    let group = json!({ "name": " HMI line 1 ", "client": "192.168.1.20" });
 
     let (status, _) = w
-        .post("/api/targets/plc1/ignore", &operator, life.clone())
+        .post("/api/targets/plc1/summarise", &operator, group.clone())
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = w
-        .post("/api/targets/plc1/ignore", &admin, life.clone())
+    let (status, created) = w
+        .post("/api/targets/plc1/summarise", &admin, group.clone())
         .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    // Adding it again changes nothing; an invalid node id is refused.
-    let (status, _) = w
-        .post("/api/targets/plc1/ignore", &admin, life.clone())
-        .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["group"], 0);
     let (status, _) = w
         .post(
-            "/api/targets/plc1/ignore",
+            "/api/targets/plc1/summarise",
             &admin,
-            json!({ "node_id": "nonsense" }),
+            json!({ "client": "", "nodes": [{ "node_id": "ns=3;i=1" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Nodes in bulk: trimmed, duplicates and nodes already in the group skipped.
+    let nodes = json!([
+        { "node_id": " ns=3;s=\"DB1\".\"Life\" ", "name": "Life" },
+        { "node_id": "ns=3;i=1" },
+        { "node_id": "ns=3;i=1" },
+    ]);
+    let (status, added) = w
+        .post("/api/targets/plc1/summarise/0/add", &admin, nodes.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(added["changed"], 2);
+    let (_, added) = w
+        .post("/api/targets/plc1/summarise/0/add", &admin, nodes)
+        .await;
+    assert_eq!(added["changed"], 0);
+    let (status, _) = w
+        .post(
+            "/api/targets/plc1/summarise/0/add",
+            &admin,
+            json!([{ "node_id": "nonsense" }]),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = w
+        .post("/api/targets/plc1/summarise/5/add", &admin, json!([]))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Trimmed, the empty client dropped; saved in the config file.
     let (_, targets) = w.get("/api/targets", &operator).await;
     assert_eq!(
-        targets[0]["ignore"],
-        json!([{ "node_id": "ns=3;s=\"DB1\".\"Life\"" }])
+        targets[0]["summarise"],
+        json!([
+            {
+                "name": "HMI line 1",
+                "client": "192.168.1.20",
+                "nodes": ["ns=3;s=\"DB1\".\"Life\"", "ns=3;i=1"],
+                "names": { "ns=3;s=\"DB1\".\"Life\"": "Life" },
+            },
+            { "nodes": ["ns=3;i=1"] },
+        ])
     );
     assert_eq!(
-        Config::load(&w.config_path).unwrap().targets[0]
-            .ignore
+        Config::load(&w.config_path).unwrap().targets[0].summarise[0]
+            .nodes
             .len(),
-        1
+        2
     );
 
-    // Editing the target in the form keeps the ignored nodes.
+    // Editing the target in the form keeps the groups.
     let mut edited = targets[0].clone();
-    for key in ["ignore", "status", "clients"] {
+    for key in ["summarise", "status", "clients"] {
         edited.as_object_mut().unwrap().remove(key);
     }
     edited["discovery_interval_secs"] = json!(30);
@@ -631,19 +662,40 @@ async fn ignore_list_is_admin_only_audited_and_kept_on_edit() {
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, targets) = w.get("/api/targets", &operator).await;
-    assert_eq!(targets[0]["ignore"].as_array().unwrap().len(), 1);
+    assert_eq!(targets[0]["summarise"].as_array().unwrap().len(), 2);
 
-    let rule = json!({ "node_id": "ns=3;s=\"DB1\".\"Life\"" });
-    let (status, _) = w
-        .post("/api/targets/plc1/ignore/remove", &admin, rule.clone())
+    let (status, removed) = w
+        .post(
+            "/api/targets/plc1/summarise/0/remove",
+            &admin,
+            json!({ "nodes": ["ns=3;s=\"DB1\".\"Life\""] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(removed["changed"], 1);
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/targets/plc1/summarise/0",
+            Some(&admin),
+            Some(json!({ "name": "Life bits" })),
+        )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = w
-        .post("/api/targets/plc1/ignore/remove", &admin, rule)
-        .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
     let (_, targets) = w.get("/api/targets", &operator).await;
-    assert!(targets[0].get("ignore").is_none());
+    assert_eq!(targets[0]["summarise"][0]["name"], "Life bits");
+    assert!(targets[0]["summarise"][0].get("names").is_none());
+    let (status, _, _) = w
+        .send(
+            Method::DELETE,
+            "/api/targets/plc1/summarise/1",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, targets) = w.get("/api/targets", &operator).await;
+    assert_eq!(targets[0]["summarise"].as_array().unwrap().len(), 1);
 
     let (_, changes) = w.get("/api/audit?kind=config_changed", &admin).await;
     let summaries: Vec<&str> = changes
@@ -652,10 +704,27 @@ async fn ignore_list_is_admin_only_audited_and_kept_on_edit() {
         .iter()
         .map(|r| r["event"]["summary"].as_str().unwrap())
         .collect();
-    assert!(summaries[0].contains("recorded again"), "{summaries:?}");
-    assert!(summaries
-        .iter()
-        .any(|s| s.contains("summarised instead of recorded")));
+    for expected in [
+        "target 'plc1': summarise group 'HMI line 1' (from 192.168.1.20) created",
+        "target 'plc1': summarise group an unnamed group (from every client) created with 1 node",
+        "target 'plc1': 2 nodes added to 'HMI line 1' (from 192.168.1.20)",
+        "target 'plc1': 1 node removed from 'HMI line 1' (from 192.168.1.20); \
+         their writes are recorded again",
+        "target 'plc1': summarise group 'HMI line 1' (from 192.168.1.20) renamed to \
+         'Life bits' (from 192.168.1.20)",
+        "target 'plc1': summarise group an unnamed group (from every client) removed; \
+         writes to its 1 node are recorded again",
+    ] {
+        assert!(summaries.contains(&expected), "{expected}\n{summaries:?}");
+    }
+    // Adding nothing new records nothing.
+    assert_eq!(
+        summaries
+            .iter()
+            .filter(|s| s.contains("nodes added"))
+            .count(),
+        1
+    );
 
     let (status, top) = w.get("/api/audit/most-written?hours=1", &operator).await;
     assert_eq!(status, StatusCode::OK);
@@ -1301,6 +1370,35 @@ async fn mcp_changes_need_token_scope_and_admin() {
         .cloned()
         .unwrap_or_default();
     assert!(plc9.to_string().contains("sign"), "{targets}");
+    // Summarise groups: create one, then add and remove nodes.
+    for (tool, args) in [
+        (
+            "create_summarise_group",
+            json!({"target": "plc9", "name": "Life bits", "node_ids": ["ns=3;i=1"]}),
+        ),
+        (
+            "add_summarised_nodes",
+            json!({"target": "plc9", "group": 0, "node_ids": ["ns=3;i=2", "ns=3;i=3"]}),
+        ),
+        (
+            "remove_summarised_nodes",
+            json!({"target": "plc9", "group": 0, "node_ids": ["ns=3;i=1"]}),
+        ),
+    ] {
+        let (_, done) = w.mcp(&config, call(tool, args)).await;
+        assert_eq!(done["result"]["isError"], false, "{tool}: {done}");
+    }
+    let (_, targets) = w.get("/api/targets", &admin).await;
+    let plc9 = targets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "plc9")
+        .unwrap();
+    assert_eq!(
+        plc9["summarise"][0]["nodes"],
+        json!(["ns=3;i=2", "ns=3;i=3"])
+    );
     let (_, records) = w
         .get("/api/audit?kind=config_changed&limit=5", &admin)
         .await;

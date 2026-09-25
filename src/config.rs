@@ -4,7 +4,7 @@
 //! the config file, so the gateway behaves the same whether it runs from a shell,
 //! as a Windows service (whose working directory is `System32`) or in a container.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -191,7 +191,7 @@ pub struct AuditConfig {
     /// Read the current value right before forwarding a write, so the audit
     /// trail shows `old -> new`. Costs one extra round trip per write.
     pub record_old_value: bool,
-    /// How often writes to ignored nodes (see `ignore` per target) are
+    /// How often writes to summarised nodes (see `summarise` per target) are
     /// recorded as one `ignored_writes` summary per node.
     pub ignored_summary_secs: u64,
 }
@@ -231,43 +231,145 @@ pub struct TargetConfig {
     pub max_connections: usize,
     #[serde(default = "default_max_connections_per_address")]
     pub max_connections_per_address: usize,
-    /// Nodes whose value writes are summarised instead of recorded one by
-    /// one, e.g. a life bit an HMI writes every second.
+    /// Groups of nodes whose value writes are summarised instead of
+    /// recorded one by one, e.g. the life bits an HMI writes every second.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summarise: Vec<SummariseGroup>,
+    /// The old form of `summarise`, one rule per node. Still read; turned
+    /// into groups when the file is loaded, and written as groups.
+    #[serde(default, skip_serializing)]
     pub ignore: Vec<IgnoreRule>,
 }
 
-/// Most ignore rules per target.
-pub const MAX_IGNORE_RULES: usize = 1000;
+/// Most summarised nodes per target, over all its groups.
+pub const MAX_SUMMARISED_NODES: usize = 1000;
+/// Most summarise groups per target.
+pub const MAX_SUMMARISE_GROUPS: usize = 100;
 
-/// A node whose value writes are not recorded one by one. They are counted
-/// and recorded periodically as an `ignored_writes` summary (how many, from
-/// which clients, the last value), so they never go unnoticed entirely.
+/// Nodes whose value writes are not recorded one by one. They are counted
+/// and recorded periodically as an `ignored_writes` summary per node (how
+/// many, from which clients, the last value), so they never go unnoticed
+/// entirely.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummariseGroup {
+    /// For people reading the list, e.g. "HMI line 1".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Only writes from this client (its IP address or application URI);
+    /// the same nodes written by any other client are recorded as usual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// The nodes as shown in the audit trail, e.g. `ns=3;s="DB1"."Life"`.
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    /// Display names of the nodes, where known, for people reading the list.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<String, String>,
+}
+
+impl SummariseGroup {
+    /// "'HMI line 1' (from 10.0.0.5)", for audit records and messages.
+    pub fn label(&self) -> String {
+        let name = match &self.name {
+            Some(n) => format!("'{n}'"),
+            None => "an unnamed group".into(),
+        };
+        match &self.client {
+            Some(c) => format!("{name} (from {c})"),
+            None => format!("{name} (from every client)"),
+        }
+    }
+}
+
+/// Parses a node id as shown in the audit trail.
+pub fn parse_node(node_id: &str) -> anyhow::Result<opcua::types::NodeId> {
+    node_id
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("'{}' is not a node id", node_id.escape_debug()))
+}
+
+/// The old per-node form of a summarised node (`[[targets.ignore]]`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IgnoreRule {
-    /// The node as shown in the audit trail, e.g. `ns=3;s="DB1"."Life"`.
     pub node_id: String,
-    /// Only writes from this client (its IP address or application URI);
-    /// the same node written by any other client is recorded as usual.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub client: Option<String>,
-    /// The node's display name, for people reading the list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub name: Option<String>,
 }
 
-impl IgnoreRule {
-    /// Whether two rules are for the same node and client.
-    pub fn same(&self, other: &IgnoreRule) -> bool {
-        self.node_id == other.node_id && self.client == other.client
+/// Summarise groups: valid node ids and clients, no node twice in a group,
+/// and at most MAX_SUMMARISED_NODES nodes in all.
+fn validate_summarise(t: &TargetConfig) -> anyhow::Result<()> {
+    let name = &t.name;
+    if t.summarise.len() > MAX_SUMMARISE_GROUPS {
+        bail!("target '{name}': at most {MAX_SUMMARISE_GROUPS} summarise groups");
     }
+    let total: usize = t.summarise.iter().map(|g| g.nodes.len()).sum();
+    if total > MAX_SUMMARISED_NODES {
+        bail!("target '{name}': at most {MAX_SUMMARISED_NODES} summarised nodes (got {total})");
+    }
+    for g in &t.summarise {
+        if g.name
+            .as_ref()
+            .is_some_and(|n| n.trim().is_empty() || n.chars().count() > 100)
+        {
+            bail!("target '{name}': a summarise group name must be 1 to 100 characters");
+        }
+        if g.client
+            .as_ref()
+            .is_some_and(|c| c.trim().is_empty() || c.len() > 256)
+        {
+            bail!("target '{name}': summarise client must be an address or application URI");
+        }
+        let mut nodes = HashSet::new();
+        for node_id in &g.nodes {
+            let node =
+                parse_node(node_id).with_context(|| format!("target '{name}': summarise"))?;
+            if !nodes.insert(node) {
+                bail!(
+                    "target '{name}': {node_id} is twice in summarise group {}",
+                    g.label()
+                );
+            }
+        }
+        if let Some(extra) = g.names.keys().find(|k| !g.nodes.contains(k)) {
+            bail!("target '{name}': summarise names {extra}, which is not in the group");
+        }
+    }
+    Ok(())
+}
 
-    pub fn node(&self) -> anyhow::Result<opcua::types::NodeId> {
-        self.node_id
-            .trim()
-            .parse()
-            .map_err(|_| anyhow::anyhow!("'{}' is not a node id", self.node_id.escape_debug()))
+impl TargetConfig {
+    /// Moves old `ignore` rules into `summarise` groups: one per client, and
+    /// one for the rules without a client.
+    pub fn migrate_ignore(&mut self) {
+        for rule in std::mem::take(&mut self.ignore) {
+            let client = rule
+                .client
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty());
+            let group = match self.summarise.iter().position(|g| g.client == client) {
+                Some(i) => &mut self.summarise[i],
+                None => {
+                    self.summarise.push(SummariseGroup {
+                        client,
+                        ..Default::default()
+                    });
+                    self.summarise.last_mut().expect("just pushed")
+                }
+            };
+            let node_id = rule.node_id.trim().to_string();
+            if !group.nodes.contains(&node_id) {
+                group.nodes.push(node_id.clone());
+            }
+            if let Some(name) = rule.name.filter(|n| !n.trim().is_empty()) {
+                group.names.insert(node_id, name);
+            }
+        }
     }
 }
 
@@ -314,6 +416,9 @@ impl Config {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         config.resolve_paths(&base);
+        for t in &mut config.targets {
+            t.migrate_ignore();
+        }
         config.apply_env(|name| std::env::var(name).ok())?;
         config.validate()?;
         Ok(config)
@@ -427,31 +532,7 @@ impl Config {
             if t.max_connections == 0 || t.max_connections_per_address == 0 {
                 bail!("target '{}': connection limits must be > 0", t.name);
             }
-            if t.ignore.len() > MAX_IGNORE_RULES {
-                bail!(
-                    "target '{}': at most {MAX_IGNORE_RULES} ignored nodes",
-                    t.name
-                );
-            }
-            let mut rules = HashSet::new();
-            for rule in &t.ignore {
-                let node = rule
-                    .node()
-                    .with_context(|| format!("target '{}': ignore", t.name))?;
-                if rule
-                    .client
-                    .as_ref()
-                    .is_some_and(|c| c.trim().is_empty() || c.len() > 256)
-                {
-                    bail!(
-                        "target '{}': ignore client must be an address or application URI",
-                        t.name
-                    );
-                }
-                if !rules.insert((node, rule.client.clone())) {
-                    bail!("target '{}': {} is ignored twice", t.name, rule.node_id);
-                }
-            }
+            validate_summarise(t)?;
         }
         Ok(())
     }
@@ -497,7 +578,7 @@ retention_days = 365
 # (those records are lost; only their number is recorded).
 fail_mode = "closed"
 record_old_value = true
-# Writes to ignored nodes (see [[targets.ignore]]) are recorded as one
+# Writes to summarised nodes (see [[targets.summarise]]) are recorded as one
 # summary per node this often.
 ignored_summary_secs = 3600
 
@@ -520,9 +601,10 @@ ignored_summary_secs = 3600
 #
 # A node written so often it floods the trail (a life bit): its value writes
 # are summarised every ignored_summary_secs instead of recorded one by one.
-# [[targets.ignore]]
-# node_id = 'ns=3;s="DB1"."Life"'
+# [[targets.summarise]]
+# name = "HMI line 1"               # optional, for people reading the list
 # client = "10.0.0.5"               # optional: only from this address or application URI
+# nodes = ['ns=3;s="DB1"."Life"', 'ns=3;s="DB1"."Clock"']
 "#;
 
 #[cfg(test)]
@@ -613,5 +695,90 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.gateway.pki_dir, dir.path().join("pki"));
         assert_eq!(config.audit_database(), dir.path().join("data/audit.db"));
+    }
+
+    const TARGET: &str = r#"
+        [[targets]]
+        name = "plc1"
+        listen = "127.0.0.1:4841"
+        endpoint_url = "opc.tcp://127.0.0.1:4840"
+    "#;
+
+    #[test]
+    fn ignore_rules_become_groups_per_client() {
+        let mut config: Config = toml::from_str(&format!(
+            r#"{TARGET}
+            [[targets.ignore]]
+            node_id = "ns=3;i=1"
+            name = "Life"
+            [[targets.ignore]]
+            node_id = "ns=3;i=2"
+            client = "10.0.0.5"
+            [[targets.ignore]]
+            node_id = "ns=3;i=3"
+            [[targets.ignore]]
+            node_id = "ns=3;i=1"
+            client = " 10.0.0.5 "
+            "#
+        ))
+        .unwrap();
+        let t = &mut config.targets[0];
+        t.migrate_ignore();
+        assert!(t.ignore.is_empty());
+        assert_eq!(
+            t.summarise,
+            vec![
+                SummariseGroup {
+                    nodes: vec!["ns=3;i=1".into(), "ns=3;i=3".into()],
+                    names: [("ns=3;i=1".to_string(), "Life".to_string())].into(),
+                    ..Default::default()
+                },
+                SummariseGroup {
+                    client: Some("10.0.0.5".into()),
+                    nodes: vec!["ns=3;i=2".into(), "ns=3;i=1".into()],
+                    ..Default::default()
+                },
+            ]
+        );
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn summarise_groups_are_validated() {
+        let group = |body: &str| parse(&format!("{TARGET}\n[[targets.summarise]]\n{body}"));
+        group(
+            r#"name = "HMI"
+                 client = "10.0.0.5"
+                 nodes = ["ns=3;i=1", "ns=3;i=2"]"#,
+        )
+        .unwrap();
+        assert!(group(r#"nodes = ["ns=3;i=1", "ns=3;i=1"]"#).is_err());
+        assert!(group(r#"nodes = ["nonsense"]"#).is_err());
+        assert!(group(
+            r#"client = " "
+                        nodes = []"#
+        )
+        .is_err());
+        assert!(group(
+            r#"nodes = ["ns=3;i=1"]
+                         names = { "ns=3;i=2" = "x" }"#
+        )
+        .is_err());
+        // The same node for one client and for everyone is fine.
+        parse(&format!(
+            "{TARGET}
+            [[targets.summarise]]
+            client = \"10.0.0.5\"
+            nodes = [\"ns=3;i=1\"]
+            [[targets.summarise]]
+            nodes = [\"ns=3;i=1\"]"
+        ))
+        .unwrap();
+        // The limit counts nodes, not groups.
+        let nodes: Vec<String> = (0..=MAX_SUMMARISED_NODES)
+            .map(|i| format!("\"ns=3;i={i}\""))
+            .collect();
+        let err = group(&format!("nodes = [{}]", nodes.join(","))).unwrap_err();
+        assert!(err.to_string().contains("summarised nodes"), "{err}");
     }
 }

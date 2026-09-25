@@ -1278,8 +1278,8 @@ async fn forward(ctx: Ctx, request: RequestMessage) -> ResponseMessage {
     let mut plan = audit_map::plan(&request);
     // Writes to ignored nodes are summarised, not recorded (nor read) one by one.
     let ignored = match plan.as_mut() {
-        Some(p) if !ctx.target.ignore.is_empty() => {
-            p.take_ignored(|node| ctx.target.ignore.matches(node, &client))
+        Some(p) if !ctx.target.summarise.is_empty() => {
+            p.take_ignored(|node| ctx.target.summarise.matches(node, &client))
         }
         _ => None,
     };
