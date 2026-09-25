@@ -1158,6 +1158,25 @@ fieldset.choice label .small {
   grid-column: 2;
 }
 
+/* ---------- Account page ---------- */
+/* New API token: name, permissions and button under each other. */
+.token-form {
+  display: grid;
+  gap: 12px;
+  max-width: 560px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.token-form h3 {
+  margin: 0;
+}
+.token-form fieldset.choice {
+  margin: 0;
+}
+.token-form fieldset.choice label span:first-of-type {
+  font-weight: 500;
+}
+
 /* ---------- Settings page ---------- */
 .settings-grid {
   display: grid;

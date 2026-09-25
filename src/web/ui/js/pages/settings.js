@@ -246,12 +246,12 @@ function gatewayCard(st, off, save) {
   </form>`;
 }
 
-/** What an assistant can be allowed to change, for people. */
+/** What a token can be allowed to change, for people: a name and what it covers. */
 export const SCOPE_LABELS = {
-  targets: "Targets (add, change, remove, summarised nodes)",
-  certificates: "Certificates (trust, untrust)",
-  settings: "Audit, export and certificate settings",
-  users: "Users",
+  targets: ["Targets", "add, change and remove PLCs; summarised nodes"],
+  certificates: ["Certificates", "trust and untrust OPC UA certificates"],
+  settings: ["Settings", "audit trail, export, certificate host names"],
+  users: ["Users", "create, change and delete web UI users"],
 };
 
 function mcpCard(m, off, save) {
@@ -268,20 +268,10 @@ function mcpCard(m, off, save) {
         question is recorded in the trail. Off: the endpoint
         answers nothing and tokens stop working.
       </p>
-    </div>
-    <div class="setting">
-      <span class="title">Assistants may also change</span>
-      ${m.scopes.map(
-        (scope) => html`<label class="inline">
-          <input type="checkbox" name="allow" value="${scope}"
-            ${flag(m.allow.includes(scope), "checked")} ${off}>
-          ${SCOPE_LABELS[scope] || scope}
-        </label>`,
-      )}
       <p class="help">
-        The most any token may change; each token gets a part of this when it is created, and
-        only an administrator's token can change anything. Changes are recorded as made via MCP.
-        Assistants never write to a PLC, and never change these MCP settings or API tokens.
+        What an assistant may change (targets, certificates, …) is chosen per token when an
+        administrator creates it. Assistants never write to a PLC, and never change these MCP
+        settings or API tokens.
       </p>
       ${when(
         !m.transport_ok,
@@ -458,8 +448,7 @@ export const forms = {
 
   async "settings-mcp"(form) {
     const enabled = form.elements.enabled.checked;
-    const allow = [...form.querySelectorAll("input[name=allow]:checked")].map((i) => i.value);
-    await put("/settings/mcp", { enabled, allow });
+    await put("/settings/mcp", { enabled });
     toast(enabled ? "MCP endpoint on" : "MCP endpoint off");
     state.settings = await get("/settings");
     renderPage();

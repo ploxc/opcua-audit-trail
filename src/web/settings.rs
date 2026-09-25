@@ -26,9 +26,7 @@ pub struct SettingsView {
 #[derive(Serialize)]
 struct McpView {
     enabled: bool,
-    /// What assistants may change at most.
-    allow: Vec<String>,
-    /// Everything that can be allowed.
+    /// What a token can be allowed to change.
     scopes: Vec<&'static str>,
     /// False over plain HTTP on a non-loopback address: it would not answer.
     transport_ok: bool,
@@ -126,7 +124,6 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
         },
         mcp: McpView {
             enabled: c.mcp.enabled,
-            allow: c.mcp.allow.clone(),
             scopes: crate::config::MCP_SCOPES.to_vec(),
             transport_ok: super::mcp::transport_is_safe(&s.config.web),
         },
@@ -394,8 +391,6 @@ pub async fn put_gateway(
 #[derive(Deserialize)]
 pub struct McpInput {
     enabled: bool,
-    #[serde(default)]
-    allow: Vec<String>,
 }
 
 /// Turns the MCP endpoint for AI assistants on or off, at once.
@@ -407,32 +402,13 @@ pub async fn put_mcp(
     user.require(Role::Admin)?;
     let (old, config) = s
         .targets
-        .update_settings(|c| {
-            c.mcp.enabled = input.enabled;
-            let mut allow = input.allow;
-            allow.sort();
-            allow.dedup();
-            c.mcp.allow = allow;
-        })
+        .update_settings(|c| c.mcp.enabled = input.enabled)
         .await
         .map_err(ApiError::bad_request)?;
-    let mut changes = Vec::new();
     if old.mcp.enabled != config.mcp.enabled {
-        changes.push(if config.mcp.enabled { "on" } else { "off" }.to_string());
-    }
-    if old.mcp.allow != config.mcp.allow {
-        changes.push(if config.mcp.allow.is_empty() {
-            "assistants may only read".to_string()
-        } else {
-            format!("assistants may change {}", config.mcp.allow.join(", "))
-        });
-    }
-    if !changes.is_empty() {
-        s.config_changed(
-            &user,
-            format!("MCP endpoint for AI assistants: {}", changes.join("; ")),
-        )
-        .await;
+        let state = if config.mcp.enabled { "on" } else { "off" };
+        s.config_changed(&user, format!("MCP endpoint for AI assistants {state}"))
+            .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

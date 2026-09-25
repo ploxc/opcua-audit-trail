@@ -102,7 +102,8 @@ function tokensCard() {
         ? html`<p class="section-note">
             An AI assistant can search the audit trail and read the gateway's status
             at <span class="mono">${mcpUrl()}</span>, with a token that acts as you.
-            It can only read, and every question it asks is recorded in the trail.
+            A token only reads, unless an administrator gives it permission to change
+            something. Everything it does is recorded in the trail.
           </p>`
         : html`<p class="section-note">
             The MCP endpoint is ${mcp?.enabled ? "on but needs HTTPS" : "off"}: an administrator
@@ -118,7 +119,11 @@ function tokensCard() {
           ${tokens.map(
             (t) => html`<tr>
               <td>${t.name} <span class="muted mono">${t.id}</span></td>
-              <td>${t.scopes.length ? t.scopes.join(", ") : html`<span class="muted">nothing (read only)</span>`}</td>
+              <td>${
+                t.scopes.length
+                  ? t.scopes.map((x) => SCOPE_LABELS[x]?.[0] || x).join(", ")
+                  : html`<span class="muted">nothing (read only)</span>`
+              }</td>
               <td class="nowrap">${time(t.created_at)}</td>
               <td class="nowrap">${t.last_used ? time(t.last_used) : html`<span class="muted">never</span>`}</td>
               <td class="actions-cell">
@@ -132,24 +137,27 @@ function tokensCard() {
     )}
     ${when(
       on,
-      () => html`<form data-form="token" class="form-grid mt">
+      () => html`<form data-form="token" class="token-form mt">
+        <h3>New token</h3>
         <div>
-          <label>New token</label>
-          <input name="name" required maxlength="64" placeholder="e.g. Claude Desktop on my laptop">
+          <label for="token-name">Name</label>
+          <input id="token-name" name="name" required maxlength="64"
+            placeholder="e.g. Claude Desktop on my laptop">
         </div>
         ${when(
-          can("admin") && mcp.allow.length,
-          () => html`<div>
-            <label>May also change</label>
-            ${mcp.allow.map(
-              (scope) => html`<label class="inline small">
+          can("admin"),
+          () => html`<fieldset class="choice">
+            <legend>May also change (nothing ticked: read only)</legend>
+            ${mcp.scopes.map(
+              (scope) => html`<label>
                 <input type="checkbox" name="scopes" value="${scope}">
-                ${SCOPE_LABELS[scope] || scope}
+                <span>${SCOPE_LABELS[scope]?.[0] || scope}</span>
+                <span class="small muted">${SCOPE_LABELS[scope]?.[1] || ""}</span>
               </label>`,
             )}
-            <p class="help small">Nothing ticked: the token can only read. Give a token only
-            what it needs, and delete it when the work is done.</p>
-          </div>`,
+          </fieldset>
+          <p class="help small">Give a token only what it needs, and delete it when the work is
+          done.</p>`,
         )}
         <div><button class="primary" type="submit">Create token</button></div>
       </form>`,

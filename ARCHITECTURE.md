@@ -358,9 +358,9 @@ need, and it keeps an SDK dependency out of the binary.
 - **Read tools:** search the trail (the `/api/audit` filters), one record,
   the status, the most written nodes, verify.
 - **Change tools, per scope** (`targets`, `certificates`, `settings`,
-  `users`): listed and callable only when the scope is in `[mcp] allow`
-  (Settings), in the token's own scopes (chosen at creation, stored with
-  it), and the token's user is an admin. They call the web API's handlers
+  `users`): listed and callable only when the token was created with the
+  scope (by an admin; stored with the token) and its user is still an
+  admin. They call the web API's handlers
   with the token's user, so role checks, validation and `config_changed`
   records are the same; the record's `by` says "via MCP, token <id>". None
   writes to a PLC, and MCP settings, tokens and the web server are not

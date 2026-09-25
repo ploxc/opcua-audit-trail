@@ -1217,6 +1217,10 @@ async fn create_token(
     user: AuthUser,
     Json(req): Json<NewToken>,
 ) -> ApiResult<crate::users::NewApiToken> {
+    // Changes need an admin, like in the web UI.
+    if !req.scopes.is_empty() {
+        user.require(Role::Admin)?;
+    }
     let token = s
         .users
         .create_token(&user.username, &req.name, &req.scopes)

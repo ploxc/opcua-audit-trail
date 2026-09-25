@@ -452,14 +452,11 @@ trail page), `get_audit_record`, `gateway_status` (targets, connected
 clients, unacknowledged warnings, exports), `most_written_nodes` and
 `verify_audit_trail`.
 
-An assistant can also help configure the gateway, if all three allow it:
-
-1. **The gateway** (Settings, "Assistants may also change"): the most any
-   token may change, per area: targets, certificates, settings (audit,
-   export, certificate host names), users.
-2. **The token**, chosen when it is created: a part of that. A token with
-   nothing ticked only reads, so a leaked read token cannot change anything.
-3. **The token's user** must be an admin.
+An assistant can also help configure the gateway. What a token may change
+is chosen when an admin creates it (Account page), per area: targets,
+certificates, settings (audit, export, certificate host names), users. A
+token with nothing ticked only reads, so a leaked read token cannot change
+anything; the MCP switch in Settings stops every token at once.
 
 The assistant then sees tools such as `add_target`, `update_target`,
 `trust_server_certificate` or `update_audit_settings`. They go through the

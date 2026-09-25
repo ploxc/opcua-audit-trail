@@ -1114,10 +1114,10 @@ fn mcp_needs_https_off_loopback() {
     assert!(super::mcp::transport_is_safe(&web("0.0.0.0:8080", true)));
 }
 
-/// Changes through MCP need all three: the gateway allows the scope, the
-/// token has it, and the token's user is an admin.
+/// Changes through MCP need both: the token was created with the scope, and
+/// its user is an admin.
 #[tokio::test]
-async fn mcp_changes_need_gateway_token_and_role() {
+async fn mcp_changes_need_token_scope_and_admin() {
     let w = web().await;
     let admin = w.login("admin").await;
     let (status, _, _) = w
@@ -1125,7 +1125,7 @@ async fn mcp_changes_need_gateway_token_and_role() {
             Method::PUT,
             "/api/settings/mcp",
             Some(&admin),
-            Some(json!({ "enabled": true, "allow": ["targets", "users"] })),
+            Some(json!({ "enabled": true })),
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -1158,8 +1158,8 @@ async fn mcp_changes_need_gateway_token_and_role() {
     let tools = names(w.mcp(&read, list.clone()).await.1);
     assert!(!tools.contains(&"add_target".to_string()));
 
-    // Targets and certificates; the gateway only allows targets.
-    let config = token(admin.clone(), json!(["targets", "certificates"])).await;
+    // Targets only: the certificate tools are not there.
+    let config = token(admin.clone(), json!(["targets"])).await;
     let tools = names(w.mcp(&config, list.clone()).await.1);
     assert!(tools.contains(&"add_target".to_string()));
     assert!(!tools.contains(&"trust_rejected_certificate".to_string()));
@@ -1230,11 +1230,16 @@ async fn mcp_changes_need_gateway_token_and_role() {
     let (_, queries) = w.get("/api/audit?kind=mcp_query&limit=50", &admin).await;
     assert!(!queries.to_string().contains("secret-pass-1"));
 
-    // An auditor's token changes nothing, whatever its scopes.
+    // Only an admin can give a token permissions.
     let auditor = w.login("auditor").await;
-    let weak = token(auditor, json!(["targets"])).await;
-    let tools = names(w.mcp(&weak, list).await.1);
-    assert!(!tools.contains(&"add_target".to_string()));
+    let (status, _) = w
+        .post(
+            "/api/me/tokens",
+            &auditor,
+            json!({ "name": "t", "scopes": ["targets"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 /// The gateway certificate as PEM, to trust the web UI's HTTPS.

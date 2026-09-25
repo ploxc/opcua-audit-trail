@@ -81,13 +81,9 @@ pub async fn post(
         application_name: Some("MCP".into()),
         ..Default::default()
     };
-    let allow = s.targets.config().await.mcp.allow;
+    // What the token was created with, and only for an admin.
     let changes = if user.role >= Role::Admin {
-        user.scopes
-            .iter()
-            .filter(|scope| allow.contains(scope))
-            .cloned()
-            .collect()
+        user.scopes.clone()
     } else {
         Vec::new()
     };
@@ -140,7 +136,7 @@ struct TokenUser {
     username: String,
     token: String,
     role: Role,
-    /// What the token may change (before the gateway's own limit).
+    /// What the token may change, chosen when it was created.
     scopes: Vec<String>,
 }
 
@@ -148,8 +144,8 @@ struct Caller {
     user: TokenUser,
     client: ClientContext,
     agent: Option<String>,
-    /// What this caller may change: the token's scopes that the gateway
-    /// allows (Settings), and only for an admin. Empty: read only.
+    /// What this caller may change: the token's scopes, and only for an
+    /// admin. Empty: read only.
     changes: Vec<String>,
 }
 
@@ -253,8 +249,8 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             let Some(tool) = ctx.tools().into_iter().find(|t| t["name"] == name) else {
                 let hint = if change_tools().iter().any(|(_, t)| t["name"] == name) {
-                    " (this token may not use it: see the token's permissions and the \
-                     gateway's Settings)"
+                    " (this token may not use it: an admin chooses a token's permissions when \
+                     creating it)"
                 } else {
                     ""
                 };
