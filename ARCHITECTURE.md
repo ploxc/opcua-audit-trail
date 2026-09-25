@@ -278,8 +278,8 @@ embedded, so the UI needs no internet access.
   request (changing a password, role or removing a user ends them), expire
   after 8 hours idle and 24 hours in total. Every state-changing request needs a custom header
   (CSRF protection). Logins are rate limited per address and per user. The
-  initial `admin` password is written to `initial-admin-password.txt` in the
-  data directory (not to the log) and must be changed at the first login.
+  first start creates `admin` with password `admin`, which must be changed
+  at the first login before anything else is allowed.
   UI logins and every change made through the UI are audited. HTTPS with
   rustls (`ring` provider), using the gateway certificate or PEM files; with
   TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.

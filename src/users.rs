@@ -68,6 +68,9 @@ pub struct UserStore {
 
 const MIN_PASSWORD_LENGTH: usize = 8;
 
+/// Password of the `admin` user created on the first start.
+pub const DEFAULT_ADMIN_PASSWORD: &str = "admin";
+
 fn hash(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -163,6 +166,25 @@ impl UserStore {
         )?;
         if inserted == 0 {
             bail!("user '{username}' already exists");
+        }
+        Ok(())
+    }
+
+    /// Creates `admin` with the well-known default password, which has to be
+    /// changed at the first login. It is shorter than the minimum length, so
+    /// it can never be kept as the new password.
+    pub fn create_default_admin(&self) -> anyhow::Result<()> {
+        let inserted = self.conn.lock().execute(
+            "INSERT OR IGNORE INTO users (username, password_hash, role, created_at, must_change_password)
+             VALUES ('admin', ?1, ?2, ?3, 1)",
+            params![
+                hash(DEFAULT_ADMIN_PASSWORD)?,
+                Role::Admin.as_str(),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        if inserted == 0 {
+            bail!("user 'admin' already exists");
         }
         Ok(())
     }
@@ -354,14 +376,8 @@ impl UserStore {
     }
 }
 
-/// Where the first admin password is written (readable by the service only).
-/// Removed once the password is changed.
-pub fn initial_password_file(config: &crate::config::Config) -> std::path::PathBuf {
-    config.gateway.data_dir.join("initial-admin-password.txt")
-}
-
-/// A random password for the first admin account.
-pub fn random_password() -> String {
+/// A random password (for the dummy hash that evens out login timing).
+fn random_password() -> String {
     use argon2::password_hash::rand_core::RngCore;
     const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bytes = [0u8; 20];
@@ -452,6 +468,19 @@ mod tests {
                 .unwrap()
                 .must_change_password
         );
+    }
+
+    #[test]
+    fn default_admin_must_change_password() {
+        let (_dir, users) = store();
+        users.create_default_admin().unwrap();
+        let admin = users
+            .verify("admin", DEFAULT_ADMIN_PASSWORD)
+            .unwrap()
+            .unwrap();
+        assert!(admin.must_change_password);
+        assert!(users.set_password("admin", DEFAULT_ADMIN_PASSWORD).is_err());
+        assert!(users.create_default_admin().is_err());
     }
 
     #[test]

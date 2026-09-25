@@ -1,8 +1,7 @@
 # OPC UA Audit Gateway with the published image: needs nothing else than
 # this file. Start with `docker compose up -d`, then open http://127.0.0.1:8080
-# and log in as admin with the password from
-#   docker compose cp gateway:/data/initial-admin-password.txt .
-# (it must be changed at the first login). Add targets in the web UI.
+# and log in as admin / admin (you must choose a new password at the first
+# login). Add targets in the web UI.
 services:
   gateway:
     # Pin a version (e.g. :0.2.0) for production.

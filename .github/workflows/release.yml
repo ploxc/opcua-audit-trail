@@ -141,10 +141,10 @@ jobs:
 
             ```sh
             docker compose up -d
-            docker compose cp gateway:/data/initial-admin-password.txt .   # first login
             ```
 
-            The web UI is on http://127.0.0.1:8080. The image is
+            The web UI is on http://127.0.0.1:8080 (first login: admin / admin,
+            then choose a new password). The image is
             `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7).
 
             Checksums are in `SHA256SUMS`.

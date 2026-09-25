@@ -96,13 +96,12 @@ cargo run -- init                                  # config.toml + certificate
 #   name = "line1"
 #   listen = "0.0.0.0:4841"
 #   endpoint_url = "opc.tcp://127.0.0.1:4840/"
-cargo run -- run                                   # admin password: data/initial-admin-password.txt
+cargo run -- run                                   # first login: admin / admin
 cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/
 ```
 
-Open http://127.0.0.1:8080 and log in as `admin` with the password from
-`data/initial-admin-password.txt`. You choose a new password at the first
-login (the file is removed then). Then watch the writes arrive.
+Open http://127.0.0.1:8080 and log in as `admin` with password `admin`. You
+choose a new password at the first login. Then watch the writes arrive.
 
 To try it locked down, as a PLC should be (only the gateway may connect,
 encrypted, with a login), start the stand-in PLC with `--strict` and the
@@ -132,7 +131,7 @@ cargo build --release
 ./target/release/opcua-audit-gateway discover opc.tcp://192.168.0.10:4840
 # add a [[targets]] block to config.toml, then:
 ./target/release/opcua-audit-gateway run         # web UI on http://127.0.0.1:8080
-                                                 # (admin password: data/initial-admin-password.txt)
+                                                 # (first login: admin / admin)
 ./target/release/opcua-audit-gateway verify      # check the audit trail's hash chain
 ```
 
@@ -194,8 +193,9 @@ multi-arch images (`ghcr.io/ploxc/opcua-audit-trail`) are built for every
 tar xzf opcua-audit-gateway-*-linux-amd64.tar.gz && cd opcua-audit-gateway-*
 sudo ./install.sh ./opcua-audit-gateway
 sudo nano /etc/opcua-audit-gateway/config.toml    # or add targets in the web UI
-sudo cat /var/lib/opcua-audit-gateway/initial-admin-password.txt  # first login
 ```
+
+The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
 
 The service runs as the unprivileged user `opcua-gw` with a hardened unit.
 Data, certificates and the audit trail live in `/var/lib/opcua-audit-gateway`.
@@ -218,8 +218,8 @@ The service runs under its own virtual account
 (`NT SERVICE\OpcUaAuditGateway`), not as LocalSystem. `service install`
 restricts the config, data, certificate and log directories to that account,
 SYSTEM and administrators; don't point them at shared directories. Logs go to
-`logs` next to the config (daily files, kept 14 days). The initial admin
-password is in `initial-admin-password.txt` in the data directory.
+`logs` next to the config (daily files, kept 14 days). The first login is
+`admin` / `admin`.
 `service uninstall` removes the service; install it again after an upgrade
 from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
 to files instead of the console.
@@ -248,12 +248,12 @@ you need is [`docker/compose/docker-compose.yml`](docker/compose/docker-compose.
 ```sh
 curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker/compose/docker-compose.yml
 docker compose up -d
-docker compose cp gateway:/data/initial-admin-password.txt .   # first login
 ```
 
-The web UI is on http://127.0.0.1:8080. In a checkout, `docker compose up -d`
-uses the `docker-compose.yml` there: the same image, or a local build when it
-cannot be pulled (`docker compose build` forces one).
+The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
+In a checkout, `docker compose up -d` uses the `docker-compose.yml` there: the
+same image, or a local build when it cannot be pulled (`docker compose build`
+forces one).
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
 volume. On the first start `/data/config.toml` is created from

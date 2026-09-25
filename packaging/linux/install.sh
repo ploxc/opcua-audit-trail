@@ -62,12 +62,4 @@ systemctl enable opcua-audit-gateway >/dev/null
 systemctl restart opcua-audit-gateway
 
 echo "started. Status: systemctl status opcua-audit-gateway"
-PASSWORD_FILE="$DATA/initial-admin-password.txt"
-i=0
-while [ ! -e "$PASSWORD_FILE" ] && [ $i -lt 10 ]; do
-    sleep 1
-    i=$((i + 1))
-done
-if [ -e "$PASSWORD_FILE" ]; then
-    echo "first login: user admin, password in $PASSWORD_FILE (you must change it; the file is removed then)"
-fi
+echo "first login on a new install: admin / admin (you must change the password)"

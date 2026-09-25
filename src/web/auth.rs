@@ -439,8 +439,6 @@ pub async fn change_password(
         .session_state(&user.username)?
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "user was just deleted".into()))?;
     let token = s.sessions.create(&user.username, state.epoch);
-    // The generated first password is no longer needed.
-    let _ = std::fs::remove_file(crate::users::initial_password_file(&s.config));
     s.config_changed(&user, format!("changed own password ({})", user.username))
         .await;
     Ok((
