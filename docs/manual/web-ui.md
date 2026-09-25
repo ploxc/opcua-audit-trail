@@ -8,7 +8,7 @@
 | Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
 | Users | admin | Users, roles and everyone's API tokens |
-| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB export, certificate host names, MCP; web server and paths shown read-only |
+| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB export, certificate host names, AI assistants (MCP); web server and paths shown read-only |
 | Account | everyone | Own password and API tokens |
 
 ## Errors and warnings

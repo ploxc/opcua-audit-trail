@@ -11,34 +11,41 @@ docker compose up -d
 docker compose logs gateway        # the first admin password
 ```
 
-The web UI is on **https://127.0.0.1:8080**. It uses a self-signed
-certificate: accept it once in the browser, or trust it (see
-[HTTPS](../https.md)). Log in as `admin` with the first password (see
-[First login](../first-login.md)), choose a new one, and add targets.
+The web UI is on **https://127.0.0.1:8080**, with a self-signed certificate:
+accept it once in the browser, or trust it (see [HTTPS](../https.md)). Log
+in as `admin` (see [First login](../first-login.md)), then connect
+[your first PLC](../first-target.md).
 
-In a checkout, `docker compose build` builds the image from the source
-instead of pulling it.
+In a checkout, `docker compose build` builds the image from the source.
 
 ## What the compose file sets
 
-- **Ports:** the web UI on `127.0.0.1:8080` (this machine only), and one port
-  per target for OPC UA clients (`4841`; add a line per further target).
-  For access to the web UI from other machines, publish `"8080:8080"` and add
-  the host name or IP to the certificate host names (Settings), then
-  regenerate the web certificate.
-- **`OPCUA_GATEWAY_WEB_TLS: "true"`:** HTTPS for the web UI and the MCP
-  endpoint. `"false"` only behind a TLS reverse proxy.
-- **`OPCUA_GATEWAY_ADMIN_PASSWORD`** (commented out): the first admin
-  password, if you want to choose it.
+- **Ports:** the web UI on `127.0.0.1:8080` (this machine only), and `4841`
+  for OPC UA clients of the first target. **Every further target needs its
+  own port line**, e.g. `"4842:4842"`. For the web UI from other machines,
+  publish `"8080:8080"`.
+- **`OPCUA_GATEWAY_WEB_TLS: "true"`:** HTTPS for the web UI. `"false"` only
+  behind a TLS reverse proxy.
+- **`OPCUA_GATEWAY_ADMIN_PASSWORD`** (commented out): choose the first admin
+  password yourself.
 - **The `gateway-data` volume at `/data`:** config, certificates, users and
   the audit trail.
 
-## Configuration in the volume
+The container's config ([`docker/config.toml`](../../../docker/config.toml),
+copied to `/data/config.toml` at the first start) differs from the defaults
+in two ways:
 
-On the first start `/data/config.toml` is created from
-[`docker/config.toml`](../../../docker/config.toml). Targets, certificates and
-most settings are managed in the web UI. For the rest (see
-[Configuration](../configuration.md)):
+- **Fail mode `closed`:** a write only reaches the PLC once its record is
+  stored. If the trail cannot be written (e.g. a full disk), clients cannot
+  write. Change it in Settings → Audit trail.
+- **The gateway's name:** the container does not know the host's name or IP,
+  which clients use. Add them under Settings → Gateway certificate before a
+  PLC trusts the certificate (see [Your first PLC](../first-target.md)).
+
+## Changing the config
+
+Targets, certificates and most settings are managed in the web UI. For the
+rest (see [Configuration](../configuration.md)):
 
 ```sh
 docker compose cp gateway:/data/config.toml .
@@ -46,9 +53,6 @@ docker compose cp gateway:/data/config.toml .
 docker compose cp config.toml gateway:/data/config.toml
 docker compose restart gateway
 ```
-
-The image has no shell. To look around in the volume, use a helper
-container: `docker run --rm -it --volumes-from <container> alpine sh`.
 
 ## Upgrading and starting over
 

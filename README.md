@@ -15,7 +15,7 @@ in Docker.
 
 What it does today:
 
-- **Relay:** works for security `None`, `Sign` and `SignAndEncrypt` (all RSA
+- **Relay:** relays security `None`, `Sign` and `SignAndEncrypt` (all RSA
   policies), anonymous and user name logins, and every service (reads, writes,
   subscriptions, method calls, …).
 - **Audit trail:** writes, method calls, history updates, node management,
@@ -31,6 +31,27 @@ What it does today:
 
 **[Manual](docs/manual/README.md)** for installation, setup and use;
 [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
+
+## Quick start (Docker)
+
+```sh
+curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker-compose.yml
+docker compose up -d
+docker compose logs gateway        # the first admin password
+```
+
+Open **https://127.0.0.1:8080** (a self-signed certificate: accept it once)
+and log in as `admin` with the password from the logs. Then connect your
+first PLC: [Your first PLC](docs/manual/first-target.md) takes you through
+it step by step. Clients then connect to the gateway
+(`opc.tcp://<gateway>:4841`, the first target's port) instead of the PLC.
+
+- Other ways to install: [Linux](docs/manual/installation/linux.md) ·
+  [Windows](docs/manual/installation/windows.md) ·
+  [macOS](docs/manual/installation/macos.md) ·
+  [from source](docs/manual/installation/from-source.md)
+- No PLC at hand? [Try it without a PLC](docs/manual/try-without-a-plc.md).
+- Everything else: the [manual](docs/manual/README.md).
 
 ## Screenshots
 
@@ -64,57 +85,16 @@ the result.
 
 ## What is tested
 
-Tested:
+About 100 automated tests, including end-to-end tests with a real OPC UA
+client and server through the gateway. By hand: the web UI; the Docker image
+against [OPC PLC](docker/opc-plc/) (Microsoft's simulator) with the Prosys
+OPC UA Browser, encrypted up to `Aes256-Sha256-RsaPss`, trust both ways;
+Siemens PLCSIM Advanced; the MCP endpoint from Claude Desktop and Claude
+chat; the release workflow as a dry run.
 
-- About 100 automated tests: relay, audit store and hash chain, export, web API,
-  certificates and the MCP endpoint. The end-to-end tests run a real OPC UA
-  client and server through the gateway.
-- The web UI, in a browser (Chromium), page by page.
-- By hand against [OPC PLC](docker/opc-plc/) (Microsoft's simulator, in
-  Docker) with the Prosys OPC UA Browser as client:
-  - encrypted connections up to `Aes256-Sha256-RsaPss`;
-  - certificate trust in both directions;
-  - user name logins and writes.
-- Against Siemens PLCSIM Advanced.
-- The Docker image and `docker-compose.yml`, against OPC PLC: first start and
-  first login, HTTPS on and off (`OPCUA_GATEWAY_WEB_TLS`), the web UI's own
-  certificate, and a stable identity when the container is recreated.
-- The MCP endpoint from Claude Desktop (through `mcp-remote`, over HTTPS) and
-  Claude chat: reading the trail and changing the configuration.
-- The release workflow as a dry run: every binary and the multi-arch image
-  build; publishing a release has not run yet.
-
-Not tested yet (the code and files are there, but nobody has run them for
-real):
-
-- The Linux service installation (systemd, `packaging/linux`) and the Windows
-  service.
-- Publishing a release (GitHub release, images on ghcr.io).
-- Export to a real QuestDB (tested against a stand-in only).
-- Real PLCs on a real network, over longer periods and under load.
-
-## Quick start (Docker)
-
-```sh
-curl -LO https://raw.githubusercontent.com/ploxc/opcua-audit-trail/main/docker-compose.yml
-docker compose up -d
-docker compose logs gateway        # the first admin password
-```
-
-Open **https://127.0.0.1:8080** (a self-signed certificate: accept it once),
-log in as `admin` with the password from the logs, choose your own, and add
-a target on the **Targets** page. Clients then connect to the gateway
-(`opc.tcp://<gateway>:4841`) instead of the PLC.
-
-- Other ways to install: [Linux](docs/manual/installation/linux.md) ·
-  [Windows](docs/manual/installation/windows.md) ·
-  [macOS](docs/manual/installation/macos.md) ·
-  [from source](docs/manual/installation/from-source.md)
-- No PLC at hand? [Try it without a PLC](docs/manual/try-without-a-plc.md).
-- Next: [trust between PLC and gateway](docs/manual/certificates.md),
-  [HTTPS](docs/manual/https.md),
-  [AI assistants](docs/manual/ai-assistants.md), and the rest of the
-  [manual](docs/manual/README.md).
+Not tested yet: the Linux and Windows service installations, publishing a
+real release, export to a real QuestDB, and real PLCs on a real network over
+longer periods and under load.
 
 ## License
 

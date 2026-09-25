@@ -41,3 +41,12 @@ Sections:
 | `OPCUA_GATEWAY_WEB_TLS` | `true`/`false`: overrides `[web] tls` (set to `true` in the container image) |
 | `OPCUA_GATEWAY_ADMIN_PASSWORD` | The first admin password, used only when `admin` is created (see [First login](first-login.md)) |
 | `RUST_LOG` | Log level, e.g. `debug` |
+
+## Logs
+
+| How it runs | Logs |
+|---|---|
+| Docker | `docker compose logs gateway` |
+| Linux (systemd) | `journalctl -u opcua-audit-gateway` |
+| Windows (service) | `logs\` next to the config (daily files, kept 14 days) |
+| A terminal | the console, or files with `--log-dir` |

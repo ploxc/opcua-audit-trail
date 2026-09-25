@@ -21,13 +21,13 @@ certificate, so renewing it never concerns a PLC.
 
 It names `localhost`, `127.0.0.1`, the machine and the certificate host names
 (Settings, under Gateway certificate). Opening the UI by another name gives
-a name mismatch: add the name there, then **Settings → Web UI → Regenerate**
-and restart the gateway.
+a name mismatch: add the name there, then **Settings → Web UI and files →
+Regenerate** and restart the gateway.
 
 ## Trusting it
 
 Browsers ask once to accept a self-signed certificate. To stop that, trust
-it: **Settings → Web UI → Download (.pem)**. It is self-signed, so there is
+it: **Settings → Web UI and files → Download (.pem)**. It is self-signed, so there is
 no separate root CA: the certificate itself is what you trust.
 
 - **macOS:** open the .pem; in Keychain Access, open the certificate, expand
@@ -41,15 +41,9 @@ no separate root CA: the certificate itself is what you trust.
 After **Regenerate**, trust the new certificate again (and update the file
 Node programs use).
 
-## Security details
+## Behind a reverse proxy
 
-- With TLS the session cookie is `Secure` and `__Host-` prefixed.
-- HSTS is only sent with a configured certificate: with a self-signed one it
-  would stop browsers from letting you accept it.
-- Without TLS, keep the UI on loopback: there it only answers requests for
-  `localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
-  rebinding. On other addresses it answers to IP addresses, the machine's
-  names and the certificate host names; add a reverse proxy's name with
-  `allowed_hosts = ["audit.example.com"]` under `[web]`.
-- The MCP endpoint refuses plain HTTP unless the web UI listens on loopback
-  only.
+On an address other than loopback the UI answers to IP addresses, the
+machine's names and the certificate host names; add the proxy's name with
+`allowed_hosts = ["audit.example.com"]` under `[web]`. The MCP endpoint needs
+HTTPS, unless the UI listens on loopback only.

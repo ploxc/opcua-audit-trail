@@ -21,12 +21,11 @@ printed, then choose your own. Watch the writes arrive in the audit trail.
 ## Locked down
 
 To try it as a PLC should be (only the gateway may connect, encrypted, with a
-login), start the stand-in PLC with `--strict` and the client with
-`--secure`:
+login), add `min_security = "sign_and_encrypt"` to the target, and start the
+stand-in PLC with `--strict` and the client with `--secure`:
 
 ```sh
 cargo run --example demo_plc -- --strict           # SignAndEncrypt only, login operator/operator
-# target: add  min_security = "sign_and_encrypt"
 cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/ operator operator --secure
 ```
 

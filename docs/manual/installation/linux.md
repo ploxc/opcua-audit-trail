@@ -18,7 +18,11 @@ sudo journalctl -u opcua-audit-gateway | grep "first login"
 - The service runs as the unprivileged user `opcua-gw` with a hardened unit.
 - Config: `/etc/opcua-audit-gateway/config.toml`. Data, certificates and the
   audit trail: `/var/lib/opcua-audit-gateway`.
-- Running `install.sh` again upgrades the binary and keeps config and data.
+- **Upgrade:** run `install.sh` from the new archive; config and data are
+  kept.
 - On a PLCnext controller use the `armv7` archive or the container image.
 
-For access to the web UI from other machines, enable [HTTPS](../https.md).
+The web UI only listens on this machine. For access from other machines, set
+under `[web]` in the config `listen = "0.0.0.0:8080"` and `tls = true` (see
+[HTTPS](../https.md)), then `sudo systemctl restart opcua-audit-gateway`.
+Logs: `journalctl -u opcua-audit-gateway`.
