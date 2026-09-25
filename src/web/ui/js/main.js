@@ -315,8 +315,26 @@ setInterval(async () => {
   } catch {
     return;
   }
+  reloadIfUpgraded();
   updateTargetsDot();
 }, 10000);
+
+// This page's UI version: the hash in the URL main.js was loaded from
+// (/js/<hash>/main.js). After an upgrade the gateway reports another one;
+// the page then reloads itself, but not while something is being typed or
+// a dialog is open (it tries again at the next check).
+const OWN_UI_VERSION = new URL(import.meta.url).pathname.split("/")[2];
+
+function reloadIfUpgraded() {
+  const current = state.status?.ui_version;
+  if (!current || !OWN_UI_VERSION || OWN_UI_VERSION === "main.js") return;
+  if (current === OWN_UI_VERSION) return;
+  const active = document.activeElement;
+  const typing =
+    active?.matches?.("input, textarea, select") && active.value !== "" && active.type !== "checkbox";
+  if (typing || document.querySelector("dialog[open], .dialog-backdrop")) return;
+  location.reload();
+}
 
 // ---------- actions and forms ----------
 
