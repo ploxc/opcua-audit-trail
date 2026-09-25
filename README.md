@@ -321,8 +321,9 @@ only.
 
    Other MCP clients: Streamable HTTP transport, URL `…/mcp`, header
    `Authorization: Bearer <token>`. Clients that only run local servers
-   (Claude Desktop) connect through `npx mcp-remote <url> --header
-   "Authorization:${AUTH}"` with `AUTH` = `Bearer <token>` in its environment.
+   (Claude Desktop) connect through
+   `npx mcp-remote <url> --header "Authorization:${AUTH}"`, with
+   `AUTH` = `Bearer <token>` in its environment.
 
    With the web UI's self-signed certificate (the Docker default), the
    assistant has to trust it: download the .pem on the Settings page (Web
