@@ -33,7 +33,7 @@ retention_days = 365
 fail_mode = "closed"
 record_old_value = true
 
-# Copies of the audit trail outside the gateway (see README "Audit export").
+# Copies of the audit trail outside the gateway (see docs/manual/export.md).
 # [export.questdb]
 # url = "http://questdb:9000"      # your QuestDB (not included in the compose file)
 

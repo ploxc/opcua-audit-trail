@@ -40,6 +40,7 @@ jobs:
           name=opcua-audit-gateway-$version-linux-${{ matrix.arch }}
           mkdir -p "$name"
           cp target/${{ matrix.target }}/release/opcua-audit-gateway README.md ARCHITECTURE.md LICENSE "$name"/
+          mkdir -p "$name/docs" && cp -r docs/manual "$name/docs/"
           cp packaging/linux/* "$name"/
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -64,6 +65,7 @@ jobs:
           $name = "opcua-audit-gateway-$version-windows-x86_64"
           New-Item -ItemType Directory $name | Out-Null
           Copy-Item target/release/opcua-audit-gateway.exe, README.md, ARCHITECTURE.md, LICENSE $name
+          New-Item -ItemType Directory "$name/docs" | Out-Null; Copy-Item -Recurse docs/manual "$name/docs/"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -93,6 +95,7 @@ jobs:
           name=opcua-audit-gateway-$version-macos-${{ matrix.arch }}
           mkdir -p "$name"
           cp target/${{ matrix.target }}/release/opcua-audit-gateway README.md ARCHITECTURE.md LICENSE "$name"/
+          mkdir -p "$name/docs" && cp -r docs/manual "$name/docs/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
