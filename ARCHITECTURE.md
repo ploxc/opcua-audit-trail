@@ -456,4 +456,4 @@ need, and it keeps an SDK dependency out of the binary.
 | UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |
 | Noisy nodes | Summarised per node and interval, never dropped silently; admin-only, audited, optionally per client |
-| Security review | Audit in `docs/audit/AUDIT.md`, independently verified in `VERIFICATION.md`; all findings fixed except those listed there as accepted |
+| Security review | Two reviews; `docs/audit/AUDIT.md` lists the findings still open (fixed ones are removed, see the git history) and the accepted ones |

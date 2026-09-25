@@ -28,8 +28,8 @@ What it does today:
   container, with optional HTTPS.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design, and
-[docs/audit](docs/audit/) for the security audit and its independent
-verification.
+[docs/audit](docs/audit/AUDIT.md) for the open findings of the security
+audits.
 
 ## Screenshots
 
