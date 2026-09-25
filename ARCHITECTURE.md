@@ -200,7 +200,7 @@ It is never logged or stored.
 
 The primary store is an **embedded SQLite database** (`data/audit.db`, WAL mode),
 so the standalone binary is fully functional and Docker is optional. Optionally,
-records are also shipped to **QuestDB** (same compose file or central server) for
+records are also shipped to an existing **QuestDB** (not bundled: too heavy for this volume) for
 long-term analytics across gateways; the local store remains the source of truth
 and doubles as the buffer while QuestDB is unreachable.
 
@@ -350,7 +350,6 @@ templates left as written).
   binaries for amd64, arm64 and arm/v7, and published to GHCR. Config, PKI,
   users and the audit trail live in `/data`; the config is created from a
   template on first start, so the web UI can update it.
-  `docker-compose.yml` has an optional QuestDB profile.
 - Configuration: one TOML file; relative paths resolve against the file's
   directory.
 

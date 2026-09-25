@@ -21,7 +21,7 @@ record_old_value = true
 
 # Copies of the audit trail outside the gateway (see README "Audit export").
 # [export.questdb]
-# url = "http://questdb:9000"      # with the questdb service uncommented in docker-compose.yml
+# url = "http://questdb:9000"      # your QuestDB (not included in the compose file)
 
 # [[targets]]
 # name = "plc1"
