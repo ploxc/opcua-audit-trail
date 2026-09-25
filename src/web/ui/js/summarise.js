@@ -249,6 +249,12 @@ export const actions = {
       .filter((g) => fitsClient(g, client))
       .map((g) => ({ ...g, why: g.nodes.includes(node) ? "Already in this group." : "" }));
     const fits = groups.filter((g) => !g.why);
+    // A node is in one group per client: a group that already summarises it
+    // for this client (or for everyone) rules out a new group for this client;
+    // any group that has it rules out a new group for every client.
+    const has = groupsOf(target).filter((g) => g.nodes.includes(node));
+    const coveredBy = has.find((g) => fitsClient(g, client));
+    const inAny = has[0];
     const option = (value, text, note, checked, disabled = false) => html`<label
       class="${disabled ? "muted" : ""}">
       <input type="radio" name="to" value="${value}" ${checked ? "checked" : ""}
@@ -275,11 +281,20 @@ export const actions = {
             option(
               "client",
               `A new group for ${label || key}`,
-              "Writes to this node by any other client stay recorded one by one.",
-              !fits.length,
+              coveredBy
+                ? `Already summarised in ${groupName(coveredBy)} (${groupFrom(coveredBy)}).`
+                : "Writes to this node by any other client stay recorded one by one.",
+              !fits.length && !coveredBy,
+              !!coveredBy,
             ),
           )}
-          ${option("all", "A new group for every client", "", !fits.length && !key)}
+          ${option(
+            "all",
+            "A new group for every client",
+            inAny ? `Already summarised in ${groupName(inAny)} (${groupFrom(inAny)}).` : "",
+            !fits.length && !key && !inAny,
+            !!inAny,
+          )}
         </fieldset>
         <label>Name of a new group <input name="name" maxlength="100" placeholder="e.g. HMI line 1"></label>
         <p class="muted small">
