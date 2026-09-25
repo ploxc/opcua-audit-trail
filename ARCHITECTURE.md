@@ -301,7 +301,9 @@ embedded, so the UI needs no internet access.
   HttpOnly/SameSite=Strict cookies, checked against the user store on every
   request (changing a password, role or removing a user ends them), expire
   after 8 hours idle and 24 hours in total. Every state-changing request needs a custom header
-  (CSRF protection). Logins are rate limited per address and per user. The
+  (CSRF protection). Logins are rate limited per address and per user (a
+  blocked user still gets in with the right password; `X-Forwarded-For`
+  counts only from `[web] trusted_proxies`). The
   first start creates `admin` with the password in
   `OPCUA_GATEWAY_ADMIN_PASSWORD`, or a random one printed once to stdout (not
   to a log file); it must be changed at the first login before anything else

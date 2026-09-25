@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S9 | Low | The per-user login block locks out the real admin; behind a proxy all clients share one address |
 | S10 | Low | Web certificate: the download can differ from the certificate in use; a mismatched key pair stops the whole gateway |
 | S11 | Low | Private keys are world-readable for a moment before `chmod 600` |
 | S12 | Low | An empty `OPCUA_GATEWAY_WEB_TLS` silently turns HTTPS off |
@@ -45,15 +44,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S9: The per-user login block locks out the real admin
-
-20 wrong attempts from anywhere block `admin` for 15 minutes, before the
-password is checked, and it can be repeated. Behind a reverse proxy or
-Docker's userland proxy all clients share one address, so 5 failures block
-everyone. **Fix:** let a correct password through the per-user block (keep
-the per-address block, use the forwarded address only behind a configured
-proxy), or back off instead of blocking.
 
 ### S10: Web certificate download and key pair
 

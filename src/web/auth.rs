@@ -135,20 +135,24 @@ impl Sessions {
         self.map.lock().retain(|_, s| s.username != username);
     }
 
-    /// How long a login from this address for this user must wait, if it must.
-    fn blocked(&self, address: Option<IpAddr>, username: &str) -> Option<Duration> {
-        let by_address = address.and_then(|a| {
+    /// How long logins from this address must wait, if they must.
+    fn blocked_address(&self, address: Option<IpAddr>) -> Option<Duration> {
+        address.and_then(|a| {
             self.by_address
                 .lock()
                 .get(&a)
                 .and_then(|f| f.blocked(MAX_FAILURES_PER_ADDRESS))
-        });
-        by_address.or_else(|| {
-            self.by_user
-                .lock()
-                .get(username)
-                .and_then(|f| f.blocked(MAX_FAILURES_PER_USER))
         })
+    }
+
+    /// How long wrong passwords for this user are refused without counting,
+    /// if they are. The right password still gets in: failures from
+    /// elsewhere must not lock out the real user.
+    fn blocked_user(&self, username: &str) -> Option<Duration> {
+        self.by_user
+            .lock()
+            .get(username)
+            .and_then(|f| f.blocked(MAX_FAILURES_PER_USER))
     }
 
     /// Counts a failed login; returns true when it starts a block.
@@ -186,17 +190,52 @@ impl Sessions {
 /// The client's address, when the server runs with connection info.
 pub struct ClientAddr(pub Option<IpAddr>);
 
-impl<S: Send + Sync> FromRequestParts<S> for ClientAddr {
+impl FromRequestParts<AppState> for ClientAddr {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        Ok(ClientAddr(
-            parts
-                .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|c| c.0.ip()),
-        ))
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip());
+        let forwarded = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok());
+        Ok(ClientAddr(client_address(
+            peer,
+            forwarded,
+            &state.config.web.trusted_proxies,
+        )))
     }
+}
+
+/// The client's address: the peer's, or behind a configured reverse proxy
+/// the last address in `X-Forwarded-For` that is not a trusted proxy. The
+/// header is ignored from anyone else, who could put any address in it.
+pub fn client_address(
+    peer: Option<IpAddr>,
+    forwarded: Option<&str>,
+    trusted: &[IpAddr],
+) -> Option<IpAddr> {
+    let peer = peer?;
+    if !trusted.contains(&peer) {
+        return Some(peer);
+    }
+    let hops: Vec<IpAddr> = forwarded
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|a| a.trim().parse().ok())
+        .collect();
+    Some(
+        hops.into_iter()
+            .rev()
+            .find(|a| !trusted.contains(a))
+            .unwrap_or(peer),
+    )
 }
 
 /// The logged-in user of a request. Extracting it rejects anonymous requests.
@@ -335,14 +374,17 @@ pub async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<AuthUser>), ApiError> {
-    if let Some(wait) = s.sessions.blocked(address, &req.username) {
-        return Err(ApiError(
+    let too_many = |wait: Duration| {
+        ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             format!(
                 "too many failed logins; try again in {} minutes",
                 wait.as_secs().div_ceil(60)
             ),
-        ));
+        )
+    };
+    if let Some(wait) = s.sessions.blocked_address(address) {
+        return Err(too_many(wait));
     }
     // Few password checks at once: each takes a lot of memory.
     let Ok(Ok(_permit)) =
@@ -358,6 +400,7 @@ pub async fn login(
     let user = tokio::task::spawn_blocking(move || users.verify(&username, &password))
         .await
         .map_err(|e| anyhow::anyhow!(e))??;
+    let user_block = s.sessions.blocked_user(&req.username);
     let Some(user) = user else {
         let starts_block = s.sessions.failed(address, &req.username);
         let _ = s
@@ -382,6 +425,9 @@ pub async fn login(
                     ),
                 }))
                 .await;
+        }
+        if let Some(wait) = user_block {
+            return Err(too_many(wait));
         }
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,

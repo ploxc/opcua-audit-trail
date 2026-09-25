@@ -143,6 +143,9 @@ pub struct WebConfig {
     /// addresses, this machine's names and `certificate_hostnames` are
     /// always accepted; any other name is refused (DNS rebinding).
     pub allowed_hosts: Vec<String>,
+    /// Reverse proxies in front of the UI: from these addresses the client's
+    /// address is taken from `X-Forwarded-For` (login limits and records).
+    pub trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 impl Default for WebConfig {
@@ -153,6 +156,7 @@ impl Default for WebConfig {
             tls_certificate: None,
             tls_private_key: None,
             allowed_hosts: Vec::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -469,6 +473,9 @@ data_dir = "data"
 # Off loopback the UI only answers to IP addresses, this machine's names and
 # certificate_hostnames; add other names (e.g. a reverse proxy's) here:
 #   allowed_hosts = ["audit.example.com"]
+# Behind a reverse proxy, its address, so logins are limited per client
+# (from X-Forwarded-For) instead of for everyone at once:
+#   trusted_proxies = ["127.0.0.1"]
 listen = "127.0.0.1:8080"
 
 [audit]

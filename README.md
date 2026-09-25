@@ -405,7 +405,10 @@ reported before any password is asked, with the path of the user database, so
 a command run against the wrong config is noticed at once. Changing a
 password, a role or removing a user ends that user's sessions; sessions also
 expire after 8 hours idle and 24 hours in total. Failed logins are rate
-limited per address and per user.
+limited per address and per user; while a user is blocked, only the right
+password still gets in. Behind a reverse proxy, set `trusted_proxies =
+["<proxy address>"]` under `[web]` so the limit applies per client (from
+`X-Forwarded-For`), not to everyone at once.
 
 ## REST API
 

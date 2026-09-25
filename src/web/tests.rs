@@ -1465,3 +1465,46 @@ async fn forced_change_allows_exact_paths_only() {
     let (status, _, _) = w.send(Method::POST, "/api/logout", Some(&me), None).await;
     assert!(status.is_success(), "{status}");
 }
+
+/// Audit finding S9: failures from elsewhere do not lock out the real user;
+/// behind a trusted proxy the client's own address counts.
+#[tokio::test]
+async fn user_block_lets_the_right_password_in() {
+    let w = web().await;
+    let login = |password: &str| {
+        let w = &w;
+        let body = json!({ "username": "admin", "password": password });
+        async move { w.send(Method::POST, "/api/login", None, Some(body)).await.0 }
+    };
+    for _ in 0..20 {
+        assert_eq!(login("wrong-password").await, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(login("wrong-password").await, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(login("admin-password").await, StatusCode::OK);
+}
+
+#[test]
+fn forwarded_address_only_from_trusted_proxies() {
+    use super::auth::client_address;
+    let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+    let proxy = [ip("10.0.0.1")];
+    let xff = Some("203.0.113.9, 10.0.0.1");
+    // Not from the proxy: the header is ignored.
+    assert_eq!(
+        client_address(Some(ip("198.51.100.7")), xff, &proxy),
+        Some(ip("198.51.100.7"))
+    );
+    // From the proxy: the last address that is not a proxy.
+    assert_eq!(
+        client_address(Some(ip("10.0.0.1")), xff, &proxy),
+        Some(ip("203.0.113.9"))
+    );
+    assert_eq!(
+        client_address(Some(ip("10.0.0.1")), None, &proxy),
+        Some(ip("10.0.0.1"))
+    );
+    assert_eq!(
+        client_address(Some(ip("10.0.0.1")), xff, &[]),
+        Some(ip("10.0.0.1"))
+    );
+}
