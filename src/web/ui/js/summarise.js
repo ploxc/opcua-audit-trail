@@ -243,9 +243,21 @@ export const actions = {
     const { target, node, name, clientKey: key, clientLabel: label } = el.dataset;
     const title = name || node;
     const client = key ? { remote_addr: key, application_uri: key } : null;
-    const fits = groupsOf(target).filter((g) => fitsClient(g, client) && !g.nodes.includes(node));
-    const option = (value, text, note, checked) => html`<label>
-      <input type="radio" name="to" value="${value}" ${checked ? "checked" : ""}> ${text}
+    // Every group is shown; one that cannot take this write says why, instead
+    // of being left out (which looked like a missing option).
+    const groups = groupsOf(target).map((g) => ({
+      ...g,
+      why: g.nodes.includes(node)
+        ? "Already in this group."
+        : !fitsClient(g, client)
+          ? `Only for ${g.client}: writes from ${label || key || "this client"} would still be recorded one by one.`
+          : "",
+    }));
+    const fits = groups.filter((g) => !g.why);
+    const option = (value, text, note, checked, disabled = false) => html`<label
+      class="${disabled ? "muted" : ""}">
+      <input type="radio" name="to" value="${value}" ${checked ? "checked" : ""}
+        ${disabled ? "disabled" : ""}> ${text}
       ${when(note, () => html`<span class="muted small">${note}</span>`)}
     </label>`;
     const choice = await dialog({
@@ -261,7 +273,9 @@ export const actions = {
         </p>
         <fieldset class="choice">
           <legend>Add to</legend>
-          ${fits.map((g, n) => option(`g${g.i}`, `${groupName(g)} (${groupFrom(g)})`, "", n === 0))}
+          ${groups.map((g) =>
+            option(`g${g.i}`, `${groupName(g)} (${groupFrom(g)})`, g.why, g === fits[0], !!g.why),
+          )}
           ${when(key, () =>
             option(
               "client",
