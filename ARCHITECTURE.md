@@ -334,6 +334,27 @@ handlers. Page modules never import main.js: they redraw through the hooks in
 formatted with Prettier (`src/web/ui/.prettierrc.json`: width 100, markup in
 templates left as written).
 
+## MCP endpoint
+
+`src/web/mcp.rs` serves the Model Context Protocol on `POST /mcp`, on the web
+UI's listener, for AI assistants. It is a hand-written JSON-RPC handler for
+the Streamable HTTP transport in its simplest form: no sessions and no
+server-sent events, one JSON answer per request (`initialize`, `ping`,
+`tools/list`, `tools/call`; notifications get `202`). That is all the tools
+need, and it keeps an SDK dependency out of the binary.
+
+- **Authentication:** API tokens (`gwt_<id>_<secret>`) that a user creates on
+  the Account page, in `api_tokens` in `gateway.db`, stored as SHA-256 (the
+  secret is 32 random bytes; a slow hash adds nothing). A token acts as its
+  user with that user's current role and ends with the user. The session
+  cookie is not accepted here, so the endpoint is exempt from the CSRF header
+  check: a cross-site request cannot carry the bearer token.
+- **Read-only tools:** search the trail (the `/api/audit` filters), one
+  record, the status, the most written nodes, verify. None writes to a PLC or
+  changes configuration.
+- **Audited:** every tool call is an `mcp_query` record with the user, the
+  token id (never the secret), the tool and its arguments.
+
 ## Build and deployment
 
 - One binary per platform: Linux x86_64 / ARM64 / ARMv7 (static musl; ARMv7
