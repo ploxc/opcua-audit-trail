@@ -26,6 +26,9 @@ image. Merge only when all checks are green.
 - `src/web/ui/`: the web UI, plain JavaScript without a build step, embedded
   in the binary.
 - `examples/`: `demo_plc`, `demo_client`, `stress`.
+- `tools/screenshots/`: remakes the README screenshots (`npm install && npm
+  run shoot`): a fresh gateway, the demo PLC and two demo clients, Chrome
+  headless in light and dark. Rerun it when the UI changes visibly.
 
 ## Rules that are easy to break
 
