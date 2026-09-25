@@ -1177,6 +1177,14 @@ fieldset.choice label {
   color: var(--fg);
   font-size: 13.5px;
 }
+/* An option that cannot be chosen (e.g. a group that has the node already). */
+fieldset.choice label:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+fieldset.choice label:has(input:disabled) input {
+  cursor: not-allowed;
+}
 fieldset.choice label .small {
   grid-column: 2;
 }
