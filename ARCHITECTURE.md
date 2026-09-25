@@ -403,7 +403,9 @@ dependency out of the binary.
   records are the same; the record's `by` says "via MCP, token <id>". None
   writes to a PLC, and users, MCP settings, tokens and the web server are
   not reachable (a `users` scope existed once; stored tokens that still have
-  it keep their other scopes). Password and token arguments are hidden in `mcp_query`.
+  it keep their other scopes). Shorter retention and switching fail-closed
+  off are refused here too: they delete history or let writes pass
+  unrecorded. Password and token arguments are hidden in `mcp_query`.
 - **Audited:** every tool call is an `mcp_query` record with the user, the
   token id (never the secret), the tool and its arguments.
 

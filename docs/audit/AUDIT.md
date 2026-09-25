@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S13 | Low | The MCP scope `settings` can shorten retention (deleting history) and switch fail-closed off |
 | S14 | Low | A token's change scopes come back when its user is made admin again |
 | S15 | Low | MCP arguments that are not an object skip the unknown-argument check |
 | S16 | Low | Credentials in a QuestDB URL are recorded unredacted in `mcp_query` |
@@ -41,12 +40,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S13: `settings` through MCP can delete history
-
-`update_audit_settings` accepts `retention_days: 1` (older records deleted
-for good) and `fail_mode: "open"`. **Fix:** from MCP, refuse shorter
-retention and switching fail-closed off; those stay in the web UI.
 
 ### S14: Scopes come back after re-promotion
 

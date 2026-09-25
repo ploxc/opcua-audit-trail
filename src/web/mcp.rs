@@ -781,8 +781,8 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             "settings",
             change_tool(
                 "update_audit_settings",
-                "Changes audit settings; only the given fields change. Shorter retention \
-             deletes older records for good.",
+                "Changes audit settings; only the given fields change. Retention can only \
+             get longer and fail-closed cannot be switched off here (web UI only).",
                 json!({
                     "retention_days": {"type": "integer", "minimum": 0,
                         "description": "Keep records this many days; 0 keeps everything."},
@@ -915,7 +915,25 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
         }
         "get_settings" => reply(super::settings::get(st(), user).await).await,
         "update_audit_settings" => {
-            let current = serde_json::to_value(s.targets.config().await.audit)?;
+            let config = s.targets.config().await.audit;
+            // What deletes history or lets writes pass unrecorded stays in
+            // the web UI: an assistant could be talked into it.
+            if let Some(days) = args.get("retention_days").and_then(Value::as_u64) {
+                let current = u64::from(config.retention_days);
+                if days != 0 && (current == 0 || days < current) {
+                    anyhow::bail!(
+                        "shorter retention deletes records for good: change it in the web UI \
+                         (Settings)"
+                    );
+                }
+            }
+            if args["fail_mode"] == "open" && config.fail_mode == crate::config::FailMode::Closed {
+                anyhow::bail!(
+                    "switching fail-closed off lets writes pass unrecorded: change it in the \
+                     web UI (Settings)"
+                );
+            }
+            let current = serde_json::to_value(config)?;
             let audit = overlay(current, &args, &[]);
             reply(super::settings::put_audit(st(), user, Json(arg(&audit)?)).await).await
         }

@@ -1533,3 +1533,45 @@ async fn web_certificate_download_is_the_one_in_use() {
     let pem = opcua::crypto::X509::from_pem(pem.as_str().unwrap().as_bytes()).unwrap();
     assert_eq!(pem.to_der().unwrap(), expected);
 }
+
+/// Audit finding S13: through MCP retention only gets longer, and
+/// fail-closed cannot be switched off.
+#[tokio::test]
+async fn mcp_cannot_delete_history_or_open_fail_mode() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let admin = w.login("admin").await;
+    let (_, token) = w
+        .post(
+            "/api/me/tokens",
+            &admin,
+            json!({ "name": "t", "scopes": ["settings"] }),
+        )
+        .await;
+    let secret = token["secret"].as_str().unwrap();
+    let call = |arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "update_audit_settings", "arguments": arguments}})
+    };
+    let is_error = |answer: Value| answer["result"]["isError"] == true;
+    // The example config: 365 days, fail-closed.
+    assert!(is_error(
+        w.mcp(secret, call(json!({"retention_days": 30}))).await.1
+    ));
+    assert!(is_error(
+        w.mcp(secret, call(json!({"fail_mode": "open"}))).await.1
+    ));
+    assert!(!is_error(
+        w.mcp(secret, call(json!({"retention_days": 400}))).await.1
+    ));
+    assert!(!is_error(
+        w.mcp(secret, call(json!({"retention_days": 0}))).await.1
+    ));
+    // 0 keeps everything: any number of days would now delete records.
+    assert!(is_error(
+        w.mcp(secret, call(json!({"retention_days": 4000}))).await.1
+    ));
+    let (_, settings) = w.get("/api/settings", &admin).await;
+    assert_eq!(settings["audit"]["retention_days"], 0);
+    assert_eq!(settings["audit"]["fail_mode"], "closed");
+}

@@ -471,7 +471,8 @@ clients, unacknowledged warnings, exports), `most_written_nodes` and
 
 An assistant can also help configure the gateway. What a token may change
 is chosen when an admin creates it (Account page), per area: targets,
-certificates, settings (audit, export, certificate host names). Users are
+certificates, settings (audit, export, certificate host names; retention
+only longer, and fail-closed not off: those stay in the web UI). Users are
 managed only in the web UI and on the command line. A
 token with nothing ticked only reads, so a leaked read token cannot change
 anything; the MCP switch in Settings stops every token at once.
