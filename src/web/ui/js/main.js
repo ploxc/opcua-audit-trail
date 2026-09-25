@@ -278,6 +278,7 @@ function schedule(pageId) {
   // Calls `fn` every `ms` and redraws, unless it returns false.
   const every = (ms, fn) => {
     refreshTimer = setInterval(async () => {
+      if (!state.user) return;
       try {
         if ((await fn()) !== false) renderPage();
       } catch (e) {
