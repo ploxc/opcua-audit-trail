@@ -13,6 +13,8 @@ COPY docker/config.toml /etc/opcua-audit-gateway/config.toml
 # would be root-owned and read-only for the gateway.
 COPY --from=build --chown=65532:65532 /out/data /data
 ENV OPCUA_GATEWAY_CONFIG=/data/config.toml
+# HTTPS with the gateway certificate; docker-compose.yml can turn it off.
+ENV OPCUA_GATEWAY_WEB_TLS=true
 VOLUME ["/data"]
 EXPOSE 8080 4841
 ENTRYPOINT ["/usr/local/bin/opcua-audit-gateway"]

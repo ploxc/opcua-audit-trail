@@ -271,7 +271,8 @@ tls = true                          # uses the gateway certificate, or:
 # tls_private_key = "web-key.pem"
 ```
 
-The container image has HTTPS on by default. With the gateway certificate,
+The container image has HTTPS on by default: `OPCUA_GATEWAY_WEB_TLS` in
+`docker-compose.yml` (`true`/`false`) overrides `tls` in the config file. With the gateway certificate,
 browsers ask once to accept it. To avoid that, import `pki/own/cert.der` as
 trusted, or use a certificate from your own CA. With TLS the session cookie
 is `Secure` and `__Host-` prefixed; HSTS is only sent with your own

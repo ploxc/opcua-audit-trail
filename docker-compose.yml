@@ -11,6 +11,10 @@ services:
     image: ghcr.io/ploxc/opcua-audit-trail:latest
     build: .
     restart: unless-stopped
+    environment:
+      # HTTPS for the web UI and the MCP endpoint (the gateway certificate).
+      # "false" only behind a TLS reverse proxy: MCP then refuses requests.
+      OPCUA_GATEWAY_WEB_TLS: "true"
     ports:
       # Web UI (HTTPS, the gateway certificate): loopback only. For access
       # from other machines publish "8080:8080" and add the host name or IP

@@ -74,6 +74,8 @@ struct GatewayView {
 struct WebView {
     listen: String,
     tls: bool,
+    /// Set when the environment decides `tls` (the variable's name).
+    tls_env: Option<&'static str>,
     tls_certificate: Option<String>,
 }
 
@@ -111,6 +113,9 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
         web: WebView {
             listen: c.web.listen.to_string(),
             tls: c.web.tls,
+            tls_env: std::env::var_os(crate::config::WEB_TLS_ENV)
+                .is_some()
+                .then_some(crate::config::WEB_TLS_ENV),
             tls_certificate: c.web.tls_certificate.as_deref().map(path),
         },
         mcp: McpView {

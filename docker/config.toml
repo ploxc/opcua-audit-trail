@@ -15,10 +15,10 @@ application_uri = "urn:opcua-audit-gateway:docker"
 # certificate_hostnames = ["gateway.local", "192.168.0.20"]
 
 [web]
-# HTTPS with the gateway certificate: browsers ask once to accept it. Use
-# your own (e.g. from the plant CA) with tls_certificate / tls_private_key.
+# HTTPS is set by OPCUA_GATEWAY_WEB_TLS (docker-compose.yml, on by default)
+# and uses the gateway certificate: browsers ask once to accept it. Use your
+# own (e.g. from the plant CA) with tls_certificate / tls_private_key.
 listen = "0.0.0.0:8080"
-tls = true
 # tls_certificate = "/data/web-cert.pem"  # PEM chain
 # tls_private_key = "/data/web-key.pem"
 

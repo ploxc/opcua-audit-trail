@@ -308,7 +308,11 @@ function webCard(st) {
       <dt>Listens on</dt>
       <dd class="mono">${st.web.listen}</dd>
       <dt>HTTPS</dt>
-      <dd>${https}</dd>
+      <dd>
+        ${https}
+        ${when(st.web.tls_env, () => html`<span class="muted small">(set by
+          <span class="mono">${st.web.tls_env}</span>)</span>`)}
+      </dd>
       <dt>Certificates</dt>
       <dd class="mono">${st.gateway.pki_dir}</dd>
       <dt>Data</dt>
