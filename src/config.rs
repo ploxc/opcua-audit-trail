@@ -46,7 +46,7 @@ pub const WEB_TLS_ENV: &str = "OPCUA_GATEWAY_WEB_TLS";
 /// What an API token can be allowed to change through MCP (chosen when the
 /// token is created). The MCP settings themselves, API tokens and the web
 /// server are never among them.
-pub const MCP_SCOPES: [&str; 4] = ["targets", "certificates", "settings", "users"];
+pub const MCP_SCOPES: [&str; 3] = ["targets", "certificates", "settings"];
 
 /// Copies of the audit trail outside the gateway. Every record carries its
 /// hash, so an external copy also anchors the local chain: rewriting the
@@ -138,6 +138,14 @@ pub struct WebConfig {
     pub tls: bool,
     pub tls_certificate: Option<PathBuf>,
     pub tls_private_key: Option<PathBuf>,
+    /// Further host names the UI answers to when it listens on a
+    /// non-loopback address (e.g. a reverse proxy's name). Loopback names, IP
+    /// addresses, this machine's names and `certificate_hostnames` are
+    /// always accepted; any other name is refused (DNS rebinding).
+    pub allowed_hosts: Vec<String>,
+    /// Reverse proxies in front of the UI: from these addresses the client's
+    /// address is taken from `X-Forwarded-For` (login limits and records).
+    pub trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 impl Default for WebConfig {
@@ -147,6 +155,8 @@ impl Default for WebConfig {
             tls: false,
             tls_certificate: None,
             tls_private_key: None,
+            allowed_hosts: Vec::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -302,10 +312,13 @@ impl Config {
 
     /// Settings the environment overrides, e.g. from docker-compose.yml.
     fn apply_env(&mut self, var: impl Fn(&str) -> Option<String>) -> anyhow::Result<()> {
-        if let Some(v) = var(WEB_TLS_ENV) {
+        // Empty counts as not set: an unset ${VAR} in a compose file must
+        // not silently turn HTTPS off.
+        let value = var(WEB_TLS_ENV).filter(|v| !v.trim().is_empty());
+        if let Some(v) = value {
             self.web.tls = match v.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => true,
-                "0" | "false" | "no" | "off" | "" => false,
+                "0" | "false" | "no" | "off" => false,
                 other => bail!("{WEB_TLS_ENV}: '{other}' is not true or false"),
             };
         }
@@ -460,13 +473,20 @@ data_dir = "data"
 #   tls = true                        # uses the gateway certificate, or:
 #   tls_certificate = "web-cert.pem"  # PEM chain
 #   tls_private_key = "web-key.pem"   # PEM (PKCS#8, PKCS#1 or SEC1)
+# Off loopback the UI only answers to IP addresses, this machine's names and
+# certificate_hostnames; add other names (e.g. a reverse proxy's) here:
+#   allowed_hosts = ["audit.example.com"]
+# Behind a reverse proxy, its address, so logins are limited per client
+# (from X-Forwarded-For) instead of for everyone at once:
+#   trusted_proxies = ["127.0.0.1"]
 listen = "127.0.0.1:8080"
 
 [audit]
 retention_days = 365
-# "open": writes keep flowing if the audit store fails (events are counted as lost).
 # "closed": a write is rejected unless its audit record was committed.
-fail_mode = "open"
+# "open": writes keep flowing if the audit store fails or cannot keep up
+# (those records are lost; only their number is recorded).
+fail_mode = "closed"
 record_old_value = true
 # Writes to ignored nodes (see [[targets.ignore]]) are recorded as one
 # summary per node this often.
@@ -513,6 +533,11 @@ mod tests {
         c.web.tls = true;
         c.apply_env(|_| None).unwrap();
         assert!(c.web.tls, "unset keeps the file's value");
+        // Audit finding S12: empty is not "false".
+        c.apply_env(env("")).unwrap();
+        assert!(c.web.tls, "empty keeps the file's value");
+        c.apply_env(env("  ")).unwrap();
+        assert!(c.web.tls);
     }
 
     fn parse(text: &str) -> anyhow::Result<Config> {
@@ -525,7 +550,18 @@ mod tests {
     fn example_config_parses() {
         let config = parse(EXAMPLE_CONFIG).unwrap();
         assert!(config.targets.is_empty());
-        assert_eq!(config.audit.fail_mode, FailMode::Open);
+        // Audit finding N8: new configs lose no write records; a config
+        // without the key (an existing one) stays fail-open.
+        assert_eq!(config.audit.fail_mode, FailMode::Closed);
+        assert_eq!(
+            parse("[audit]\nretention_days = 30\n")
+                .unwrap()
+                .audit
+                .fail_mode,
+            FailMode::Open
+        );
+        let docker = include_str!("../docker/config.toml").replace("\r\n", "\n");
+        assert_eq!(parse(&docker).unwrap().audit.fail_mode, FailMode::Closed);
     }
 
     #[test]

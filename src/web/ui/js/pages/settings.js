@@ -175,7 +175,8 @@ function exportCard(q, off, save) {
     <h2>Export</h2>
     <p class="section-note">
       A copy of every record outside the gateway, for long-term storage and as proof that the local
-      trail was not rewritten. A new destination receives the whole trail.
+      trail was not rewritten. A new destination receives the whole trail. A new scheme, host or
+      port forgets the stored password and token: enter them again.
     </p>
     <div class="setting">
       <label class="inline title">
@@ -251,7 +252,6 @@ export const SCOPE_LABELS = {
   targets: ["Targets", "add, change and remove PLCs; summarised nodes"],
   certificates: ["Certificates", "trust and untrust OPC UA certificates"],
   settings: ["Settings", "audit trail, export, certificate host names"],
-  users: ["Users", "create, change and delete web UI users"],
 };
 
 function mcpCard(m, off, save) {

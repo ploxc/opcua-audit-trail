@@ -41,16 +41,26 @@ fn web_certificate_request(config: &Config) -> X509Data {
     }
 }
 
-/// The web UI's self-signed certificate, generated when there is none.
-/// Returns it and whether it was newly created.
+/// The web UI's self-signed certificate, generated when there is none or
+/// when certificate and key do not belong together (e.g. after a crash
+/// halfway through writing them). Returns it and whether it was created.
 pub fn ensure_web_certificate(config: &Config) -> anyhow::Result<(X509, bool)> {
     let store = web_store(config);
-    let result = if let (Ok(cert), Ok(_)) = (store.read_own_cert(), store.read_own_pkey()) {
+    let existing = match (store.read_own_cert(), store.read_own_pkey()) {
+        (Ok(cert), Ok(key)) => match crate::pki::check_key_pair(&cert, &key) {
+            Ok(()) => Some(cert),
+            Err(e) => {
+                tracing::warn!("web UI certificate: {e:#}; generating a new one");
+                None
+            }
+        },
+        _ => None,
+    };
+    let result = if let Some(cert) = existing {
         (cert, false)
     } else {
-        let (cert, _) = store
-            .create_and_store_application_instance_cert(&web_certificate_request(config), true)
-            .map_err(|e| anyhow!("generating the web UI certificate: {e}"))?;
+        let cert = crate::pki::create_own(&store, &web_certificate_request(config))
+            .context("generating the web UI certificate")?;
         (cert, true)
     };
     crate::pki::protect_private_key(&store);
@@ -61,17 +71,17 @@ pub fn ensure_web_certificate(config: &Config) -> anyhow::Result<(X509, bool)> {
 /// start of the gateway.
 pub fn regenerate_web_certificate(config: &Config) -> anyhow::Result<X509> {
     let store = web_store(config);
-    let (cert, _) = store
-        .create_and_store_application_instance_cert(&web_certificate_request(config), true)
-        .map_err(|e| anyhow!("generating the web UI certificate: {e}"))?;
+    let cert = crate::pki::create_own(&store, &web_certificate_request(config))
+        .context("generating the web UI certificate")?;
     crate::pki::protect_private_key(&store);
     Ok(cert)
 }
 
 /// The TLS configuration: the configured PEM files, or else the web UI's own
 /// self-signed certificate (browsers ask to accept it once, or import it as
-/// trusted: Settings, Web UI).
-pub fn server_config(config: &Config) -> anyhow::Result<ServerConfig> {
+/// trusted: Settings, Web UI). Also returns the certificate it presents
+/// (DER), which is what the Settings page offers for download.
+pub fn server_config(config: &Config) -> anyhow::Result<(ServerConfig, Vec<u8>)> {
     let (chain, key) = match (&config.web.tls_certificate, &config.web.tls_private_key) {
         (Some(cert), Some(key)) => {
             let chain = CertificateDer::pem_file_iter(cert)
@@ -97,6 +107,7 @@ pub fn server_config(config: &Config) -> anyhow::Result<ServerConfig> {
             (vec![CertificateDer::from(der)], key)
         }
     };
+    let leaf = chain[0].to_vec();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut server = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -105,7 +116,7 @@ pub fn server_config(config: &Config) -> anyhow::Result<ServerConfig> {
         .with_single_cert(chain, key)
         .map_err(|e| anyhow!("TLS certificate or key unusable: {e}"))?;
     server.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(server)
+    Ok((server, leaf))
 }
 
 #[cfg(test)]
@@ -137,7 +148,7 @@ mod tests {
         assert_eq!(again.thumbprint(), cert.thumbprint());
 
         let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
-            server_config(&config).unwrap(),
+            server_config(&config).unwrap().0,
         ));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -177,6 +188,31 @@ mod tests {
         stream.read_to_string(&mut response).await.ok();
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         assert!(response.ends_with("ok"));
+    }
+
+    #[test]
+    fn mismatched_key_pair_is_replaced() {
+        // Audit finding S10: a key that does not belong to the certificate
+        // (a crash halfway) gives a new pair instead of a failing start.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, EXAMPLE_CONFIG).unwrap();
+        let config = Config::load(&path).unwrap();
+        let (first, _) = ensure_web_certificate(&config).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other = CertificateStore::new(other.path());
+        other
+            .create_and_store_application_instance_cert(&web_certificate_request(&config), true)
+            .unwrap();
+        std::fs::copy(
+            other.own_private_key_path(),
+            web_store(&config).own_private_key_path(),
+        )
+        .unwrap();
+        let (second, created) = ensure_web_certificate(&config).unwrap();
+        assert!(created);
+        assert_ne!(first.thumbprint(), second.thumbprint());
+        server_config(&config).unwrap();
     }
 
     #[test]

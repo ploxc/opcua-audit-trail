@@ -272,6 +272,43 @@ fn init(path: &Path) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The first admin password: `OPCUA_GATEWAY_ADMIN_PASSWORD` when set, else a
+/// random one printed once to stdout (`docker compose logs gateway`), never
+/// to a log file. Either way it must be changed at the first login.
+fn create_initial_admin(users: &UserStore) -> anyhow::Result<()> {
+    let from_env = std::env::var(ADMIN_PASSWORD_ENV)
+        .ok()
+        .filter(|p| !p.is_empty());
+    match from_env {
+        Some(password) => {
+            users
+                .create_initial_admin(&password)
+                .context(ADMIN_PASSWORD_ENV)?;
+            tracing::warn!(
+                "created web UI user 'admin' with the password from {ADMIN_PASSWORD_ENV}; \
+                 it must be changed at the first login"
+            );
+        }
+        None => {
+            let password = users::random_password();
+            users.create_initial_admin(&password)?;
+            println!(
+                "\n  Web UI first login: admin / {password}\n  \
+                 (shown once; it must be changed at the first login. Lost it? \
+                 opcua-audit-gateway user passwd admin)\n"
+            );
+            tracing::warn!(
+                "created web UI user 'admin'; its first password is printed on the console \
+                 (stdout) only, and must be changed at the first login"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Environment variable with the first admin password (min. 8 characters).
+const ADMIN_PASSWORD_ENV: &str = "OPCUA_GATEWAY_ADMIN_PASSWORD";
+
 fn user_store(config: &Config) -> anyhow::Result<UserStore> {
     UserStore::open(&config.gateway.data_dir.join("gateway.db"))
 }
@@ -381,12 +418,7 @@ async fn run(
 
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
-        users.create_default_admin()?;
-        tracing::warn!(
-            "created web UI user 'admin' with password '{}'; it must be changed at the \
-             first login (or: opcua-audit-gateway user passwd admin)",
-            users::DEFAULT_ADMIN_PASSWORD
-        );
+        create_initial_admin(&users)?;
         let _ = audit
             .record(AuditEntry::new(AuditEvent::ConfigChanged {
                 by: "gateway".into(),
@@ -413,7 +445,28 @@ async fn run(
         &config.gateway.data_dir.join("export-state.json"),
     )?;
 
+    // HTTPS setup failing stops the web UI only: the relay keeps auditing.
+    let tls = if config.web.tls {
+        match web::tls::server_config(&config) {
+            Ok(tls) => Some(tls),
+            Err(e) => {
+                tracing::error!(
+                    "web UI not started: HTTPS setup failed: {e:#}; the relay keeps running"
+                );
+                let _ = audit
+                    .record(AuditEntry::new(AuditEvent::ConfigChanged {
+                        by: "gateway".into(),
+                        summary: format!("web UI not started: HTTPS setup failed: {e:#}"),
+                    }))
+                    .await;
+                None
+            }
+        }
+    } else {
+        None
+    };
     let state = web::AppState {
+        web_certificate: tls.as_ref().map(|(_, der)| Arc::new(der.clone())),
         config: config.clone(),
         targets: targets.clone(),
         statuses,
@@ -428,10 +481,10 @@ async fn run(
     };
     tokio::spawn(state.browser.clone().reap_idle(state.clone()));
     let router = web::router(state);
-    if config.web.tls {
-        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
-            web::tls::server_config(&config)?,
-        ));
+    if config.web.tls && tls.is_none() {
+        shutdown.await;
+    } else if let Some((server, _)) = tls {
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server));
         let listener = std::net::TcpListener::bind(config.web.listen)
             .with_context(|| format!("binding web UI to {}", config.web.listen))?;
         listener.set_nonblocking(true)?;

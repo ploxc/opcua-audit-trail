@@ -48,6 +48,8 @@ pub struct AppState {
     pub sessions: Arc<Sessions>,
     pub browser: Arc<BrowserSessions>,
     pub exports: Arc<crate::export::Exports>,
+    /// The certificate the web server presents (DER); `None` without HTTPS.
+    pub web_certificate: Option<Arc<Vec<u8>>>,
 }
 
 impl AppState {
@@ -104,6 +106,8 @@ pub fn router(state: AppState) -> Router {
         .route("/me/password", post(auth::change_password))
         .route("/me/tokens", get(list_tokens).post(create_token))
         .route("/me/tokens/{id}", delete(delete_token))
+        .route("/tokens", get(all_tokens))
+        .route("/users/{name}/tokens/{id}", delete(revoke_token))
         .route("/status", get(status))
         .route("/targets", get(targets).post(create_target))
         .route("/targets/{name}", put(update_target).delete(delete_target))
@@ -174,15 +178,37 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Whether a Host header names this machine's loopback interface.
-fn is_loopback_host(host: &str) -> bool {
-    let name = match host.rsplit_once(':') {
+/// The host name of a Host header, without the port.
+fn host_name(host: &str) -> &str {
+    match host.rsplit_once(':') {
         Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) && !name.ends_with(':') => {
             name
         }
         _ => host,
-    };
-    matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+    }
+}
+
+/// Whether a Host header names this machine's loopback interface.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host_name(host), "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// Whether the UI answers to this Host header. On loopback only loopback
+/// names; elsewhere also IP addresses, this machine's names, the gateway's
+/// `certificate_hostnames` and `[web] allowed_hosts`. Any other name could
+/// be a DNS rebinding page that resolves to this address.
+fn host_allowed(host: &str, loopback: bool, names: &[String]) -> bool {
+    if is_loopback_host(host) {
+        return true;
+    }
+    if loopback {
+        return false;
+    }
+    let name = host_name(host).to_ascii_lowercase();
+    let ip = name.trim_start_matches('[').trim_end_matches(']');
+    !name.is_empty()
+        && (ip.parse::<std::net::IpAddr>().is_ok()
+            || names.iter().any(|n| n.eq_ignore_ascii_case(&name)))
 }
 
 async fn security_headers(
@@ -190,19 +216,24 @@ async fn security_headers(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    // A UI on loopback only answers to loopback names: a web page on
-    // another site cannot reach it through a DNS name that resolves to
-    // 127.0.0.1 (DNS rebinding).
-    if s.config.web.listen.ip().is_loopback() {
-        let host = request
-            .headers()
-            .get(header::HOST)
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        if !is_loopback_host(host) {
-            return ApiError(StatusCode::MISDIRECTED_REQUEST, "unknown host name".into())
-                .into_response();
-        }
+    // Only known host names: a web page on another site cannot reach the UI
+    // through a DNS name that resolves to its address (DNS rebinding).
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| request.uri().authority().map(|a| a.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let loopback = s.config.web.listen.ip().is_loopback();
+    let mut names = s.config.web.allowed_hosts.clone();
+    if !loopback {
+        names.extend(s.targets.config().await.gateway.certificate_hostnames);
+        names.extend(opcua::crypto::X509Data::computer_hostnames());
+    }
+    if !host_allowed(&host, loopback, &names) {
+        return ApiError(StatusCode::MISDIRECTED_REQUEST, "unknown host name".into())
+            .into_response();
     }
     let path = request.uri().path();
     let api = path.starts_with("/api/") || path == "/mcp";
@@ -787,11 +818,13 @@ fn certificate_file(der: &[u8], name: &str, pem: bool) -> Response {
 /// and Node (NODE_EXTRA_CA_CERTS) import to trust it.
 async fn web_certificate(s: &AppState, user: &AuthUser, pem: bool) -> Result<Response, ApiError> {
     user.require(Role::Auditor)?;
-    let cert = tls::web_store(&s.config)
-        .read_own_cert()
-        .map_err(|_| ApiError::not_found("the web UI has no certificate of its own (HTTPS off)"))?;
-    let der = cert.to_der().map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(certificate_file(&der, "opcua-audit-gateway-web", pem))
+    // The one the server presents: after Regenerate that is still the old
+    // one until the restart, and with configured PEM files it is theirs.
+    let der = s
+        .web_certificate
+        .as_ref()
+        .ok_or_else(|| ApiError::not_found("the web UI does not use HTTPS"))?;
+    Ok(certificate_file(der, "opcua-audit-gateway-web", pem))
 }
 
 async fn web_certificate_pem(
@@ -816,7 +849,10 @@ async fn regenerate_web_certificate(
 ) -> ApiResult<CertificateInfo> {
     user.require(Role::Admin)?;
     let config = s.targets.config().await;
-    let cert = tls::regenerate_web_certificate(&config)?;
+    // RSA key generation takes a while: not on the async runtime.
+    let cert = tokio::task::spawn_blocking(move || tls::regenerate_web_certificate(&config))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
     let info = CertificateInfo::from_x509(&cert);
     s.config_changed(
         &user,
@@ -931,6 +967,8 @@ async fn untrust(
     user.require(Role::Admin)?;
     let info = s.pki.untrust(&thumbprint).map_err(ApiError::bad_request)?;
     s.targets.recheck_trust().await;
+    // Open browser sessions were set up with the old trust.
+    s.browser.close_all(&s).await;
     s.config_changed(
         &user,
         format!(
@@ -1202,6 +1240,7 @@ async fn update_user(
     // All or nothing; a reset password must be replaced at the next login.
     let users = s.users.clone();
     let n = name.clone();
+    let new_password = req.password.is_some();
     let changes = tokio::task::spawn_blocking(move || {
         users.update(&n, req.role, req.password.as_deref(), true)
     })
@@ -1209,7 +1248,7 @@ async fn update_user(
     .map_err(|e| anyhow::anyhow!(e))?
     .map_err(ApiError::bad_request)?;
     s.sessions.remove_user(&name);
-    if req.role.is_some_and(|r| r < Role::Operator) {
+    if new_password || req.role.is_some_and(|r| r < Role::Operator) {
         s.browser.close_user(&s, &name).await;
     }
     s.config_changed(
@@ -1231,6 +1270,34 @@ async fn delete_user(
     s.browser.close_user(&s, &name).await;
     s.config_changed(&user, format!("deleted user '{name}'"))
         .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Every user's API tokens (admins): to see and revoke them.
+async fn all_tokens(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Vec<crate::users::UserToken>> {
+    user.require(Role::Admin)?;
+    Ok(Json(s.users.all_tokens()?))
+}
+
+/// Revokes any user's API token (admins).
+async fn revoke_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path((name, id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    let token = s
+        .users
+        .delete_token(&name, &id)
+        .map_err(|e| ApiError::not_found(format!("{e:#}")))?;
+    s.config_changed(
+        &user,
+        format!("revoked API token '{token}' ({id}) of user '{name}'"),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

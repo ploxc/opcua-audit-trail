@@ -43,6 +43,9 @@ enum Command {
     Append(Box<AuditEntry>, Option<Ack>),
     Prune(DateTime<Utc>, oneshot::Sender<Result<u64, String>>),
     Flush(oneshot::Sender<()>),
+    /// Makes the writer panic, to test that it is restarted.
+    #[cfg(test)]
+    Panic,
 }
 
 /// The audit settings that can change while the gateway runs (from the
@@ -105,11 +108,78 @@ impl AuditSettings {
     }
 }
 
+/// Events that could not be stored and are not reported yet. Also kept in
+/// `<database>.lost`, so a restart before the `EventsLost` record does not
+/// forget them.
+pub struct LostEvents {
+    count: AtomicU64,
+    /// Events of the batch being written that nobody waits for: counted as
+    /// lost if the writer dies before the batch is stored.
+    in_flight: AtomicU64,
+    path: PathBuf,
+    /// The value last written to the file; its lock orders the writes.
+    saved: Mutex<u64>,
+}
+
+impl LostEvents {
+    fn open(database: &Path) -> Self {
+        let mut path = database.as_os_str().to_owned();
+        path.push(".lost");
+        let path = PathBuf::from(path);
+        let count = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0);
+        if count > 0 {
+            tracing::warn!("{count} audit events were lost before the last stop; reporting them");
+        }
+        Self {
+            count: AtomicU64::new(count),
+            in_flight: AtomicU64::new(0),
+            path,
+            saved: Mutex::new(count),
+        }
+    }
+
+    fn add(&self, n: u64) {
+        self.count.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Writes the current count to the file if it changed.
+    fn save(&self) {
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        self.save_locked(&mut saved);
+    }
+
+    fn save_locked(&self, saved: &mut u64) {
+        let now = self.load();
+        if now == *saved {
+            return;
+        }
+        let result = if now == 0 {
+            std::fs::remove_file(&self.path).or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(e),
+            })
+        } else {
+            crate::fsutil::write_atomic(&self.path, now.to_string().as_bytes(), None)
+        };
+        match result {
+            Ok(()) => *saved = now,
+            Err(e) => tracing::warn!("saving the lost audit events count: {e}"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AuditHandle {
     tx: mpsc::Sender<Command>,
     settings: Arc<AuditSettings>,
-    lost: Arc<AtomicU64>,
+    lost: Arc<LostEvents>,
 }
 
 impl AuditHandle {
@@ -127,7 +197,7 @@ impl AuditHandle {
                     Err(mpsc::error::TrySendError::Closed(_)) => true,
                 };
                 if lost {
-                    self.lost.fetch_add(1, Ordering::Relaxed);
+                    self.lost.add(1);
                 }
                 Ok(())
             }
@@ -151,7 +221,7 @@ impl AuditHandle {
         .await;
         if result.is_err() && self.settings.fail_mode() == FailMode::Open {
             // Callers in fail-open mode carry on; the loss is reported.
-            self.lost.fetch_add(1, Ordering::Relaxed);
+            self.lost.add(1);
         }
         result
     }
@@ -182,20 +252,68 @@ impl AuditHandle {
 
     /// Events lost since the last `EventsLost` record was written.
     pub fn lost_events(&self) -> u64 {
-        self.lost.load(Ordering::Relaxed)
+        self.lost.load()
     }
 }
 
 /// Starts the writer thread. It stops once every [`AuditHandle`] is dropped.
+/// A writer that panics is restarted with the store opened again; if that
+/// keeps failing, the gateway stops rather than run without an audit trail.
 pub fn start(path: &Path, config: &AuditConfig) -> anyhow::Result<AuditHandle> {
     let mut store = AuditStore::open(path)?;
-    let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
-    let lost = Arc::new(AtomicU64::new(0));
+    let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
+    let lost = Arc::new(LostEvents::open(path));
     let writer_lost = lost.clone();
+    let db = path.to_path_buf();
     std::thread::Builder::new()
         .name("audit-writer".into())
-        .spawn(move || writer_loop(&mut store, rx, &writer_lost))
+        .spawn(move || {
+            let mut restarts = Vec::new();
+            loop {
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    writer_loop(&mut store, &mut rx, &writer_lost)
+                }));
+                if run.is_ok() {
+                    break;
+                }
+                // The batch being written is not acknowledged: fail-closed
+                // callers get an error, fail-open ones count it as lost.
+                restarts.retain(|t: &std::time::Instant| t.elapsed().as_secs() < 60);
+                restarts.push(std::time::Instant::now());
+                let reopened = if restarts.len() <= 3 {
+                    AuditStore::open(&db)
+                } else {
+                    Err(anyhow::anyhow!(
+                        "it failed {} times in a minute",
+                        restarts.len()
+                    ))
+                };
+                writer_lost.add(writer_lost.in_flight.swap(0, Ordering::Relaxed));
+                match reopened {
+                    Ok(s) => {
+                        tracing::error!("audit writer failed; restarted it");
+                        store = s;
+                    }
+                    Err(e) => {
+                        tracing::error!("audit writer failed and cannot restart ({e:#}): stopping");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        })
         .context("starting audit writer thread")?;
+    // Saves the lost count every second while there are handles.
+    let weak = Arc::downgrade(&lost);
+    std::thread::Builder::new()
+        .name("audit-lost".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            match weak.upgrade() {
+                Some(lost) => lost.save(),
+                None => break,
+            }
+        })
+        .context("starting audit counter thread")?;
     Ok(AuditHandle {
         tx,
         settings: Arc::new(AuditSettings::new(config)),
@@ -203,7 +321,7 @@ pub fn start(path: &Path, config: &AuditConfig) -> anyhow::Result<AuditHandle> {
     })
 }
 
-fn writer_loop(store: &mut AuditStore, mut rx: mpsc::Receiver<Command>, lost: &AtomicU64) {
+fn writer_loop(store: &mut AuditStore, rx: &mut mpsc::Receiver<Command>, lost: &LostEvents) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::new();
         let mut acks = Vec::new();
@@ -237,6 +355,8 @@ fn writer_loop(store: &mut AuditStore, mut rx: mpsc::Receiver<Command>, lost: &A
                 Command::Flush(ack) => {
                     let _ = ack.send(());
                 }
+                #[cfg(test)]
+                Command::Panic => panic!("test: audit writer panics"),
                 Command::Append(..) => unreachable!("appends are batched above"),
             }
         }
@@ -247,15 +367,22 @@ fn write_batch(
     store: &mut AuditStore,
     mut batch: Vec<AuditEntry>,
     acks: Vec<Option<Ack>>,
-    lost: &AtomicU64,
+    lost: &LostEvents,
 ) {
-    let lost_before = lost.swap(0, Ordering::Relaxed);
+    // Held until the result is saved: the file never runs behind a report.
+    let mut saved = lost.saved.lock().unwrap_or_else(|e| e.into_inner());
+    let lost_before = lost.count.swap(0, Ordering::Relaxed);
     if lost_before > 0 {
         batch.push(AuditEntry::new(AuditEvent::EventsLost {
             count: lost_before,
         }));
     }
-    match store.append(&batch) {
+    let unacked = acks.iter().filter(|a| a.is_none()).count() as u64;
+    lost.in_flight
+        .store(lost_before + unacked, Ordering::Relaxed);
+    let result = store.append(&batch);
+    lost.in_flight.store(0, Ordering::Relaxed);
+    match result {
         Ok(seqs) => {
             for (ack, seq) in acks.into_iter().zip(seqs) {
                 if let Some(ack) = ack {
@@ -265,13 +392,13 @@ fn write_batch(
         }
         Err(e) => {
             tracing::error!("audit store write failed: {e:#}");
-            let unacked = acks.iter().filter(|a| a.is_none()).count() as u64;
-            lost.fetch_add(lost_before + unacked, Ordering::Relaxed);
+            lost.add(lost_before + unacked);
             for ack in acks.into_iter().flatten() {
                 let _ = ack.send(Err(e.to_string()));
             }
         }
     }
+    lost.save_locked(&mut saved);
 }
 
 /// Read access for the web UI and the CLI. Uses its own read-only connection,
@@ -454,7 +581,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("audit.db");
         let handle = start(&path, &config(FailMode::Open)).unwrap();
-        handle.lost.store(5, Ordering::Relaxed);
+        handle.lost.count.store(5, Ordering::Relaxed);
         handle
             .record(AuditEntry::new(AuditEvent::SessionActivated))
             .await
@@ -471,5 +598,48 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].entry.event, AuditEvent::EventsLost { count: 5 });
         assert_eq!(handle.lost_events(), 0);
+    }
+
+    #[tokio::test]
+    async fn writer_is_restarted_after_a_panic() {
+        // Audit finding N23: a writer that died used to stay dead.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let handle = start(&path, &config(FailMode::Closed)).unwrap();
+        handle.tx.send(Command::Panic).await.unwrap();
+        let seq = handle
+            .record_committed(AuditEntry::new(AuditEvent::SessionActivated))
+            .await
+            .unwrap();
+        assert_eq!(seq, 1);
+        assert!(AuditReader::new(&path).verify().await.unwrap().ok());
+    }
+
+    #[tokio::test]
+    async fn lost_count_survives_a_restart() {
+        // Audit finding N23: the count is kept on disk until it is reported.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let handle = start(&path, &config(FailMode::Open)).unwrap();
+        handle.lost.add(7);
+        handle.lost.save();
+        drop(handle);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let handle = start(&path, &config(FailMode::Open)).unwrap();
+        assert_eq!(handle.lost_events(), 7);
+        handle
+            .record_committed(AuditEntry::new(AuditEvent::SessionActivated))
+            .await
+            .unwrap();
+        let rows = AuditReader::new(&path)
+            .query(AuditQuery {
+                kind: Some("events_lost".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows[0].entry.event, AuditEvent::EventsLost { count: 7 });
+        assert!(!dir.path().join("audit.db.lost").exists());
     }
 }

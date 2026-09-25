@@ -336,6 +336,11 @@ impl Exports {
         };
         let mut tasks = self.tasks.lock();
         for (sink, interval) in sinks {
+            // Shown at once, not only when the task has started.
+            let position = state.position_for(sink.name(), &sink.key());
+            self.statuses
+                .write()
+                .insert(sink.name().into(), initial_status(&sink, &position));
             tasks.push(tokio::spawn(run(
                 sink,
                 self.reader.clone(),
@@ -398,6 +403,18 @@ fn gap(position: &Position, records: &[StoredRecord], head: i64) -> Option<(i64,
     }
 }
 
+fn initial_status(sink: &Sink, position: &Position) -> ExportStatus {
+    ExportStatus {
+        name: sink.name().into(),
+        destination: sink.destination(),
+        exported_seq: position.seq,
+        pending: 0,
+        last_success: None,
+        last_error: None,
+        gap: None,
+    }
+}
+
 pub async fn run(
     mut sink: Sink,
     reader: AuditReader,
@@ -409,18 +426,9 @@ pub async fn run(
     let name = sink.name();
     let key = sink.key();
     let mut position = state.position_for(name, &key);
-    statuses.write().insert(
-        name.into(),
-        ExportStatus {
-            name: name.into(),
-            destination: sink.destination(),
-            exported_seq: position.seq,
-            pending: 0,
-            last_success: None,
-            last_error: None,
-            gap: None,
-        },
-    );
+    statuses
+        .write()
+        .insert(name.into(), initial_status(&sink, &position));
     let mut failures: u32 = 0;
     loop {
         let result: anyhow::Result<usize> = async {
@@ -457,18 +465,25 @@ pub async fn run(
             Ok(records.len())
         }
         .await;
-        let head = reader.head_seq().await.unwrap_or(position.seq);
+        // Unreadable, the head is an error, not "nothing pending": a stalled
+        // export must not look healthy.
+        let head = reader.head_seq().await;
         let delay = {
             let mut map = statuses.write();
             let status = map.get_mut(name).expect("inserted above");
             status.exported_seq = position.seq;
-            status.pending = (head - position.seq).max(0);
+            if let Ok(head) = &head {
+                status.pending = (head - position.seq).max(0);
+            }
             match &result {
                 Ok(n) => {
                     if *n > 0 {
                         status.last_success = Some(Utc::now());
                     }
-                    status.last_error = None;
+                    status.last_error = head
+                        .as_ref()
+                        .err()
+                        .map(|e| format!("reading the audit trail: {e:#}"));
                     failures = 0;
                     // A full batch means there is more: continue right away.
                     if *n as u32 == sink.batch_size() {

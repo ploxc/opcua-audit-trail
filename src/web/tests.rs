@@ -29,6 +29,11 @@ struct Web {
 }
 
 async fn web() -> Web {
+    web_with(|_| {}).await
+}
+
+/// `web()` with a change to the state before the router is built.
+async fn web_with(change: impl FnOnce(&mut AppState)) -> Web {
     let dir = tempfile::tempdir().unwrap();
     let plc = start_test_plc(dir.path()).await;
     let config_path = dir.path().join("config.toml");
@@ -66,7 +71,7 @@ async fn web() -> Web {
         &config.gateway.data_dir.join("export-state.json"),
     )
     .unwrap();
-    let state = AppState {
+    let mut state = AppState {
         config: Arc::new(config.clone()),
         targets,
         statuses,
@@ -78,7 +83,9 @@ async fn web() -> Web {
         sessions: Default::default(),
         browser: Default::default(),
         exports,
+        web_certificate: None,
     };
+    change(&mut state);
     Web {
         app: router(state),
         plc,
@@ -431,6 +438,37 @@ async fn browser_needs_operator_and_reads_the_address_space() {
 
     let (_, sessions) = w.get("/api/audit?kind=session_created", &admin).await;
     assert_eq!(sessions[0]["client"]["user"]["name"], "ui:operator");
+
+    // Audit finding N12: a password reset ends the user's browser session,
+    // and revoking trust in the PLC's certificate ends every one.
+    let (status, _) = w.post("/api/browser/plc1/connect", &admin, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/operator",
+            Some(&admin),
+            Some(json!({ "password": "reset-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(closed_sessions(&w, &admin).await, 1);
+    let (status, _) = w
+        .post(
+            &format!("/api/certificates/trusted/{thumbprint}/untrust"),
+            &admin,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(closed_sessions(&w, &admin).await, 2);
+    let (status, _) = w.get("/api/browser/plc1/browse", &admin).await;
+    assert!(!status.is_success(), "{status}");
+}
+
+async fn closed_sessions(w: &Web, admin: &str) -> usize {
+    let (_, closed) = w.get("/api/audit?kind=session_closed", admin).await;
+    closed.as_array().unwrap().len()
 }
 
 fn urlencode(s: &str) -> String {
@@ -948,9 +986,14 @@ async fn mcp_reads_the_trail_with_a_token_and_records_every_call() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert!(list[0].get("secret").is_none());
 
-    // Off by default, for everyone.
+    // Off by default, for everyone; only a valid token learns that it is
+    // off (audit finding S18).
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
     assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        w.mcp("gwt_nope_nope", ping.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     w.enable_mcp(true).await;
     assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::OK);
 
@@ -1093,11 +1136,60 @@ async fn mcp_tokens_end_with_their_user() {
     w.enable_mcp(true).await;
     assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::OK);
 
+    // Audit finding S3: admins see every token and revoke any of them...
+    let (_, second) = w
+        .post("/api/me/tokens", &jens, json!({ "name": "y" }))
+        .await;
+    let second_secret = second["secret"].as_str().unwrap().to_string();
+    let (status, _) = w.get("/api/tokens", &jens).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, all) = w.get("/api/tokens", &admin).await;
+    assert_eq!(all.as_array().unwrap().len(), 2, "{all}");
+    assert!(all.to_string().contains("\"username\":\"jens\""));
+    assert!(!all.to_string().contains(&second_secret));
+    let id = second["id"].as_str().unwrap();
+    let (status, _, _) = w
+        .send(
+            Method::DELETE,
+            &format!("/api/users/jens/tokens/{id}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        w.mcp(&second_secret, ping.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, records) = w
+        .get("/api/audit?kind=config_changed&limit=5", &admin)
+        .await;
+    assert!(
+        records.to_string().contains("revoked API token"),
+        "{records}"
+    );
+
+    // ...and a password reset by an admin deletes the user's tokens.
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/jens",
+            Some(&admin),
+            Some(json!({ "password": "reset-password" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        w.mcp(&secret, ping.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, all) = w.get("/api/tokens", &admin).await;
+    assert!(all.as_array().unwrap().is_empty(), "{all}");
+
     let (status, _, _) = w
         .send(Method::DELETE, "/api/users/jens", Some(&admin), None)
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::UNAUTHORIZED);
 }
 
 /// The token is a password: plain HTTP only on a loopback-only web UI.
@@ -1214,21 +1306,39 @@ async fn mcp_changes_need_token_scope_and_admin() {
         .await;
     assert!(records.to_string().contains("via MCP"), "{records}");
 
-    // A user's password never lands in the trail.
-    let users = token(admin.clone(), json!(["users"])).await;
-    let (_, created) = w
+    // A password never lands in the trail.
+    let settings = token(admin.clone(), json!(["settings"])).await;
+    let (_, _) = w
         .mcp(
-            &users,
+            &settings,
             call(
-                "create_user",
-                json!({"username": "bot", "password": "secret-pass-1",
-                                       "role": "auditor"}),
+                "update_export_settings",
+                json!({"questdb": {"url": "http://127.0.0.1:1", "table": "t",
+                                   "username": "u", "password": "secret-pass-1",
+                                   "interval_secs": 5}}),
             ),
         )
         .await;
-    assert_eq!(created["result"]["isError"], false, "{created}");
     let (_, queries) = w.get("/api/audit?kind=mcp_query&limit=50", &admin).await;
+    assert!(queries.to_string().contains("update_export_settings"));
     assert!(!queries.to_string().contains("secret-pass-1"));
+
+    // Audit finding S1: there is no users scope, and no user tools.
+    let (status, _) = w
+        .post(
+            "/api/me/tokens",
+            &admin,
+            json!({ "name": "t", "scopes": ["users"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let all = token(
+        admin.clone(),
+        json!(["targets", "certificates", "settings"]),
+    )
+    .await;
+    let tools = names(w.mcp(&all, list.clone()).await.1);
+    assert!(tools.iter().all(|t| !t.contains("user")), "{tools:?}");
 
     // Only an admin can give a token permissions.
     let auditor = w.login("auditor").await;
@@ -1290,4 +1400,238 @@ async fn scripts_have_versioned_urls() {
     // A module imported relatively from it is in the same versioned folder.
     let (_, account) = get(main.replace("main.js", "pages/account.js")).await;
     assert!(account.contains("tokensCard"));
+}
+
+/// Audit finding S2: stored QuestDB credentials are not sent to a new server.
+#[tokio::test]
+async fn export_credentials_stay_with_their_server() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let put = |url: &str, password: Option<&str>| {
+        let mut q = json!({"url": url, "table": "t", "username": "u", "interval_secs": 5});
+        if let Some(p) = password {
+            q["password"] = json!(p);
+        }
+        json!({ "questdb": q })
+    };
+    let send = |body: Value| {
+        let (w, admin) = (&w, &admin);
+        async move {
+            let (status, v, _) = w
+                .send(Method::PUT, "/api/settings/export", Some(admin), Some(body))
+                .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{v}");
+            let (_, settings) = w.get("/api/settings", admin).await;
+            settings["export"]["questdb"]["password_set"] == true
+        }
+    };
+    assert!(send(put("http://127.0.0.1:9000", Some("pw"))).await);
+    // Same server, another table: kept.
+    assert!(send(put("http://127.0.0.1:9000/", None)).await);
+    // Another host: forgotten unless given again.
+    assert!(!send(put("http://localhost:9000", None)).await);
+    assert!(send(put("http://localhost:9000", Some("pw2"))).await);
+    assert!(!send(put("http://localhost:9001", None)).await);
+}
+
+/// Audit finding S4: JSON-RPC batches are refused, an empty one included.
+#[tokio::test]
+async fn mcp_refuses_batches() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let admin = w.login("admin").await;
+    let (_, token) = w
+        .post("/api/me/tokens", &admin, json!({ "name": "t" }))
+        .await;
+    let secret = token["secret"].as_str().unwrap();
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+    for batch in [json!([]), json!([ping.clone(), ping.clone()])] {
+        let (status, answer) = w.mcp(secret, batch).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(answer["error"]["code"], -32600, "{answer}");
+    }
+    let (_, records) = w.get("/api/audit?kind=mcp_query", &admin).await;
+    assert!(records.as_array().unwrap().is_empty());
+    assert_eq!(w.mcp(secret, ping).await.0, StatusCode::OK);
+}
+
+/// Audit finding S5: off loopback the UI still only answers to known names.
+#[test]
+fn host_check_on_every_address() {
+    use super::host_allowed;
+    let names = vec!["gateway.local".to_string()];
+    // Loopback listener: loopback names only.
+    assert!(host_allowed("localhost:8080", true, &names));
+    assert!(!host_allowed("gateway.local:8080", true, &names));
+    assert!(!host_allowed("192.168.0.20:8080", true, &names));
+    // Any other listener: also IP addresses and the configured names.
+    assert!(host_allowed("127.0.0.1:8080", false, &names));
+    assert!(host_allowed("192.168.0.20:8443", false, &names));
+    assert!(host_allowed("[fe80::1]:8443", false, &names));
+    assert!(host_allowed("Gateway.Local:8443", false, &names));
+    assert!(host_allowed("gateway.local", false, &names));
+    assert!(!host_allowed("attacker.example:8443", false, &names));
+    assert!(!host_allowed("", false, &names));
+}
+
+/// Audit finding S6: while a password change is forced, only /me,
+/// /me/password and /logout answer, not paths that merely end like them.
+#[tokio::test]
+async fn forced_change_allows_exact_paths_only() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let (status, _) = w
+        .post(
+            "/api/users",
+            &admin,
+            json!({ "username": "me", "password": "me-password", "role": "admin" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let me = w.login("me").await;
+    assert_eq!(w.get("/api/me", &me).await.0, StatusCode::OK);
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/users/me",
+            Some(&me),
+            Some(json!({ "role": "auditor" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = w
+        .send(Method::DELETE, "/api/users/me", Some(&me), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, users) = w.get("/api/users", &admin).await;
+    assert!(users.to_string().contains("\"username\":\"me\""));
+    let (status, _, _) = w.send(Method::POST, "/api/logout", Some(&me), None).await;
+    assert!(status.is_success(), "{status}");
+}
+
+/// Audit finding S9: failures from elsewhere do not lock out the real user;
+/// behind a trusted proxy the client's own address counts.
+#[tokio::test]
+async fn user_block_lets_the_right_password_in() {
+    let w = web().await;
+    let login = |password: &str| {
+        let w = &w;
+        let body = json!({ "username": "admin", "password": password });
+        async move { w.send(Method::POST, "/api/login", None, Some(body)).await.0 }
+    };
+    for _ in 0..20 {
+        assert_eq!(login("wrong-password").await, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(login("wrong-password").await, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(login("admin-password").await, StatusCode::OK);
+}
+
+#[test]
+fn forwarded_address_only_from_trusted_proxies() {
+    use super::auth::client_address;
+    let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+    let proxy = [ip("10.0.0.1")];
+    let xff = Some("203.0.113.9, 10.0.0.1");
+    // Not from the proxy: the header is ignored.
+    assert_eq!(
+        client_address(Some(ip("198.51.100.7")), xff, &proxy),
+        Some(ip("198.51.100.7"))
+    );
+    // From the proxy: the last address that is not a proxy.
+    assert_eq!(
+        client_address(Some(ip("10.0.0.1")), xff, &proxy),
+        Some(ip("203.0.113.9"))
+    );
+    assert_eq!(
+        client_address(Some(ip("10.0.0.1")), None, &proxy),
+        Some(ip("10.0.0.1"))
+    );
+    assert_eq!(
+        client_address(Some(ip("10.0.0.1")), xff, &[]),
+        Some(ip("10.0.0.1"))
+    );
+}
+
+/// Audit finding S10: the download is the certificate the server presents.
+#[tokio::test]
+async fn web_certificate_download_is_the_one_in_use() {
+    let w = web().await;
+    let auditor = w.login("auditor").await;
+    let (status, _) = w.get("/api/web-certificate/cert.der", &auditor).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let in_use = crate::testutil::self_signed_der();
+    let expected = in_use.clone();
+    let w = web_with(move |s| s.web_certificate = Some(Arc::new(in_use))).await;
+    let auditor = w.login("auditor").await;
+    let (status, pem) = w.get("/api/web-certificate/cert.pem", &auditor).await;
+    assert_eq!(status, StatusCode::OK);
+    let pem = opcua::crypto::X509::from_pem(pem.as_str().unwrap().as_bytes()).unwrap();
+    assert_eq!(pem.to_der().unwrap(), expected);
+}
+
+/// Audit finding S13: through MCP retention only gets longer, and
+/// fail-closed cannot be switched off.
+#[tokio::test]
+async fn mcp_cannot_delete_history_or_open_fail_mode() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let admin = w.login("admin").await;
+    let (_, token) = w
+        .post(
+            "/api/me/tokens",
+            &admin,
+            json!({ "name": "t", "scopes": ["settings"] }),
+        )
+        .await;
+    let secret = token["secret"].as_str().unwrap();
+    let call = |arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "update_audit_settings", "arguments": arguments}})
+    };
+    let is_error = |answer: Value| answer["result"]["isError"] == true;
+    // The example config: 365 days, fail-closed.
+    assert!(is_error(
+        w.mcp(secret, call(json!({"retention_days": 30}))).await.1
+    ));
+    assert!(is_error(
+        w.mcp(secret, call(json!({"fail_mode": "open"}))).await.1
+    ));
+    assert!(!is_error(
+        w.mcp(secret, call(json!({"retention_days": 400}))).await.1
+    ));
+    assert!(!is_error(
+        w.mcp(secret, call(json!({"retention_days": 0}))).await.1
+    ));
+    // 0 keeps everything: any number of days would now delete records.
+    assert!(is_error(
+        w.mcp(secret, call(json!({"retention_days": 4000}))).await.1
+    ));
+    let (_, settings) = w.get("/api/settings", &admin).await;
+    assert_eq!(settings["audit"]["retention_days"], 0);
+    assert_eq!(settings["audit"]["fail_mode"], "closed");
+}
+
+/// Audit finding S15: arguments that are not an object are refused.
+#[tokio::test]
+async fn mcp_arguments_must_be_an_object() {
+    let w = web().await;
+    w.enable_mcp(true).await;
+    let admin = w.login("admin").await;
+    let (_, token) = w
+        .post("/api/me/tokens", &admin, json!({ "name": "t" }))
+        .await;
+    let secret = token["secret"].as_str().unwrap();
+    let call = |arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "search_audit_trail", "arguments": arguments}})
+    };
+    for bad in [json!(["write"]), json!("write"), json!(5)] {
+        let (_, answer) = w.mcp(secret, call(bad)).await;
+        assert_eq!(answer["error"]["code"], -32602, "{answer}");
+    }
+    for fine in [json!({}), Value::Null] {
+        let (_, answer) = w.mcp(secret, call(fine)).await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+    }
 }

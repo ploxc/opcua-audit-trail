@@ -29,7 +29,8 @@ listen = "0.0.0.0:8080"
 
 [audit]
 retention_days = 365
-fail_mode = "open"
+# "closed": a write only reaches the PLC once its record is stored.
+fail_mode = "closed"
 record_old_value = true
 
 # Copies of the audit trail outside the gateway (see README "Audit export").

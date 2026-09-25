@@ -253,6 +253,7 @@ async function load() {
         break;
       case "users":
         state.users = await get("/users");
+        state.userTokens = await get("/tokens");
         break;
       case "account":
         // A new token's secret is shown once: not again after navigating.

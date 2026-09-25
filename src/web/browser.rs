@@ -75,6 +75,17 @@ impl BrowserSessions {
         }
     }
 
+    /// Ends every browser session (a certificate is no longer trusted).
+    pub async fn close_all(&self, state: &AppState) {
+        let entries: Vec<Entry> = {
+            let mut map = self.map.lock();
+            map.drain().map(|(_, e)| e).collect()
+        };
+        for entry in entries {
+            close(state, entry).await;
+        }
+    }
+
     /// Ends every browser session on a target (removed or changed).
     pub async fn close_target(&self, state: &AppState, target: &str) {
         let entries: Vec<Entry> = {

@@ -37,24 +37,17 @@ questions like 'who changed Line1.Setpoint yesterday' (event type 'write'; \
 the record has the old and new value, the client's address, application and \
 login). Times are UTC. gateway_status shows the targets (PLCs), whether they \
 are reachable and which clients are connected. If this token may change the \
-configuration, tools for that are listed too (targets, certificates, settings, \
-users): explain what you will change and get the user's confirmation first. \
+configuration, tools for that are listed too (targets, certificates, \
+settings): explain what you will change and get the user's confirmation first. \
 Nothing here writes values to a PLC.";
 
-/// POST /mcp: one JSON-RPC message (or a batch).
+/// POST /mcp: one JSON-RPC message.
 pub async fn post(
     State(s): State<AppState>,
     ClientAddr(address): ClientAddr,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !s.targets.config().await.mcp.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "the MCP endpoint is turned off (Settings, AI assistants)"})),
-        )
-            .into_response();
-    }
     if !transport_is_safe(&s.config.web) {
         return (
             StatusCode::FORBIDDEN,
@@ -71,6 +64,14 @@ pub async fn post(
         )
             .into_response();
     };
+    // Only after the token: nobody else learns whether MCP is on.
+    if !s.targets.config().await.mcp.enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "the MCP endpoint is turned off (Settings, AI assistants)"})),
+        )
+            .into_response();
+    }
     let message: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -97,24 +98,21 @@ pub async fn post(
             .and_then(|v| v.to_str().ok())
             .map(|v| clip(v, 128)),
     };
-    let answers = match message {
-        Value::Array(batch) => {
-            let mut out = Vec::new();
-            for m in batch {
-                out.extend(handle(&s, &ctx, m).await);
-            }
-            if out.is_empty() {
-                return StatusCode::ACCEPTED.into_response();
-            }
-            Value::Array(out)
-        }
-        m => match handle(&s, &ctx, m).await {
-            Some(answer) => answer,
-            // Notifications and responses get no answer.
-            None => return StatusCode::ACCEPTED.into_response(),
-        },
-    };
-    Json(answers).into_response()
+    // No batches (protocol 2025-06-18 has none): one request could
+    // otherwise run thousands of tool calls, an empty one included.
+    if message.is_array() {
+        return Json(error(
+            Value::Null,
+            -32600,
+            "invalid request: batches are not supported",
+        ))
+        .into_response();
+    }
+    match handle(&s, &ctx, message).await {
+        Some(answer) => Json(answer).into_response(),
+        // Notifications and responses get no answer.
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 /// Whether MCP may answer: over HTTPS always, over plain HTTP only when the
@@ -290,7 +288,10 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
         "tools/list" => result(id, json!({"tools": ctx.tools()})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            let args = match params.get("arguments") {
+                None | Some(Value::Null) => json!({}),
+                Some(a) => a.clone(),
+            };
             let Some(tool) = ctx.tools().into_iter().find(|t| t["name"] == name) else {
                 let hint = if change_tools().iter().any(|(_, t)| t["name"] == name) {
                     " (this token may not use it: an admin chooses a token's permissions when \
@@ -300,6 +301,11 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
                 };
                 return Some(error(id, -32602, &format!("unknown tool '{name}'{hint}")));
             };
+            // Arguments are an object (or absent); anything else would skip
+            // the check below and run the tool unfiltered.
+            if !args.is_object() {
+                return Some(error(id, -32602, "arguments must be an object"));
+            }
             // An argument the tool does not know would otherwise be ignored
             // silently, and a search would return unfiltered records.
             let known = &tool["inputSchema"]["properties"];
@@ -326,7 +332,16 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
                     }),
                 ));
             }
-            record(s, ctx, name, &args).await;
+            // Fail-closed: no tool call without its record.
+            if let Err(e) = record(s, ctx, name, &args).await {
+                if s.audit.settings().fail_mode() == crate::config::FailMode::Closed {
+                    return Some(error(
+                        id,
+                        -32603,
+                        &format!("not run: its audit record could not be stored ({e})"),
+                    ));
+                }
+            }
             let outcome = if change_tools().iter().any(|(_, t)| t["name"] == name) {
                 change(s, ctx, name, args.clone()).await
             } else {
@@ -349,7 +364,8 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
     })
 }
 
-/// Arguments without secrets (passwords, tokens), for the trail.
+/// Arguments without secrets (passwords, tokens, user info in URLs), for
+/// the trail.
 fn redact(args: &Value) -> Value {
     match args {
         Value::Object(map) => Value::Object(
@@ -366,19 +382,38 @@ fn redact(args: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(items) => Value::Array(items.iter().map(redact).collect()),
+        Value::String(text) => Value::String(strip_userinfo(text)),
         other => other.clone(),
     }
 }
 
+/// A URL without user and password (`http://u:p@host` -> `http://(hidden)@host`);
+/// other text unchanged.
+fn strip_userinfo(text: &str) -> String {
+    let Some(start) = text.find("://").map(|i| i + 3) else {
+        return text.to_string();
+    };
+    let rest = &text[start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{}(hidden){}", &text[..start], &rest[at..]),
+        None => text.to_string(),
+    }
+}
+
 /// Who asked what: every tool call is a record in the trail.
-async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
+async fn record(
+    s: &AppState,
+    ctx: &Caller,
+    tool: &str,
+    args: &Value,
+) -> Result<(), crate::audit::AuditError> {
     tracing::info!(user = %ctx.user.username, tool, "MCP tool call");
     let mut client = ctx.client.clone();
     if let Some(agent) = &ctx.agent {
         client.application_name = Some(format!("MCP · {agent}"));
     }
-    let _ = s
-        .audit
+    s.audit
         .record(
             AuditEntry::new(AuditEvent::McpQuery {
                 by: ctx.user.username.clone(),
@@ -388,7 +423,7 @@ async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
             })
             .client(client),
         )
-        .await;
+        .await
 }
 
 fn tools() -> Vec<Value> {
@@ -609,7 +644,7 @@ async fn call(s: &AppState, tool: &str, args: &Value) -> anyhow::Result<Value> {
 // Tools that change the gateway's configuration, per scope. They call the
 // web API's handlers, so they check the same role, validate the same way and
 // record the same `config_changed` records (with "via MCP, token …"). None
-// writes to a PLC, and none changes MCP, API tokens or the web server.
+// writes to a PLC, and none changes users, MCP, API tokens or the web server.
 
 /// A change tool: its name, what it does, and its arguments.
 fn change_tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -661,7 +696,6 @@ fn change_tools() -> Vec<(&'static str, Value)> {
     let mut rule_add = rule.clone();
     rule_add["name"] = text("Display name, for people reading the list.");
     let thumbprint = json!({"thumbprint": text("The certificate's SHA-1 thumbprint (hex).")});
-    let role = json!({"type": "string", "enum": ["admin", "operator", "auditor"]});
     vec![
         (
             "targets",
@@ -785,8 +819,8 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             "settings",
             change_tool(
                 "update_audit_settings",
-                "Changes audit settings; only the given fields change. Shorter retention \
-             deletes older records for good.",
+                "Changes audit settings; only the given fields change. Retention can only \
+             get longer and fail-closed cannot be switched off here (web UI only).",
                 json!({
                     "retention_days": {"type": "integer", "minimum": 0,
                         "description": "Keep records this many days; 0 keeps everything."},
@@ -803,7 +837,7 @@ fn change_tools() -> Vec<(&'static str, Value)> {
             change_tool(
                 "update_export_settings",
                 "Sets or removes (null) the QuestDB export. Omitted password/token keep \
-             the stored one.",
+             the stored one while the URL's scheme, host and port stay the same.",
                 json!({"questdb": {"type": ["object", "null"], "properties": {
                 "url": text("e.g. http://questdb:9000"),
                 "table": text("Table name, e.g. opcua_audit."),
@@ -824,39 +858,6 @@ fn change_tools() -> Vec<(&'static str, Value)> {
              its certificate when it is generated next.",
                 json!({"certificate_hostnames": {"type": "array", "items": {"type": "string"}}}),
                 &["certificate_hostnames"],
-            ),
-        ),
-        (
-            "users",
-            scope_read_tool("list_users", "The web UI users and their roles.", json!({})),
-        ),
-        (
-            "users",
-            change_tool(
-                "create_user",
-                "Creates a web UI user. They must choose a new password at the first login.",
-                json!({"username": text("Letters, digits and . _ - @"),
-                   "password": text("At least 8 characters."), "role": role}),
-                &["username", "password", "role"],
-            ),
-        ),
-        (
-            "users",
-            change_tool(
-                "update_user",
-                "Changes a user's role and/or password; their sessions end.",
-                json!({"username": text("The user."), "role": role,
-                   "password": text("New password, at least 8 characters.")}),
-                &["username"],
-            ),
-        ),
-        (
-            "users",
-            change_tool(
-                "delete_user",
-                "Deletes a user and their API tokens. The last admin cannot be deleted.",
-                json!({"username": text("The user.")}),
-                &["username"],
             ),
         ),
     ]
@@ -952,7 +953,25 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
         }
         "get_settings" => reply(super::settings::get(st(), user).await).await,
         "update_audit_settings" => {
-            let current = serde_json::to_value(s.targets.config().await.audit)?;
+            let config = s.targets.config().await.audit;
+            // What deletes history or lets writes pass unrecorded stays in
+            // the web UI: an assistant could be talked into it.
+            if let Some(days) = args.get("retention_days").and_then(Value::as_u64) {
+                let current = u64::from(config.retention_days);
+                if days != 0 && (current == 0 || days < current) {
+                    anyhow::bail!(
+                        "shorter retention deletes records for good: change it in the web UI \
+                         (Settings)"
+                    );
+                }
+            }
+            if args["fail_mode"] == "open" && config.fail_mode == crate::config::FailMode::Closed {
+                anyhow::bail!(
+                    "switching fail-closed off lets writes pass unrecorded: change it in the \
+                     web UI (Settings)"
+                );
+            }
+            let current = serde_json::to_value(config)?;
             let audit = overlay(current, &args, &[]);
             reply(super::settings::put_audit(st(), user, Json(arg(&audit)?)).await).await
         }
@@ -962,17 +981,33 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
         "update_certificate_hostnames" => {
             reply(super::settings::put_gateway(st(), user, Json(arg(&args)?)).await).await
         }
-        "list_users" => reply(super::list_users(st(), user).await).await,
-        "create_user" => reply(super::create_user(st(), user, Json(arg(&args)?)).await).await,
-        "update_user" => {
-            let name = required(&args, "username")?;
-            let body = overlay(json!({}), &args, &["username"]);
-            reply(super::update_user(st(), user, Path(name), Json(arg(&body)?)).await).await
-        }
-        "delete_user" => {
-            let name = required(&args, "username")?;
-            reply(super::delete_user(st(), user, Path(name)).await).await
-        }
         other => anyhow::bail!("unknown tool '{other}'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn redacts_credentials_in_urls() {
+        // Audit finding S16.
+        let args = json!({"questdb": {"url": "https://audit:s3cret@questdb:9000/x?a=b@c",
+                                      "password": "pw", "table": "t"}});
+        let text = super::redact(&args).to_string();
+        assert!(
+            !text.contains("s3cret") && !text.contains("audit:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("https://(hidden)@questdb:9000/x?a=b@c"),
+            "{text}"
+        );
+        assert!(!text.contains("\"pw\""));
+        assert_eq!(
+            super::strip_userinfo("http://questdb:9000"),
+            "http://questdb:9000"
+        );
+        assert_eq!(super::strip_userinfo("a@b"), "a@b");
     }
 }

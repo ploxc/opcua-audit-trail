@@ -143,8 +143,10 @@ jobs:
             docker compose up -d
             ```
 
-            The web UI is on https://127.0.0.1:8080 (first login: admin / admin,
-            then choose a new password). The image is
+            The web UI is on https://127.0.0.1:8080. The first login is admin
+            with the password printed once at the first start
+            (`docker compose logs gateway`), or the one set in
+            `OPCUA_GATEWAY_ADMIN_PASSWORD`; then choose a new one. The image is
             `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7).
 
             Checksums are in `SHA256SUMS`.

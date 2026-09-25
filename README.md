@@ -28,8 +28,8 @@ What it does today:
   container, with optional HTTPS.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design, and
-[docs/audit](docs/audit/) for the security audit and its independent
-verification.
+[docs/audit](docs/audit/AUDIT.md) for the open findings of the security
+audits.
 
 ## Screenshots
 
@@ -102,7 +102,7 @@ cargo run -- init                                  # config.toml + certificate
 #   name = "line1"
 #   listen = "0.0.0.0:4841"
 #   endpoint_url = "opc.tcp://127.0.0.1:4840/"
-cargo run -- run                                   # first login: admin / admin
+cargo run -- run                                   # prints the first admin password
 cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/
 ```
 
@@ -137,7 +137,7 @@ cargo build --release
 ./target/release/opcua-audit-gateway discover opc.tcp://192.168.0.10:4840
 # add a [[targets]] block to config.toml, then:
 ./target/release/opcua-audit-gateway run         # web UI on http://127.0.0.1:8080
-                                                 # (first login: admin / admin)
+                                                 # (prints the first admin password)
 ./target/release/opcua-audit-gateway verify      # check the audit trail's hash chain
 ```
 
@@ -201,7 +201,9 @@ sudo ./install.sh ./opcua-audit-gateway
 sudo nano /etc/opcua-audit-gateway/config.toml    # or add targets in the web UI
 ```
 
-The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
+The web UI is on http://127.0.0.1:8080. The first login is `admin` with the
+password printed once at the first start:
+`sudo journalctl -u opcua-audit-gateway | grep "first login"`.
 
 The service runs as the unprivileged user `opcua-gw` with a hardened unit.
 Data, certificates and the audit trail live in `/var/lib/opcua-audit-gateway`.
@@ -224,8 +226,9 @@ The service runs under its own virtual account
 (`NT SERVICE\OpcUaAuditGateway`), not as LocalSystem. `service install`
 restricts the config, data, certificate and log directories to that account,
 SYSTEM and administrators; don't point them at shared directories. Logs go to
-`logs` next to the config (daily files, kept 14 days). The first login is
-`admin` / `admin`.
+`logs` next to the config (daily files, kept 14 days). A service has no
+console for the first admin password, so set it before `sc start`:
+`& $exe --config "…\config.toml" user passwd admin`.
 `service uninstall` removes the service; install it again after an upgrade
 from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
 to files instead of the console.
@@ -257,7 +260,9 @@ docker compose up -d
 ```
 
 The web UI is on https://127.0.0.1:8080 (HTTPS with the gateway certificate:
-accept it once in the browser); the first login is `admin` / `admin`.
+accept it once in the browser). The first login is `admin` with the
+password printed once at the first start (`docker compose logs gateway`), or
+the one in `OPCUA_GATEWAY_ADMIN_PASSWORD` (see `docker-compose.yml`).
 In a checkout, `docker compose build` builds the image from the source instead.
 
 Everything (config, certificates, users, audit trail) lives in the `/data`
@@ -289,9 +294,12 @@ Authorities), or use a certificate from your own CA. It names localhost, the
 machine and the certificate host names (Settings); after changing those,
 regenerate it there and restart. With TLS the session cookie is `Secure` and
 `__Host-` prefixed; HSTS is only sent with a configured certificate (with a
-self-signed one it would stop browsers from letting you accept it). Without TLS, keep the UI on loopback: there it only answers requests for
+self-signed one it would stop browsers from letting you accept it). Without
+TLS, keep the UI on loopback: there it only answers requests for
 `localhost`/`127.0.0.1`/`[::1]`, so a web page cannot reach it through DNS
-rebinding.
+rebinding. On other addresses it answers to IP addresses, the machine's
+names and the certificate host names; add a reverse proxy's name with
+`allowed_hosts = ["audit.example.com"]` under `[web]`.
 
 ## Audit export
 
@@ -397,7 +405,10 @@ reported before any password is asked, with the path of the user database, so
 a command run against the wrong config is noticed at once. Changing a
 password, a role or removing a user ends that user's sessions; sessions also
 expire after 8 hours idle and 24 hours in total. Failed logins are rate
-limited per address and per user.
+limited per address and per user; while a user is blocked, only the right
+password still gets in. Behind a reverse proxy, set `trusted_proxies =
+["<proxy address>"]` under `[web]` so the limit applies per client (from
+`X-Forwarded-For`), not to everyone at once.
 
 ## REST API
 
@@ -460,7 +471,9 @@ clients, unacknowledged warnings, exports), `most_written_nodes` and
 
 An assistant can also help configure the gateway. What a token may change
 is chosen when an admin creates it (Account page), per area: targets,
-certificates, settings (audit, export, certificate host names), users. A
+certificates, settings (audit, export, certificate host names; retention
+only longer, and fail-closed not off: those stay in the web UI). Users are
+managed only in the web UI and on the command line. A
 token with nothing ticked only reads, so a leaked read token cannot change
 anything; the MCP switch in Settings stops every token at once.
 
@@ -468,11 +481,12 @@ The assistant then sees tools such as `add_target`, `update_target`,
 `trust_server_certificate` or `update_audit_settings`. They go through the
 same checks as the web UI and are recorded as `config_changed` "via MCP"
 with the token's id; passwords in their arguments are not recorded.
-Assistants never write values to a PLC, and never change the MCP settings,
-API tokens or the web server. Every tool call is recorded in the trail as
+Assistants never write values to a PLC, and never change users, the MCP
+settings, API tokens or the web server. Every tool call is recorded in the trail as
 `mcp_query`, with the token's user and the arguments. Tokens are stored as a
-SHA-256 hash; delete one on the Account page, and deleting a user deletes
-theirs. The endpoint does not accept the web UI's session cookie. Turning
+SHA-256 hash; delete one on the Account page. Admins see every user's
+tokens on the Users page and can revoke any of them; resetting a user's
+password or deleting the user deletes theirs. The endpoint does not accept the web UI's session cookie. Turning
 the endpoint off stops every token at once.
 
 ## Development

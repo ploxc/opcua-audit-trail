@@ -1,7 +1,8 @@
 # OPC UA Audit Gateway with the published image: needs nothing else than
 # this file. Start with `docker compose up -d`, then open https://127.0.0.1:8080
-# and log in as admin / admin (you must choose a new password at the first
-# login). Add targets in the web UI.
+# and log in as admin with the password printed at the first start
+# (`docker compose logs gateway`); you must choose a new one then. Add
+# targets in the web UI.
 #
 # In a checkout, `docker compose build` builds the image from the source
 # instead (also used when the published image cannot be pulled).
@@ -15,6 +16,11 @@ services:
       # HTTPS for the web UI and the MCP endpoint (the gateway certificate).
       # "false" only behind a TLS reverse proxy: MCP then refuses requests.
       OPCUA_GATEWAY_WEB_TLS: "true"
+      # First password of the web UI user "admin" (min. 8 characters), used
+      # only when the gateway creates its users on the very first start. Not
+      # set: a random one is printed once (docker compose logs gateway).
+      # Either way it must be changed at the first login.
+      # OPCUA_GATEWAY_ADMIN_PASSWORD: "choose-a-long-one"
     ports:
       # Web UI (HTTPS, the gateway certificate): loopback only. For access
       # from other machines publish "8080:8080" and add the host name or IP

@@ -152,7 +152,11 @@ The gateway generates its own self-signed application instance certificate on
 first start (`pki/own/cert.der`, RSA 2048, 5 years, `subjectAltName` = application
 URI + host names + IPs + `certificate_hostnames` from the config). Importing a
 certificate and key (e.g. one issued by a plant CA) is supported through the
-PKI directory and, later, the web UI.
+PKI directory and the web UI. Import and regenerate first keep the old pair
+as `.<time>.bak`, then write the key and the certificate, each in one step
+(the key created 0600). A start that finds a key that does not belong to the
+certificate (an interruption between the two) restores the newest matching
+backup pair, or refuses to start with an explanation.
 
 The same certificate is used downstream (clients must trust it) and upstream
 (the PLC must trust it, and only it).
@@ -241,11 +245,18 @@ records `export_gap` and the dashboard shows it.
 
 ### Fail mode
 
-- `open` (default): forwarding never waits on the audit store. Events that
-  cannot be queued or written are counted and recorded later as `events_lost`.
-  The UI shows the counter.
-- `closed`: a write is only forwarded after its audit record has been committed.
-  If that fails, the client gets `BadInternalError` and the PLC is not touched.
+- `closed` (in new configs: the template and `init`): a write is only
+  forwarded after its audit record has been committed. If that fails, the
+  client gets `BadInternalError` and the PLC is not touched.
+- `open` (a config without `fail_mode`, so existing installs keep their
+  behaviour): forwarding never waits on the audit store. Events that cannot
+  be queued or written are counted and recorded later as `events_lost`. The
+  UI shows the counter; it is also kept in `<database>.lost` until reported,
+  so a restart does not forget it.
+
+A writer thread that panics is restarted with the store opened again (its
+unfinished batch is refused or counted as lost); more than three failures
+in a minute stop the gateway rather than run without an audit trail.
 
 ### Errors and warnings
 
@@ -299,12 +310,20 @@ embedded, so the UI needs no internet access.
   HttpOnly/SameSite=Strict cookies, checked against the user store on every
   request (changing a password, role or removing a user ends them), expire
   after 8 hours idle and 24 hours in total. Every state-changing request needs a custom header
-  (CSRF protection). Logins are rate limited per address and per user. The
-  first start creates `admin` with password `admin`, which must be changed
-  at the first login before anything else is allowed.
+  (CSRF protection). Logins are rate limited per address and per user (a
+  blocked user still gets in with the right password; `X-Forwarded-For`
+  counts only from `[web] trusted_proxies`). The
+  first start creates `admin` with the password in
+  `OPCUA_GATEWAY_ADMIN_PASSWORD`, or a random one printed once to stdout (not
+  to a log file); it must be changed at the first login before anything else
+  is allowed. There is no well-known default password.
   UI logins and every change made through the UI are audited. HTTPS with
   rustls (`ring` provider), using the gateway certificate or PEM files; with
-  TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.
+  TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent. A
+  web certificate whose key does not match is replaced at start; if HTTPS
+  still cannot be set up, only the web UI stays off (logged and recorded),
+  the relay keeps running. The certificate download is the one the server
+  presents.
 - **Discovery** of an arbitrary URL is admin-only and audited, so the UI
   cannot be used to probe the plant network.
 - **Settings**: retention, fail mode, old values, the summary interval, export
@@ -313,11 +332,14 @@ embedded, so the UI needs no internet access.
   and exporters read shared settings, and exporters restart with the new
   destinations. Export positions are kept per destination, so a new one gets
   the whole trail and the old one's last record stays a `verify` anchor.
-  Secrets are write-only. The web listener, TLS and paths stay file-only.
+  Secrets are write-only, and a new scheme, host or port of the URL forgets
+  them. The web listener, TLS and paths stay file-only.
 - Confirmations use an in-page dialog that explains the consequence.
 
 The web UI binds to `127.0.0.1` by default; on a loopback address it only
-accepts requests whose `Host` is a loopback name (against DNS rebinding). The
+accepts requests whose `Host` is a loopback name (against DNS rebinding).
+On other addresses the `Host` must be an IP address, a loopback name, the
+machine's name, one of `certificate_hostnames` or `[web] allowed_hosts`. The
 compose file only publishes it on the host's loopback. Security headers (CSP,
 `X-Frame-Options`, `nosniff`, no referrer) are sent on every response.
 
@@ -360,10 +382,11 @@ templates left as written).
 
 `src/web/mcp.rs` serves the Model Context Protocol on `POST /mcp`, on the web
 UI's listener, for AI assistants. It is a hand-written JSON-RPC handler for
-the Streamable HTTP transport in its simplest form: no sessions and no
-server-sent events, one JSON answer per request (`initialize`, `ping`,
-`tools/list`, `tools/call`; notifications get `202`). That is all the tools
-need, and it keeps an SDK dependency out of the binary.
+the Streamable HTTP transport in its simplest form: no sessions, no
+server-sent events and no batches (an array is an Invalid Request), one JSON
+answer per request (`initialize`, `ping`, `tools/list`, `tools/call`;
+notifications get `202`). That is all the tools need, and it keeps an SDK
+dependency out of the binary.
 
 - **Off by default:** `[mcp] enabled`, switched by an admin on the Settings
   page (audited, applied at once). Off, `/mcp` answers `404` and every token
@@ -374,19 +397,25 @@ need, and it keeps an SDK dependency out of the binary.
 - **Authentication:** API tokens (`gwt_<id>_<secret>`) that a user creates on
   the Account page, in `api_tokens` in `gateway.db`, stored as SHA-256 (the
   secret is 32 random bytes; a slow hash adds nothing). A token acts as its
-  user with that user's current role and ends with the user. The session
+  user with that user's current role and ends with the user or with a
+  password reset by an admin; admins list and revoke any user's tokens
+  (`GET /api/tokens`, `DELETE /api/users/{name}/tokens/{id}`). The session
   cookie is not accepted here, so the endpoint is exempt from the CSRF header
   check: a cross-site request cannot carry the bearer token.
 - **Read tools:** search the trail (the `/api/audit` filters), one record,
   the status, the most written nodes, verify.
-- **Change tools, per scope** (`targets`, `certificates`, `settings`,
-  `users`): listed and callable only when the token was created with the
+- **Change tools, per scope** (`targets`, `certificates`, `settings`):
+  listed and callable only when the token was created with the
   scope (by an admin; stored with the token) and its user is still an
-  admin. They call the web API's handlers
+  admin; demoting the user clears the scopes for good. They call the web
+  API's handlers
   with the token's user, so role checks, validation and `config_changed`
   records are the same; the record's `by` says "via MCP, token <id>". None
-  writes to a PLC, and MCP settings, tokens and the web server are not
-  reachable. Password and token arguments are hidden in `mcp_query`.
+  writes to a PLC, and users, MCP settings, tokens and the web server are
+  not reachable (a `users` scope existed once; stored tokens that still have
+  it keep their other scopes). Shorter retention and switching fail-closed
+  off are refused here too: they delete history or let writes pass
+  unrecorded. Password and token arguments are hidden in `mcp_query`.
 - **Audited:** every tool call is an `mcp_query` record with the user, the
   token id (never the secret), the tool and its arguments.
 
@@ -444,7 +473,7 @@ need, and it keeps an SDK dependency out of the binary.
 | Placement | On the PLC (container, other port) or on an edge device; the PLC trusts only the gateway |
 | Upstream login | Passthrough of the client's user identity |
 | Old value | Configurable, on by default |
-| Audit store unavailable | Fail-open with counting/reporting; fail-closed optional |
+| Audit store unavailable | Fail-closed in new configs; fail-open (counting/reporting) when set, or in configs from before |
 | Storage | Embedded SQLite always; QuestDB optional. Standalone binary is first-class, Docker optional |
 | Targets per instance | Several, one listen port each |
 | Integrity | Hash chain + retention |
@@ -456,4 +485,4 @@ need, and it keeps an SDK dependency out of the binary.
 | UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |
 | Noisy nodes | Summarised per node and interval, never dropped silently; admin-only, audited, optionally per client |
-| Security review | Audit in `docs/audit/AUDIT.md`, independently verified in `VERIFICATION.md`; all findings fixed except those listed there as accepted |
+| Security review | Two reviews; `docs/audit/AUDIT.md` lists the findings still open (fixed ones are removed, see the git history) and the accepted ones |

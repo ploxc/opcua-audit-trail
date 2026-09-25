@@ -68,9 +68,6 @@ pub struct UserStore {
 
 const MIN_PASSWORD_LENGTH: usize = 8;
 
-/// Password of the `admin` user created on the first start.
-pub const DEFAULT_ADMIN_PASSWORD: &str = "admin";
-
 fn hash(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -194,15 +191,15 @@ impl UserStore {
         Ok(())
     }
 
-    /// Creates `admin` with the well-known default password, which has to be
-    /// changed at the first login. It is shorter than the minimum length, so
-    /// it can never be kept as the new password.
-    pub fn create_default_admin(&self) -> anyhow::Result<()> {
+    /// Creates `admin` with the first password (from the environment, or a
+    /// random one printed once), which has to be changed at the first login.
+    pub fn create_initial_admin(&self, password: &str) -> anyhow::Result<()> {
+        validate("admin", password)?;
         let inserted = self.conn.lock().execute(
             "INSERT OR IGNORE INTO users (username, password_hash, role, created_at, must_change_password)
              VALUES ('admin', ?1, ?2, ?3, 1)",
             params![
-                hash(DEFAULT_ADMIN_PASSWORD)?,
+                hash(password)?,
                 Role::Admin.as_str(),
                 Utc::now().to_rfc3339()
             ],
@@ -247,6 +244,60 @@ impl UserStore {
             })),
             _ => Ok(None),
         }
+    }
+
+    /// A user changes their own password: with the current one, or without
+    /// it while a change is forced (a password someone else chose). The new
+    /// one must differ from the current one. Checked and written under one
+    /// lock, and only if nothing changed meanwhile: of two forced changes at
+    /// once, the second fails instead of silently replacing the first.
+    pub fn change_own_password(
+        &self,
+        username: &str,
+        current: Option<&str>,
+        new: &str,
+    ) -> anyhow::Result<()> {
+        validate(username, new)?;
+        let conn = self.conn.lock();
+        let row: Option<(String, bool, i64)> = conn
+            .query_row(
+                "SELECT password_hash, must_change_password, session_epoch
+                 FROM users WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((stored, forced, epoch)) = row else {
+            bail!("no user '{username}'");
+        };
+        let matches = |password: &str| {
+            PasswordHash::new(&stored)
+                .map(|h| {
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &h)
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        };
+        match current {
+            Some(current) if !matches(current) => bail!("the current password is wrong"),
+            Some(_) => {}
+            None if !forced => bail!("the current password is needed"),
+            None => {}
+        }
+        if matches(new) {
+            bail!("choose a password other than the current one");
+        }
+        let changed = conn.execute(
+            "UPDATE users SET password_hash = ?2, must_change_password = 0,
+                              session_epoch = session_epoch + 1
+             WHERE username = ?1 AND session_epoch = ?3",
+            params![username, hash(new)?, epoch],
+        )?;
+        if changed == 0 {
+            bail!("the password was changed meanwhile; log in again");
+        }
+        Ok(())
     }
 
     /// The user's current role and session epoch; `None` if the user is gone.
@@ -345,6 +396,17 @@ impl UserStore {
                 params![username, role.as_str()],
             )?;
             changes.push(format!("role {}", role.as_str()));
+            // Change scopes only apply to admins; cleared, so a later
+            // promotion does not silently bring them back.
+            if role < Role::Admin {
+                let n = tx.execute(
+                    "UPDATE api_tokens SET scopes = '' WHERE username = ?1 AND scopes != ''",
+                    [username],
+                )?;
+                if n > 0 {
+                    changes.push(format!("{n} API token(s) now read only"));
+                }
+            }
         }
         if let Some(hash) = hash {
             tx.execute(
@@ -352,6 +414,14 @@ impl UserStore {
                 params![username, hash, must_change_password],
             )?;
             changes.push("password".into());
+            // A reset by an admin (the user must choose a new password) also
+            // ends the user's API tokens: a compromised account keeps none.
+            if must_change_password {
+                let n = tx.execute("DELETE FROM api_tokens WHERE username = ?1", [username])?;
+                if n > 0 {
+                    changes.push(format!("{n} API token(s) deleted"));
+                }
+            }
         }
         tx.execute(
             "UPDATE users SET session_epoch = session_epoch + 1 WHERE username = ?1",
@@ -427,6 +497,21 @@ impl UserStore {
             },
             secret,
         })
+    }
+
+    /// Every user's tokens, for admins.
+    pub fn all_tokens(&self) -> anyhow::Result<Vec<UserToken>> {
+        let names: Vec<String> = self.list()?.into_iter().map(|u| u.username).collect();
+        let mut all = Vec::new();
+        for username in names {
+            for token in self.tokens(&username)? {
+                all.push(UserToken {
+                    username: username.clone(),
+                    token,
+                });
+            }
+        }
+        Ok(all)
     }
 
     pub fn tokens(&self, username: &str) -> anyhow::Result<Vec<ApiToken>> {
@@ -536,6 +621,14 @@ pub struct ApiToken {
     pub last_used: Option<String>,
 }
 
+/// A token with its user, as admins see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UserToken {
+    pub username: String,
+    #[serde(flatten)]
+    pub token: ApiToken,
+}
+
 /// A token just created, with the secret the user must copy now.
 #[derive(Debug, Clone, Serialize)]
 pub struct NewApiToken {
@@ -551,9 +644,11 @@ fn random_hex(bytes: usize) -> String {
     hex::encode(buf)
 }
 
+/// The stored scopes that still exist: a scope that was removed (`users`)
+/// is ignored, the token keeps its other scopes.
 fn split_scopes(s: &str) -> Vec<String> {
     s.split(',')
-        .filter(|x| !x.is_empty())
+        .filter(|x| crate::config::MCP_SCOPES.contains(x))
         .map(String::from)
         .collect()
 }
@@ -568,7 +663,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// A random password (for the dummy hash that evens out login timing).
-fn random_password() -> String {
+pub fn random_password() -> String {
     use argon2::password_hash::rand_core::RngCore;
     const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut bytes = [0u8; 20];
@@ -662,16 +757,94 @@ mod tests {
     }
 
     #[test]
-    fn default_admin_must_change_password() {
+    fn initial_admin_must_change_password() {
+        // Audit finding W6: no well-known password; a short one is refused.
         let (_dir, users) = store();
-        users.create_default_admin().unwrap();
-        let admin = users
-            .verify("admin", DEFAULT_ADMIN_PASSWORD)
-            .unwrap()
-            .unwrap();
+        assert!(users.create_initial_admin("admin").is_err());
+        users.create_initial_admin("first-password").unwrap();
+        let admin = users.verify("admin", "first-password").unwrap().unwrap();
         assert!(admin.must_change_password);
-        assert!(users.set_password("admin", DEFAULT_ADMIN_PASSWORD).is_err());
-        assert!(users.create_default_admin().is_err());
+        assert!(users.verify("admin", "admin").unwrap().is_none());
+        assert!(users.create_initial_admin("other-password").is_err());
+    }
+
+    #[test]
+    fn removed_scope_is_ignored() {
+        // Audit finding S1: tokens stored with the removed `users` scope keep
+        // working with their other scopes.
+        let (_dir, users) = store();
+        users.create("a", "a-password", Role::Admin).unwrap();
+        let token = users
+            .create_token("a", "t", &["targets".to_string()])
+            .unwrap();
+        users
+            .conn
+            .lock()
+            .execute("UPDATE api_tokens SET scopes = 'targets,users'", [])
+            .unwrap();
+        let (user, scopes) = users.verify_token(&token.secret).unwrap().unwrap();
+        assert_eq!(user, "a");
+        assert_eq!(scopes, vec!["targets".to_string()]);
+        assert_eq!(
+            users.tokens("a").unwrap()[0].scopes,
+            vec!["targets".to_string()]
+        );
+    }
+
+    #[test]
+    fn own_password_change() {
+        // Audit findings S7 and S8.
+        let (_dir, users) = store();
+        users
+            .create_with("a", "chosen-by-admin", Role::Auditor, true)
+            .unwrap();
+        assert!(
+            users
+                .session_state("a")
+                .unwrap()
+                .unwrap()
+                .must_change_password
+        );
+        // S8: the admin's password cannot simply be kept.
+        let same = users.change_own_password("a", None, "chosen-by-admin");
+        assert!(same.unwrap_err().to_string().contains("other than"));
+        users
+            .change_own_password("a", None, "first-own-pw")
+            .unwrap();
+        // S7: the forced change is used up; a second one needs the current
+        // password, like any other change.
+        assert!(users
+            .change_own_password("a", None, "second-own-pw")
+            .is_err());
+        assert!(users
+            .change_own_password("a", Some("wrong-password"), "second-own-pw")
+            .is_err());
+        users
+            .change_own_password("a", Some("first-own-pw"), "second-own-pw")
+            .unwrap();
+        assert!(users.verify("a", "second-own-pw").unwrap().is_some());
+        assert!(
+            !users
+                .session_state("a")
+                .unwrap()
+                .unwrap()
+                .must_change_password
+        );
+    }
+
+    #[test]
+    fn demotion_clears_token_scopes() {
+        // Audit finding S14.
+        let (_dir, users) = store();
+        users.create("a", "a-password", Role::Admin).unwrap();
+        users.create("b", "b-password", Role::Admin).unwrap();
+        let token = users
+            .create_token("a", "t", &["targets".to_string()])
+            .unwrap();
+        users.set_role("a", Role::Operator).unwrap();
+        users.set_role("a", Role::Admin).unwrap();
+        let (_, scopes) = users.verify_token(&token.secret).unwrap().unwrap();
+        assert!(scopes.is_empty(), "{scopes:?}");
     }
 
     #[test]
