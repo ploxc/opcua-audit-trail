@@ -549,8 +549,10 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
     }));
     // Refused connections are recorded as one summary per address.
     let mut report = tokio::time::interval(Duration::from_secs(10));
-    // The summary interval is read each time: it can change while running.
-    let mut next_summary = Instant::now() + target.audit.settings().ignored_summary();
+    // The summary interval is read on every turn of the loop (at least every
+    // 10 s), so a change in Settings applies at once, not after the interval
+    // that was running.
+    let mut last_summary = Instant::now();
     // Whether the target accepts the gateway: soon after start, then with
     // every discovery interval, and at once when trust changes.
     let mut next_trust_check = Instant::now() + Duration::from_secs(2);
@@ -566,9 +568,9 @@ pub async fn serve(target: Arc<RelayTarget>, listener: tokio::net::TcpListener) 
             Ok(()) = trust.changed() => {
                 next_trust_check = Instant::now();
             }
-            _ = tokio::time::sleep_until(next_summary.into()) => {
+            _ = tokio::time::sleep_until((last_summary + target.audit.settings().ignored_summary()).into()) => {
                 target.record_ignored().await;
-                next_summary = Instant::now() + target.audit.settings().ignored_summary();
+                last_summary = Instant::now();
             }
             _ = report.tick() => {
                 let refused = admission.lock().take_refused();
