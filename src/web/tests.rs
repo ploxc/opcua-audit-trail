@@ -986,9 +986,14 @@ async fn mcp_reads_the_trail_with_a_token_and_records_every_call() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert!(list[0].get("secret").is_none());
 
-    // Off by default, for everyone.
+    // Off by default, for everyone; only a valid token learns that it is
+    // off (audit finding S18).
     let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
     assert_eq!(w.mcp(&secret, ping.clone()).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        w.mcp("gwt_nope_nope", ping.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     w.enable_mcp(true).await;
     assert_eq!(w.mcp(&secret, ping).await.0, StatusCode::OK);
 

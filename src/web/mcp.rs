@@ -48,13 +48,6 @@ pub async fn post(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if !s.targets.config().await.mcp.enabled {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": "the MCP endpoint is turned off (Settings, AI assistants)"})),
-        )
-            .into_response();
-    }
     if !transport_is_safe(&s.config.web) {
         return (
             StatusCode::FORBIDDEN,
@@ -71,6 +64,14 @@ pub async fn post(
         )
             .into_response();
     };
+    // Only after the token: nobody else learns whether MCP is on.
+    if !s.targets.config().await.mcp.enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "the MCP endpoint is turned off (Settings, AI assistants)"})),
+        )
+            .into_response();
+    }
     let message: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -331,7 +332,16 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
                     }),
                 ));
             }
-            record(s, ctx, name, &args).await;
+            // Fail-closed: no tool call without its record.
+            if let Err(e) = record(s, ctx, name, &args).await {
+                if s.audit.settings().fail_mode() == crate::config::FailMode::Closed {
+                    return Some(error(
+                        id,
+                        -32603,
+                        &format!("not run: its audit record could not be stored ({e})"),
+                    ));
+                }
+            }
             let outcome = if change_tools().iter().any(|(_, t)| t["name"] == name) {
                 change(s, ctx, name, args.clone()).await
             } else {
@@ -392,14 +402,18 @@ fn strip_userinfo(text: &str) -> String {
 }
 
 /// Who asked what: every tool call is a record in the trail.
-async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
+async fn record(
+    s: &AppState,
+    ctx: &Caller,
+    tool: &str,
+    args: &Value,
+) -> Result<(), crate::audit::AuditError> {
     tracing::info!(user = %ctx.user.username, tool, "MCP tool call");
     let mut client = ctx.client.clone();
     if let Some(agent) = &ctx.agent {
         client.application_name = Some(format!("MCP · {agent}"));
     }
-    let _ = s
-        .audit
+    s.audit
         .record(
             AuditEntry::new(AuditEvent::McpQuery {
                 by: ctx.user.username.clone(),
@@ -409,7 +423,7 @@ async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
             })
             .client(client),
         )
-        .await;
+        .await
 }
 
 fn tools() -> Vec<Value> {

@@ -28,18 +28,11 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S17 | Info | A failed `mcp_query` record does not stop the tool call |
-| S18 | Info | `/mcp` tells unauthenticated callers whether MCP is on |
 | S19 | Info | Export status clamps `pending`, so a stalled export can look healthy |
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Info
 
-- **S17:** `record()` ignores a failure to write the `mcp_query` record, so
-  the tool call still runs. Consistent with fail-open; in fail-closed mode
-  the call should be refused.
-- **S18:** `/mcp` answers 404 "turned off" before authentication, so anyone
-  can tell whether MCP is on.
 - **S19:** export status clamps `pending`; `gap` and `last_error` do show a
   stall.
 - **S20:** the session token is `byte_string(32).value.unwrap_or_default()`;
