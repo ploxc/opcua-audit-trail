@@ -1254,3 +1254,40 @@ async fn own_certificate_as_pem() {
     assert!(pem.trim_end().ends_with("-----END CERTIFICATE-----"));
     assert!(pem.lines().all(|l| l.len() <= 64));
 }
+
+/// The page points at this build's scripts: a browser that cached an older
+/// build's cannot run them after an upgrade.
+#[tokio::test]
+async fn scripts_have_versioned_urls() {
+    let w = web().await;
+    let get = |uri: String| {
+        let app = w.app.clone();
+        async move {
+            let request = Request::get(uri)
+                .header(header::HOST, "localhost:8080")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            let cache = response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_string());
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (cache, String::from_utf8_lossy(&body).to_string())
+        }
+    };
+    let (cache, page) = get("/".into()).await;
+    assert_eq!(cache.as_deref(), Some("no-cache"));
+    let main = page
+        .split('"')
+        .find(|s| s.starts_with("/js/") && s.ends_with("/main.js"))
+        .unwrap()
+        .to_string();
+    assert_ne!(main, "/js/main.js", "{page}");
+    let (cache, source) = get(main.clone()).await;
+    assert!(cache.unwrap().contains("immutable"));
+    assert!(source.contains("import"));
+    // A module imported relatively from it is in the same versioned folder.
+    let (_, account) = get(main.replace("main.js", "pages/account.js")).await;
+    assert!(account.contains("tokensCard"));
+}

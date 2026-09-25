@@ -243,8 +243,31 @@ async fn security_headers(
     response
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("ui/index.html"))
+/// The page, pointing at this build's scripts and styles: their URLs carry a
+/// hash of the UI, so a browser never runs an older version after an
+/// upgrade (a relative import in a module keeps the versioned folder).
+async fn index() -> Html<String> {
+    let v = ui_version();
+    Html(
+        include_str!("ui/index.html")
+            .replace("/js/main.js", &format!("/js/{v}/main.js"))
+            .replace("/style.css", &format!("/style.css?v={v}")),
+    )
+}
+
+/// A short hash of every embedded script and the stylesheet.
+fn ui_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        for (name, source) in SCRIPTS {
+            hash.update(name.as_bytes());
+            hash.update(source.as_bytes());
+        }
+        hash.update(include_str!("ui/style.css").as_bytes());
+        hex::encode(&hash.finalize()[..6])
+    })
 }
 
 /// The UI's JavaScript modules (`ui/js/`, see ARCHITECTURE.md), by their path
@@ -274,13 +297,29 @@ const SCRIPTS: &[(&str, &str)] = &[
     ("pages/users.js", include_str!("ui/js/pages/users.js")),
 ];
 
+/// `/js/<version>/<module>`: cached for good, since a new build has a new
+/// version. `/js/<module>` (no version) is still served, not cached.
 async fn script(Path(path): Path<String>) -> Response {
+    let (path, versioned) = match path.split_once('/') {
+        Some((v, rest)) if v == ui_version() => (rest.to_string(), true),
+        _ => (path, false),
+    };
     match SCRIPTS.iter().find(|(name, _)| *name == path) {
-        Some((_, source)) => (
-            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-            *source,
-        )
-            .into_response(),
+        Some((_, source)) => {
+            let cache = if versioned {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                    (header::CACHE_CONTROL, cache),
+                ],
+                *source,
+            )
+                .into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
