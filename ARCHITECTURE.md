@@ -410,7 +410,8 @@ dependency out of the binary.
   check: a cross-site request cannot carry the bearer token.
 - **Read tools:** search the trail (the `/api/audit` filters), one record,
   the status, the most written nodes, verify.
-- **Change tools, per scope** (`targets`, `certificates`, `settings`):
+- **Change tools, per scope** (`targets`, `certificates`, `settings`, and
+  `alarms`, which needs only the operator role, as in the web UI):
   listed and callable only when the token was created with the
   scope (by an admin; stored with the token) and its user is still an
   admin; demoting the user clears the scopes for good. They call the web

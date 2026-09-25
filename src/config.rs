@@ -46,7 +46,16 @@ pub const WEB_TLS_ENV: &str = "OPCUA_GATEWAY_WEB_TLS";
 /// What an API token can be allowed to change through MCP (chosen when the
 /// token is created). The MCP settings themselves, API tokens and the web
 /// server are never among them.
-pub const MCP_SCOPES: [&str; 3] = ["targets", "certificates", "settings"];
+pub const MCP_SCOPES: [&str; 4] = ["targets", "certificates", "settings", "alarms"];
+
+/// The role a token's user needs for a scope: the same as in the web UI
+/// (operators acknowledge alarms; the rest is configuration, for admins).
+pub fn mcp_scope_role(scope: &str) -> crate::users::Role {
+    match scope {
+        "alarms" => crate::users::Role::Operator,
+        _ => crate::users::Role::Admin,
+    }
+}
 
 /// Copies of the audit trail outside the gateway. Every record carries its
 /// hash, so an external copy also anchors the local chain: rewriting the

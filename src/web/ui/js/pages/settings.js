@@ -252,7 +252,11 @@ export const SCOPE_LABELS = {
   targets: ["Targets", "add, change and remove PLCs; summarised nodes"],
   certificates: ["Certificates", "trust and untrust OPC UA certificates"],
   settings: ["Settings", "audit trail, export, certificate host names"],
+  alarms: ["Alarms", "acknowledge errors and warnings, after showing them to you"],
 };
+
+/** The role a token's user needs for a scope (as mcp_scope_role in config.rs). */
+export const scopeRole = (scope) => (scope === "alarms" ? "operator" : "admin");
 
 function mcpCard(m, off, save) {
   return html`<form class="card" data-form="settings-mcp">
