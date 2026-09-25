@@ -59,9 +59,8 @@ pub fn ensure_web_certificate(config: &Config) -> anyhow::Result<(X509, bool)> {
     let result = if let Some(cert) = existing {
         (cert, false)
     } else {
-        let (cert, _) = store
-            .create_and_store_application_instance_cert(&web_certificate_request(config), true)
-            .map_err(|e| anyhow!("generating the web UI certificate: {e}"))?;
+        let cert = crate::pki::create_own(&store, &web_certificate_request(config))
+            .context("generating the web UI certificate")?;
         (cert, true)
     };
     crate::pki::protect_private_key(&store);
@@ -72,9 +71,8 @@ pub fn ensure_web_certificate(config: &Config) -> anyhow::Result<(X509, bool)> {
 /// start of the gateway.
 pub fn regenerate_web_certificate(config: &Config) -> anyhow::Result<X509> {
     let store = web_store(config);
-    let (cert, _) = store
-        .create_and_store_application_instance_cert(&web_certificate_request(config), true)
-        .map_err(|e| anyhow!("generating the web UI certificate: {e}"))?;
+    let cert = crate::pki::create_own(&store, &web_certificate_request(config))
+        .context("generating the web UI certificate")?;
     crate::pki::protect_private_key(&store);
     Ok(cert)
 }

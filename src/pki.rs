@@ -58,6 +58,37 @@ pub fn cap_rejected(dir: &Path) {
 }
 
 /// Makes the private key readable by the service only.
+/// Generates a self-signed certificate with a new key and stores both as the
+/// store's own. The key is created with mode 0600 in a 0700 directory (never
+/// readable by others, whatever the umask) and written before the
+/// certificate, each file replaced in one step.
+pub(crate) fn create_own(store: &CertificateStore, args: &X509Data) -> anyhow::Result<X509> {
+    use base64::Engine;
+    let (cert, key) = X509::cert_and_pkey(args).map_err(|e| anyhow!("{e}"))?;
+    let der = key.to_der().map_err(|e| anyhow!("encoding the key: {e}"))?;
+    let body = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+    let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+    for line in body.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END PRIVATE KEY-----\n");
+    let key_path = store.own_private_key_path();
+    if let Some(dir) = key_path.parent() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir)?;
+    }
+    crate::fsutil::write_atomic(&key_path, pem.as_bytes(), Some(0o600))?;
+    let cert_der = cert
+        .to_der()
+        .map_err(|e| anyhow!("encoding certificate: {e}"))?;
+    crate::fsutil::write_atomic(&store.own_certificate_path(), &cert_der, Some(0o644))?;
+    Ok(cert)
+}
+
 /// Fails unless `key` is the private key of `cert` (a signature made with
 /// it verifies with the certificate's public key).
 pub(crate) fn check_key_pair(cert: &X509, key: &PrivateKey) -> anyhow::Result<()> {
@@ -138,11 +169,8 @@ impl Pki {
             if let (Ok(cert), Ok(_)) = (self.store.read_own_cert(), self.store.read_own_pkey()) {
                 (cert, false)
             } else {
-                let args = certificate_request(gateway);
-                let (cert, _key) = self
-                    .store
-                    .create_and_store_application_instance_cert(&args, false)
-                    .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
+                let cert = create_own(&self.store, &certificate_request(gateway))
+                    .context("generating gateway certificate")?;
                 (cert, true)
             };
         protect_private_key(&self.store);
@@ -226,10 +254,8 @@ impl Pki {
     /// pair is kept as `.bak`. Every PLC must then trust the new certificate.
     pub fn regenerate_own(&self, gateway: &GatewayConfig) -> anyhow::Result<X509> {
         self.backup_own()?;
-        let (cert, _key) = self
-            .store
-            .create_and_store_application_instance_cert(&certificate_request(gateway), true)
-            .map_err(|e| anyhow!("generating gateway certificate: {e}"))?;
+        let cert = create_own(&self.store, &certificate_request(gateway))
+            .context("generating gateway certificate")?;
         protect_private_key(&self.store);
         Ok(cert)
     }
@@ -346,6 +372,29 @@ fn list_dir(dir: &Path) -> Vec<CertificateInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_keys_are_never_readable_by_others() {
+        // Audit finding S11: created 0600 (in a 0700 directory), not
+        // chmod-ed afterwards; and the pair belongs together.
+        let dir = tempfile::tempdir().unwrap();
+        let store = CertificateStore::new(dir.path());
+        let cert = create_own(&store, &certificate_request(&GatewayConfig::default())).unwrap();
+        let key = store.read_own_pkey().unwrap();
+        check_key_pair(&cert, &key).unwrap();
+        assert_eq!(
+            store.read_own_cert().unwrap().thumbprint(),
+            cert.thumbprint()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            let key_path = store.own_private_key_path();
+            assert_eq!(mode(&key_path), 0o600);
+            assert_eq!(mode(key_path.parent().unwrap()), 0o700);
+        }
+    }
 
     #[test]
     fn generates_certificate_once() {

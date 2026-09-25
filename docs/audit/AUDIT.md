@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S11 | Low | Private keys are world-readable for a moment before `chmod 600` |
 | S12 | Low | An empty `OPCUA_GATEWAY_WEB_TLS` silently turns HTTPS off |
 | S13 | Low | The MCP scope `settings` can shorten retention (deleting history) and switch fail-closed off |
 | S14 | Low | A token's change scopes come back when its user is made admin again |
@@ -43,13 +42,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## Low
-
-### S11: Keys world-readable for a moment
-
-Private keys are written with the process umask and then set to 0600
-(`pki.rs` `protect_private_key`, `web/tls.rs`). The systemd unit sets
-`UMask=0077`; manual runs on shared hosts do not. **Fix:** create key files
-with mode 0600.
 
 ### S12: An empty environment value turns HTTPS off
 
