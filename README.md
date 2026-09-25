@@ -30,8 +30,7 @@ What it does today:
   with HTTPS.
 
 **[Manual](docs/manual/README.md)** for installation, setup and use;
-[ARCHITECTURE.md](ARCHITECTURE.md) for the design;
-[docs/audit](docs/audit/AUDIT.md) for the security audits.
+[ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
 ## Screenshots
 

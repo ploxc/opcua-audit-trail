@@ -451,7 +451,7 @@ dependency out of the binary.
   The relay milestone adds async-opcua clients on the other side, covering
   every security policy and mode.
 - Regression tests for the findings of the security audit
-  (`docs/audit/`), e.g. a write whose client disconnects before the response
+  (two reviews in 2026, all findings fixed), e.g. a write whose client disconnects before the response
   is still recorded.
 - Interoperability matrix, tested manually per release: Phoenix Contact PLCnext,
   Siemens S7-1500, Beckhoff TwinCAT (TF6100), Codesys-based runtimes; clients
@@ -491,4 +491,4 @@ dependency out of the binary.
 | UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |
 | Noisy nodes | Summarised per node and interval, never dropped silently; admin-only, audited, optionally per client |
-| Security review | Two reviews; `docs/audit/AUDIT.md` lists the findings still open (fixed ones are removed, see the git history) and the accepted ones |
+| Security review | Two reviews (2026); every finding fixed, with regression tests. The findings and accepted items are in the git history (`docs/audit/AUDIT.md`, removed after the last fix) |
