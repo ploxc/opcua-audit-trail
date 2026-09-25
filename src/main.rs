@@ -272,6 +272,43 @@ fn init(path: &Path) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The first admin password: `OPCUA_GATEWAY_ADMIN_PASSWORD` when set, else a
+/// random one printed once to stdout (`docker compose logs gateway`), never
+/// to a log file. Either way it must be changed at the first login.
+fn create_initial_admin(users: &UserStore) -> anyhow::Result<()> {
+    let from_env = std::env::var(ADMIN_PASSWORD_ENV)
+        .ok()
+        .filter(|p| !p.is_empty());
+    match from_env {
+        Some(password) => {
+            users
+                .create_initial_admin(&password)
+                .context(ADMIN_PASSWORD_ENV)?;
+            tracing::warn!(
+                "created web UI user 'admin' with the password from {ADMIN_PASSWORD_ENV}; \
+                 it must be changed at the first login"
+            );
+        }
+        None => {
+            let password = users::random_password();
+            users.create_initial_admin(&password)?;
+            println!(
+                "\n  Web UI first login: admin / {password}\n  \
+                 (shown once; it must be changed at the first login. Lost it? \
+                 opcua-audit-gateway user passwd admin)\n"
+            );
+            tracing::warn!(
+                "created web UI user 'admin'; its first password is printed on the console \
+                 (stdout) only, and must be changed at the first login"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Environment variable with the first admin password (min. 8 characters).
+const ADMIN_PASSWORD_ENV: &str = "OPCUA_GATEWAY_ADMIN_PASSWORD";
+
 fn user_store(config: &Config) -> anyhow::Result<UserStore> {
     UserStore::open(&config.gateway.data_dir.join("gateway.db"))
 }
@@ -381,12 +418,7 @@ async fn run(
 
     let users = Arc::new(user_store(&config)?);
     if users.count()? == 0 {
-        users.create_default_admin()?;
-        tracing::warn!(
-            "created web UI user 'admin' with password '{}'; it must be changed at the \
-             first login (or: opcua-audit-gateway user passwd admin)",
-            users::DEFAULT_ADMIN_PASSWORD
-        );
+        create_initial_admin(&users)?;
         let _ = audit
             .record(AuditEntry::new(AuditEvent::ConfigChanged {
                 by: "gateway".into(),

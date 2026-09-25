@@ -62,4 +62,5 @@ systemctl enable opcua-audit-gateway >/dev/null
 systemctl restart opcua-audit-gateway
 
 echo "started. Status: systemctl status opcua-audit-gateway"
-echo "first login on a new install: admin / admin (you must change the password)"
+echo "first login on a new install: admin, with the password printed once at the first start:"
+echo "  journalctl -u opcua-audit-gateway | grep 'first login'   (you must change it)"

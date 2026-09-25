@@ -300,8 +300,10 @@ embedded, so the UI needs no internet access.
   request (changing a password, role or removing a user ends them), expire
   after 8 hours idle and 24 hours in total. Every state-changing request needs a custom header
   (CSRF protection). Logins are rate limited per address and per user. The
-  first start creates `admin` with password `admin`, which must be changed
-  at the first login before anything else is allowed.
+  first start creates `admin` with the password in
+  `OPCUA_GATEWAY_ADMIN_PASSWORD`, or a random one printed once to stdout (not
+  to a log file); it must be changed at the first login before anything else
+  is allowed. There is no well-known default password.
   UI logins and every change made through the UI are audited. HTTPS with
   rustls (`ring` provider), using the gateway certificate or PEM files; with
   TLS the cookie is `__Host-` prefixed and `Secure`, and HSTS is sent.

@@ -102,7 +102,7 @@ cargo run -- init                                  # config.toml + certificate
 #   name = "line1"
 #   listen = "0.0.0.0:4841"
 #   endpoint_url = "opc.tcp://127.0.0.1:4840/"
-cargo run -- run                                   # first login: admin / admin
+cargo run -- run                                   # prints the first admin password
 cargo run --example demo_client -- opc.tcp://127.0.0.1:4841/
 ```
 
@@ -137,7 +137,7 @@ cargo build --release
 ./target/release/opcua-audit-gateway discover opc.tcp://192.168.0.10:4840
 # add a [[targets]] block to config.toml, then:
 ./target/release/opcua-audit-gateway run         # web UI on http://127.0.0.1:8080
-                                                 # (first login: admin / admin)
+                                                 # (prints the first admin password)
 ./target/release/opcua-audit-gateway verify      # check the audit trail's hash chain
 ```
 
@@ -201,7 +201,9 @@ sudo ./install.sh ./opcua-audit-gateway
 sudo nano /etc/opcua-audit-gateway/config.toml    # or add targets in the web UI
 ```
 
-The web UI is on http://127.0.0.1:8080; the first login is `admin` / `admin`.
+The web UI is on http://127.0.0.1:8080. The first login is `admin` with the
+password printed once at the first start:
+`sudo journalctl -u opcua-audit-gateway | grep "first login"`.
 
 The service runs as the unprivileged user `opcua-gw` with a hardened unit.
 Data, certificates and the audit trail live in `/var/lib/opcua-audit-gateway`.
@@ -224,8 +226,9 @@ The service runs under its own virtual account
 (`NT SERVICE\OpcUaAuditGateway`), not as LocalSystem. `service install`
 restricts the config, data, certificate and log directories to that account,
 SYSTEM and administrators; don't point them at shared directories. Logs go to
-`logs` next to the config (daily files, kept 14 days). The first login is
-`admin` / `admin`.
+`logs` next to the config (daily files, kept 14 days). A service has no
+console for the first admin password, so set it before `sc start`:
+`& $exe --config "…\config.toml" user passwd admin`.
 `service uninstall` removes the service; install it again after an upgrade
 from a version that ran as LocalSystem. Any command accepts `--log-dir` to log
 to files instead of the console.
@@ -257,7 +260,9 @@ docker compose up -d
 ```
 
 The web UI is on https://127.0.0.1:8080 (HTTPS with the gateway certificate:
-accept it once in the browser); the first login is `admin` / `admin`.
+accept it once in the browser). The first login is `admin` with the
+password printed once at the first start (`docker compose logs gateway`), or
+the one in `OPCUA_GATEWAY_ADMIN_PASSWORD` (see `docker-compose.yml`).
 In a checkout, `docker compose build` builds the image from the source instead.
 
 Everything (config, certificates, users, audit trail) lives in the `/data`

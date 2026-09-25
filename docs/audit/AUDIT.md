@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| W6 | High | A fresh install accepts `admin` / `admin`, and whoever logs in first owns the gateway |
 | S1 | High | The MCP scope `users` amounts to full admin |
 | S2 | High | Changing the export URL sends the stored credentials and the whole trail to the new host |
 | S3 | Medium | API tokens survive a password reset; an admin cannot revoke another user's tokens |
@@ -55,25 +54,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## High
-
-### W6: A fresh install accepts `admin` / `admin`
-
-- **Issue:** the first start creates `admin` with the public password
-  `admin` (`users.rs` `DEFAULT_ADMIN_PASSWORD`). The forced change needs no
-  current password (`auth.rs` `change_password`, `if !forced`), so whoever
-  logs in first chooses the password and owns the gateway: targets, trust,
-  users, MCP. This regressed in `1b004e2`; before, a random password went to
-  a 0600 file.
-- **Scenario:** the compose file publishes the UI on `127.0.0.1` only, but
-  `docker run -p 8080:8080`, the compose comment about remote access, or a
-  binary with `listen = "0.0.0.0:…"` exposes the login. Published Docker
-  ports bypass the host firewall. A client-address check cannot help inside
-  Docker (connections come from the bridge).
-- **Recommendation:** no known default password. Use
-  `OPCUA_GATEWAY_ADMIN_PASSWORD` (shown in `docker-compose.yml`) as the first
-  password when set; otherwise generate a random one and print it once to
-  the console (`docker compose logs gateway`), not to a log file. Keep the
-  forced change and `user passwd admin`.
 
 ### S1: The MCP scope `users` amounts to full admin
 
