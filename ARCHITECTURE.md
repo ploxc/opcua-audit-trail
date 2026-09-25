@@ -381,14 +381,15 @@ need, and it keeps an SDK dependency out of the binary.
   check: a cross-site request cannot carry the bearer token.
 - **Read tools:** search the trail (the `/api/audit` filters), one record,
   the status, the most written nodes, verify.
-- **Change tools, per scope** (`targets`, `certificates`, `settings`,
-  `users`): listed and callable only when the token was created with the
+- **Change tools, per scope** (`targets`, `certificates`, `settings`):
+  listed and callable only when the token was created with the
   scope (by an admin; stored with the token) and its user is still an
   admin. They call the web API's handlers
   with the token's user, so role checks, validation and `config_changed`
   records are the same; the record's `by` says "via MCP, token <id>". None
-  writes to a PLC, and MCP settings, tokens and the web server are not
-  reachable. Password and token arguments are hidden in `mcp_query`.
+  writes to a PLC, and users, MCP settings, tokens and the web server are
+  not reachable (a `users` scope existed once; stored tokens that still have
+  it keep their other scopes). Password and token arguments are hidden in `mcp_query`.
 - **Audited:** every tool call is an `mcp_query` record with the user, the
   token id (never the secret), the tool and its arguments.
 

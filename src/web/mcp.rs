@@ -37,8 +37,8 @@ questions like 'who changed Line1.Setpoint yesterday' (event type 'write'; \
 the record has the old and new value, the client's address, application and \
 login). Times are UTC. gateway_status shows the targets (PLCs), whether they \
 are reachable and which clients are connected. If this token may change the \
-configuration, tools for that are listed too (targets, certificates, settings, \
-users): explain what you will change and get the user's confirmation first. \
+configuration, tools for that are listed too (targets, certificates, \
+settings): explain what you will change and get the user's confirmation first. \
 Nothing here writes values to a PLC.";
 
 /// POST /mcp: one JSON-RPC message (or a batch).
@@ -609,7 +609,7 @@ async fn call(s: &AppState, tool: &str, args: &Value) -> anyhow::Result<Value> {
 // Tools that change the gateway's configuration, per scope. They call the
 // web API's handlers, so they check the same role, validate the same way and
 // record the same `config_changed` records (with "via MCP, token …"). None
-// writes to a PLC, and none changes MCP, API tokens or the web server.
+// writes to a PLC, and none changes users, MCP, API tokens or the web server.
 
 /// A change tool: its name, what it does, and its arguments.
 fn change_tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -661,7 +661,6 @@ fn change_tools() -> Vec<(&'static str, Value)> {
     let mut rule_add = rule.clone();
     rule_add["name"] = text("Display name, for people reading the list.");
     let thumbprint = json!({"thumbprint": text("The certificate's SHA-1 thumbprint (hex).")});
-    let role = json!({"type": "string", "enum": ["admin", "operator", "auditor"]});
     vec![
         (
             "targets",
@@ -826,39 +825,6 @@ fn change_tools() -> Vec<(&'static str, Value)> {
                 &["certificate_hostnames"],
             ),
         ),
-        (
-            "users",
-            scope_read_tool("list_users", "The web UI users and their roles.", json!({})),
-        ),
-        (
-            "users",
-            change_tool(
-                "create_user",
-                "Creates a web UI user. They must choose a new password at the first login.",
-                json!({"username": text("Letters, digits and . _ - @"),
-                   "password": text("At least 8 characters."), "role": role}),
-                &["username", "password", "role"],
-            ),
-        ),
-        (
-            "users",
-            change_tool(
-                "update_user",
-                "Changes a user's role and/or password; their sessions end.",
-                json!({"username": text("The user."), "role": role,
-                   "password": text("New password, at least 8 characters.")}),
-                &["username"],
-            ),
-        ),
-        (
-            "users",
-            change_tool(
-                "delete_user",
-                "Deletes a user and their API tokens. The last admin cannot be deleted.",
-                json!({"username": text("The user.")}),
-                &["username"],
-            ),
-        ),
     ]
 }
 
@@ -961,17 +927,6 @@ async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::
         }
         "update_certificate_hostnames" => {
             reply(super::settings::put_gateway(st(), user, Json(arg(&args)?)).await).await
-        }
-        "list_users" => reply(super::list_users(st(), user).await).await,
-        "create_user" => reply(super::create_user(st(), user, Json(arg(&args)?)).await).await,
-        "update_user" => {
-            let name = required(&args, "username")?;
-            let body = overlay(json!({}), &args, &["username"]);
-            reply(super::update_user(st(), user, Path(name), Json(arg(&body)?)).await).await
-        }
-        "delete_user" => {
-            let name = required(&args, "username")?;
-            reply(super::delete_user(st(), user, Path(name)).await).await
         }
         other => anyhow::bail!("unknown tool '{other}'"),
     }

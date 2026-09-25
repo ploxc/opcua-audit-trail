@@ -46,7 +46,7 @@ pub const WEB_TLS_ENV: &str = "OPCUA_GATEWAY_WEB_TLS";
 /// What an API token can be allowed to change through MCP (chosen when the
 /// token is created). The MCP settings themselves, API tokens and the web
 /// server are never among them.
-pub const MCP_SCOPES: [&str; 4] = ["targets", "certificates", "settings", "users"];
+pub const MCP_SCOPES: [&str; 3] = ["targets", "certificates", "settings"];
 
 /// Copies of the audit trail outside the gateway. Every record carries its
 /// hash, so an external copy also anchors the local chain: rewriting the

@@ -465,7 +465,8 @@ clients, unacknowledged warnings, exports), `most_written_nodes` and
 
 An assistant can also help configure the gateway. What a token may change
 is chosen when an admin creates it (Account page), per area: targets,
-certificates, settings (audit, export, certificate host names), users. A
+certificates, settings (audit, export, certificate host names). Users are
+managed only in the web UI and on the command line. A
 token with nothing ticked only reads, so a leaked read token cannot change
 anything; the MCP switch in Settings stops every token at once.
 
@@ -473,8 +474,8 @@ The assistant then sees tools such as `add_target`, `update_target`,
 `trust_server_certificate` or `update_audit_settings`. They go through the
 same checks as the web UI and are recorded as `config_changed` "via MCP"
 with the token's id; passwords in their arguments are not recorded.
-Assistants never write values to a PLC, and never change the MCP settings,
-API tokens or the web server. Every tool call is recorded in the trail as
+Assistants never write values to a PLC, and never change users, the MCP
+settings, API tokens or the web server. Every tool call is recorded in the trail as
 `mcp_query`, with the token's user and the arguments. Tokens are stored as a
 SHA-256 hash; delete one on the Account page, and deleting a user deletes
 theirs. The endpoint does not accept the web UI's session cookie. Turning

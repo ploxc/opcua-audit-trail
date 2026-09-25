@@ -1214,21 +1214,39 @@ async fn mcp_changes_need_token_scope_and_admin() {
         .await;
     assert!(records.to_string().contains("via MCP"), "{records}");
 
-    // A user's password never lands in the trail.
-    let users = token(admin.clone(), json!(["users"])).await;
-    let (_, created) = w
+    // A password never lands in the trail.
+    let settings = token(admin.clone(), json!(["settings"])).await;
+    let (_, _) = w
         .mcp(
-            &users,
+            &settings,
             call(
-                "create_user",
-                json!({"username": "bot", "password": "secret-pass-1",
-                                       "role": "auditor"}),
+                "update_export_settings",
+                json!({"questdb": {"url": "http://127.0.0.1:1", "table": "t",
+                                   "username": "u", "password": "secret-pass-1",
+                                   "interval_secs": 5}}),
             ),
         )
         .await;
-    assert_eq!(created["result"]["isError"], false, "{created}");
     let (_, queries) = w.get("/api/audit?kind=mcp_query&limit=50", &admin).await;
+    assert!(queries.to_string().contains("update_export_settings"));
     assert!(!queries.to_string().contains("secret-pass-1"));
+
+    // Audit finding S1: there is no users scope, and no user tools.
+    let (status, _) = w
+        .post(
+            "/api/me/tokens",
+            &admin,
+            json!({ "name": "t", "scopes": ["users"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let all = token(
+        admin.clone(),
+        json!(["targets", "certificates", "settings"]),
+    )
+    .await;
+    let tools = names(w.mcp(&all, list.clone()).await.1);
+    assert!(tools.iter().all(|t| !t.contains("user")), "{tools:?}");
 
     // Only an admin can give a token permissions.
     let auditor = w.login("auditor").await;

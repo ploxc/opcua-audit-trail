@@ -548,9 +548,11 @@ fn random_hex(bytes: usize) -> String {
     hex::encode(buf)
 }
 
+/// The stored scopes that still exist: a scope that was removed (`users`)
+/// is ignored, the token keeps its other scopes.
 fn split_scopes(s: &str) -> Vec<String> {
     s.split(',')
-        .filter(|x| !x.is_empty())
+        .filter(|x| crate::config::MCP_SCOPES.contains(x))
         .map(String::from)
         .collect()
 }
@@ -668,6 +670,29 @@ mod tests {
         assert!(admin.must_change_password);
         assert!(users.verify("admin", "admin").unwrap().is_none());
         assert!(users.create_initial_admin("other-password").is_err());
+    }
+
+    #[test]
+    fn removed_scope_is_ignored() {
+        // Audit finding S1: tokens stored with the removed `users` scope keep
+        // working with their other scopes.
+        let (_dir, users) = store();
+        users.create("a", "a-password", Role::Admin).unwrap();
+        let token = users
+            .create_token("a", "t", &["targets".to_string()])
+            .unwrap();
+        users
+            .conn
+            .lock()
+            .execute("UPDATE api_tokens SET scopes = 'targets,users'", [])
+            .unwrap();
+        let (user, scopes) = users.verify_token(&token.secret).unwrap().unwrap();
+        assert_eq!(user, "a");
+        assert_eq!(scopes, vec!["targets".to_string()]);
+        assert_eq!(
+            users.tokens("a").unwrap()[0].scopes,
+            vec!["targets".to_string()]
+        );
     }
 
     #[test]

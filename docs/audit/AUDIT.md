@@ -28,7 +28,6 @@ claims checked against the code again. No proof-of-concept exploits.
 
 | ID | Severity | Title |
 |---|---|---|
-| S1 | High | The MCP scope `users` amounts to full admin |
 | S2 | High | Changing the export URL sends the stored credentials and the whole trail to the new host |
 | S3 | Medium | API tokens survive a password reset; an admin cannot revoke another user's tokens |
 | S4 | Medium | MCP accepts unbounded JSON-RPC batches |
@@ -54,18 +53,6 @@ claims checked against the code again. No proof-of-concept exploits.
 | S20 | Info | A failed random generator would give an empty session token |
 
 ## High
-
-### S1: The MCP scope `users` amounts to full admin
-
-- **Issue:** `create_user` and `update_user` through MCP only need the
-  admin role (`mod.rs` `create_user`, `update_user`). A token with `users`
-  can create an admin or reset another admin's password, log in to the web
-  UI with it and create tokens with every scope, switch MCP settings, and
-  lock the real admin out. So "an assistant never changes MCP settings or
-  tokens" does not hold.
-- **Recommendation:** remove the `users` scope and its tools
-  (`list_users`, `create_user`, `update_user`, `delete_user`). User
-  management stays in the web UI and the CLI.
 
 ### S2: Changing the export URL sends the stored credentials to the new host
 

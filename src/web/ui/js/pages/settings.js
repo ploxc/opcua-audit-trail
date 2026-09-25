@@ -251,7 +251,6 @@ export const SCOPE_LABELS = {
   targets: ["Targets", "add, change and remove PLCs; summarised nodes"],
   certificates: ["Certificates", "trust and untrust OPC UA certificates"],
   settings: ["Settings", "audit trail, export, certificate host names"],
-  users: ["Users", "create, change and delete web UI users"],
 };
 
 function mcpCard(m, off, save) {
