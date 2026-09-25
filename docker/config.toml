@@ -6,6 +6,11 @@
 application_name = "OPC UA Audit Gateway"
 pki_dir = "/data/pki"
 data_dir = "/data"
+# Fixed: the default contains the host name, which is a new random container
+# ID after every `docker compose up` that recreates the container. The
+# certificate would then no longer match and PLCs refuse it
+# (BadCertificateUriInvalid).
+application_uri = "urn:opcua-audit-gateway:docker"
 # The container cannot see the host's name or IP: list what clients use.
 # certificate_hostnames = ["gateway.local", "192.168.0.20"]
 
