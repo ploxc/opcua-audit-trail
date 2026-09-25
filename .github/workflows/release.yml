@@ -39,7 +39,7 @@ jobs:
           version="${GITHUB_REF_NAME//\//-}"
           name=opcua-audit-gateway-$version-linux-${{ matrix.arch }}
           mkdir -p "$name"
-          cp target/${{ matrix.target }}/release/opcua-audit-gateway README.md ARCHITECTURE.md LICENSE "$name"/
+          cp target/${{ matrix.target }}/release/opcua-audit-gateway README.md CHANGELOG.md ARCHITECTURE.md LICENSE "$name"/
           mkdir -p "$name/docs" && cp -r docs/manual "$name/docs/"
           cp packaging/linux/* "$name"/
           tar czf "$name.tar.gz" "$name"
@@ -64,7 +64,7 @@ jobs:
           $version = $env:GITHUB_REF_NAME -replace '/', '-'
           $name = "opcua-audit-gateway-$version-windows-x86_64"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target/release/opcua-audit-gateway.exe, README.md, ARCHITECTURE.md, LICENSE $name
+          Copy-Item target/release/opcua-audit-gateway.exe, README.md, CHANGELOG.md, ARCHITECTURE.md, LICENSE $name
           New-Item -ItemType Directory "$name/docs" | Out-Null; Copy-Item -Recurse docs/manual "$name/docs/"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -94,7 +94,7 @@ jobs:
           version="${GITHUB_REF_NAME//\//-}"
           name=opcua-audit-gateway-$version-macos-${{ matrix.arch }}
           mkdir -p "$name"
-          cp target/${{ matrix.target }}/release/opcua-audit-gateway README.md ARCHITECTURE.md LICENSE "$name"/
+          cp target/${{ matrix.target }}/release/opcua-audit-gateway README.md CHANGELOG.md ARCHITECTURE.md LICENSE "$name"/
           mkdir -p "$name/docs" && cp -r docs/manual "$name/docs/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -122,36 +122,13 @@ jobs:
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/*
-          generate_release_notes: true
-          # Above the generated notes. The macOS binaries are not signed.
+          # The notes are in CHANGELOG.md, written and reviewed before the tag.
           body: |
-            ### macOS
+            What changed: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md).
 
-            The binaries are not signed or notarized: after unpacking, remove
-            the quarantine flag and make the file executable.
-
-            ```sh
-            tar xzf opcua-audit-gateway-*-macos-arm64.tar.gz && cd opcua-audit-gateway-*
-            xattr -d com.apple.quarantine opcua-audit-gateway   # "No such xattr" is fine
-            chmod +x opcua-audit-gateway
-            ```
-
-            Use the `x86_64` archive on an Intel Mac.
-
-            ### Docker
-
-            Download `docker-compose.yml` from the assets below, then:
-
-            ```sh
-            docker compose up -d
-            ```
-
-            The web UI is on https://127.0.0.1:8080. The first login is admin
-            with the password printed once at the first start
-            (`docker compose logs gateway`), or the one set in
-            `OPCUA_GATEWAY_ADMIN_PASSWORD`; then choose a new one. The image is
-            `ghcr.io/ploxc/opcua-audit-trail` (linux/amd64, arm64, arm/v7).
-
+            Installation: the [manual](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/manual/README.md)
+            (Docker: download `docker-compose.yml` below, then `docker compose up -d`).
+            The image is `ghcr.io/${{ github.repository }}` (linux/amd64, arm64, arm/v7).
             Checksums are in `SHA256SUMS`.
 
   image:
