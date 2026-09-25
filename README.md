@@ -441,10 +441,26 @@ only.
    is on the Certificates page) and start the assistant with
    `NODE_EXTRA_CA_CERTS=gateway.pem`.
 
-The tools only read: `search_audit_trail` (the same filters as the Audit
+Every token can read: `search_audit_trail` (the same filters as the Audit
 trail page), `get_audit_record`, `gateway_status` (targets, connected
 clients, unacknowledged warnings, exports), `most_written_nodes` and
-`verify_audit_trail`. Every tool call is recorded in the trail as
+`verify_audit_trail`.
+
+An assistant can also help configure the gateway, if all three allow it:
+
+1. **The gateway** (Settings, "Assistants may also change"): the most any
+   token may change, per area: targets, certificates, settings (audit,
+   export, certificate host names), users.
+2. **The token**, chosen when it is created: a part of that. A token with
+   nothing ticked only reads, so a leaked read token cannot change anything.
+3. **The token's user** must be an admin.
+
+The assistant then sees tools such as `add_target`, `update_target`,
+`trust_server_certificate` or `update_audit_settings`. They go through the
+same checks as the web UI and are recorded as `config_changed` "via MCP"
+with the token's id; passwords in their arguments are not recorded.
+Assistants never write values to a PLC, and never change the MCP settings,
+API tokens or the web server. Every tool call is recorded in the trail as
 `mcp_query`, with the token's user and the arguments. Tokens are stored as a
 SHA-256 hash; delete one on the Account page, and deleting a user deletes
 theirs. The endpoint does not accept the web UI's session cookie. Turning

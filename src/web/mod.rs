@@ -53,11 +53,11 @@ pub struct AppState {
 impl AppState {
     /// Records a configuration change made through the UI.
     async fn config_changed(&self, user: &AuthUser, summary: String) {
-        tracing::info!(user = %user.username, "{summary}");
+        tracing::info!(user = %user.actor(), "{summary}");
         let _ = self
             .audit
             .record_committed(AuditEntry::new(AuditEvent::ConfigChanged {
-                by: user.username.clone(),
+                by: user.actor(),
                 summary,
             }))
             .await;
@@ -639,7 +639,7 @@ async fn discover_url(
     let _ = s
         .audit
         .record_committed(AuditEntry::new(AuditEvent::Discovery {
-            by: user.username.clone(),
+            by: user.actor(),
             endpoint_url: crate::audit::event::clip(&req.endpoint_url, 1024),
         }))
         .await;
@@ -1107,6 +1107,9 @@ async fn list_tokens(
 #[derive(Deserialize)]
 struct NewToken {
     name: String,
+    /// What the token may change through MCP; empty: read only.
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 /// Creates a token; its secret is in this answer only.
@@ -1117,12 +1120,17 @@ async fn create_token(
 ) -> ApiResult<crate::users::NewApiToken> {
     let token = s
         .users
-        .create_token(&user.username, &req.name)
+        .create_token(&user.username, &req.name, &req.scopes)
         .map_err(ApiError::bad_request)?;
+    let access = if token.token.scopes.is_empty() {
+        "read only".to_string()
+    } else {
+        format!("may change {}", token.token.scopes.join(", "))
+    };
     s.config_changed(
         &user,
         format!(
-            "created API token '{}' ({})",
+            "created API token '{}' ({}, {access})",
             token.token.name, token.token.id
         ),
     )

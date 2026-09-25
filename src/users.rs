@@ -121,6 +121,18 @@ impl UserStore {
                 last_used  TEXT
             );",
         )?;
+        // What the token may change through MCP (comma separated scopes),
+        // added later.
+        let scopes: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('api_tokens') WHERE name = 'scopes'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !scopes {
+            conn.execute_batch(
+                "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT ''",
+            )?;
+        }
         // Columns added later.
         for (column, definition) in [
             ("session_epoch", "INTEGER NOT NULL DEFAULT 0"),
@@ -362,11 +374,25 @@ impl UserStore {
 
     /// Creates an API token for a user. Returns it with its secret, which is
     /// shown once and not stored.
-    pub fn create_token(&self, username: &str, name: &str) -> anyhow::Result<NewApiToken> {
+    pub fn create_token(
+        &self,
+        username: &str,
+        name: &str,
+        scopes: &[String],
+    ) -> anyhow::Result<NewApiToken> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 64 {
             bail!("a token needs a name of 1 to 64 characters");
         }
+        if let Some(bad) = scopes
+            .iter()
+            .find(|s| !crate::config::MCP_SCOPES.contains(&s.as_str()))
+        {
+            bail!("unknown scope '{bad}'");
+        }
+        let mut scopes = scopes.to_vec();
+        scopes.sort();
+        scopes.dedup();
         let id = random_hex(6);
         let secret = format!("gwt_{id}_{}", random_hex(32));
         let conn = self.conn.lock();
@@ -380,14 +406,22 @@ impl UserStore {
         }
         let created_at = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO api_tokens (id, username, name, hash, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, username, name, token_hash(&secret), created_at],
+            "INSERT INTO api_tokens (id, username, name, hash, created_at, scopes) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                username,
+                name,
+                token_hash(&secret),
+                created_at,
+                scopes.join(",")
+            ],
         )?;
         Ok(NewApiToken {
             token: ApiToken {
                 id,
                 name: name.to_string(),
+                scopes,
                 created_at,
                 last_used: None,
             },
@@ -398,7 +432,7 @@ impl UserStore {
     pub fn tokens(&self, username: &str) -> anyhow::Result<Vec<ApiToken>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, created_at, last_used FROM api_tokens \
+            "SELECT id, name, created_at, last_used, scopes FROM api_tokens \
              WHERE username = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([username], |r| {
@@ -407,6 +441,7 @@ impl UserStore {
                 name: r.get(1)?,
                 created_at: r.get(2)?,
                 last_used: r.get(3)?,
+                scopes: split_scopes(&r.get::<_, String>(4)?),
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -429,8 +464,9 @@ impl UserStore {
         Ok(name)
     }
 
-    /// The user a token belongs to, if it is valid; notes its use.
-    pub fn verify_token(&self, secret: &str) -> anyhow::Result<Option<String>> {
+    /// The user a token belongs to and its scopes, if it is valid; notes
+    /// its use.
+    pub fn verify_token(&self, secret: &str) -> anyhow::Result<Option<(String, Vec<String>)>> {
         // gwt_<12 hex id>_<64 hex secret>
         let Some(id) = secret
             .strip_prefix("gwt_")
@@ -440,14 +476,14 @@ impl UserStore {
             return Ok(None);
         };
         let conn = self.conn.lock();
-        let row: Option<(String, String)> = conn
+        let row: Option<(String, String, String)> = conn
             .query_row(
-                "SELECT username, hash FROM api_tokens WHERE id = ?1",
+                "SELECT username, hash, scopes FROM api_tokens WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((username, hash)) = row else {
+        let Some((username, hash, scopes)) = row else {
             return Ok(None);
         };
         if !constant_time_eq(hash.as_bytes(), token_hash(secret).as_bytes()) {
@@ -457,7 +493,7 @@ impl UserStore {
             "UPDATE api_tokens SET last_used = ?1 WHERE id = ?2",
             params![Utc::now().to_rfc3339(), id],
         )?;
-        Ok(Some(username))
+        Ok(Some((username, split_scopes(&scopes))))
     }
 
     /// Refuses changes that would leave nobody able to administer the gateway.
@@ -494,6 +530,8 @@ impl UserStore {
 pub struct ApiToken {
     pub id: String,
     pub name: String,
+    /// What the token may change through MCP; empty: read only.
+    pub scopes: Vec<String>,
     pub created_at: String,
     pub last_used: Option<String>,
 }
@@ -511,6 +549,13 @@ fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     OsRng.fill_bytes(&mut buf);
     hex::encode(buf)
+}
+
+fn split_scopes(s: &str) -> Vec<String> {
+    s.split(',')
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn token_hash(secret: &str) -> String {

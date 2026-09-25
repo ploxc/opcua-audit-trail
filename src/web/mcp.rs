@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
-use super::auth::ClientAddr;
+use super::auth::{AuthUser, ClientAddr};
 use super::AppState;
 use crate::audit::event::{clip, ClientContext, MAX_TEXT};
 use crate::audit::store::{AuditQuery, StoredRecord};
@@ -36,7 +36,10 @@ a tamper-evident audit trail (a hash chain). Use search_audit_trail to answer \
 questions like 'who changed Line1.Setpoint yesterday' (event type 'write'; \
 the record has the old and new value, the client's address, application and \
 login). Times are UTC. gateway_status shows the targets (PLCs), whether they \
-are reachable and which clients are connected. Everything here is read-only.";
+are reachable and which clients are connected. If this token may change the \
+configuration, tools for that are listed too (targets, certificates, settings, \
+users): explain what you will change and get the user's confirmation first. \
+Nothing here writes values to a PLC.";
 
 /// POST /mcp: one JSON-RPC message (or a batch).
 pub async fn post(
@@ -78,7 +81,18 @@ pub async fn post(
         application_name: Some("MCP".into()),
         ..Default::default()
     };
+    let allow = s.targets.config().await.mcp.allow;
+    let changes = if user.role >= Role::Admin {
+        user.scopes
+            .iter()
+            .filter(|scope| allow.contains(scope))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     let ctx = Caller {
+        changes,
         user,
         client,
         agent: headers
@@ -125,12 +139,42 @@ pub async fn not_allowed() -> Response {
 struct TokenUser {
     username: String,
     token: String,
+    role: Role,
+    /// What the token may change (before the gateway's own limit).
+    scopes: Vec<String>,
 }
 
 struct Caller {
     user: TokenUser,
     client: ClientContext,
     agent: Option<String>,
+    /// What this caller may change: the token's scopes that the gateway
+    /// allows (Settings), and only for an admin. Empty: read only.
+    changes: Vec<String>,
+}
+
+impl Caller {
+    /// The token's user for the web API handlers, marked as acting via MCP.
+    fn auth_user(&self) -> AuthUser {
+        AuthUser {
+            username: self.user.username.clone(),
+            role: self.user.role,
+            must_change_password: false,
+            via_token: Some(self.user.token.clone()),
+        }
+    }
+
+    /// The tools this caller sees and may call.
+    fn tools(&self) -> Vec<Value> {
+        let mut all = tools();
+        all.extend(
+            change_tools()
+                .into_iter()
+                .filter(|(scope, _)| self.changes.iter().any(|c| c == scope))
+                .map(|(_, tool)| tool),
+        );
+        all
+    }
 }
 
 /// The token's user, if the token is valid and the user may read the trail.
@@ -141,7 +185,7 @@ fn authenticate(s: &AppState, headers: &HeaderMap) -> Option<TokenUser> {
         .ok()?
         .strip_prefix("Bearer ")?
         .trim();
-    let username = match s.users.verify_token(secret) {
+    let (username, scopes) = match s.users.verify_token(secret) {
         Ok(Some(u)) => u,
         Ok(None) => {
             tracing::warn!("MCP request with an unknown API token");
@@ -158,7 +202,12 @@ fn authenticate(s: &AppState, headers: &HeaderMap) -> Option<TokenUser> {
     }
     // The id part only: never the secret.
     let token = secret.split('_').nth(1).unwrap_or_default().to_string();
-    Some(TokenUser { username, token })
+    Some(TokenUser {
+        username,
+        token,
+        role: state.role,
+        scopes,
+    })
 }
 
 fn error(id: Value, code: i64, message: &str) -> Value {
@@ -198,12 +247,18 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
             )
         }
         "ping" => result(id, json!({})),
-        "tools/list" => result(id, json!({"tools": tools()})),
+        "tools/list" => result(id, json!({"tools": ctx.tools()})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let Some(tool) = tools().into_iter().find(|t| t["name"] == name) else {
-                return Some(error(id, -32602, &format!("unknown tool '{name}'")));
+            let Some(tool) = ctx.tools().into_iter().find(|t| t["name"] == name) else {
+                let hint = if change_tools().iter().any(|(_, t)| t["name"] == name) {
+                    " (this token may not use it: see the token's permissions and the \
+                     gateway's Settings)"
+                } else {
+                    ""
+                };
+                return Some(error(id, -32602, &format!("unknown tool '{name}'{hint}")));
             };
             // An argument the tool does not know would otherwise be ignored
             // silently, and a search would return unfiltered records.
@@ -232,7 +287,12 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
                 ));
             }
             record(s, ctx, name, &args).await;
-            let answer = match call(s, name, &args).await {
+            let outcome = if change_tools().iter().any(|(_, t)| t["name"] == name) {
+                change(s, ctx, name, args.clone()).await
+            } else {
+                call(s, name, &args).await
+            };
+            let answer = match outcome {
                 Ok(v) => json!({
                     "content": [{"type": "text", "text": v.to_string()}],
                     "structuredContent": v,
@@ -249,6 +309,27 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
     })
 }
 
+/// Arguments without secrets (passwords, tokens), for the trail.
+fn redact(args: &Value) -> Value {
+    match args {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    let secret = matches!(k.as_str(), "password" | "token");
+                    let v = if secret && !v.is_null() {
+                        json!("(hidden)")
+                    } else {
+                        redact(v)
+                    };
+                    (k.clone(), v)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact).collect()),
+        other => other.clone(),
+    }
+}
+
 /// Who asked what: every tool call is a record in the trail.
 async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
     tracing::info!(user = %ctx.user.username, tool, "MCP tool call");
@@ -263,7 +344,7 @@ async fn record(s: &AppState, ctx: &Caller, tool: &str, args: &Value) {
                 by: ctx.user.username.clone(),
                 token: ctx.user.token.clone(),
                 tool: tool.to_string(),
-                arguments: clip(&args.to_string(), MAX_TEXT),
+                arguments: clip(&redact(args).to_string(), MAX_TEXT),
             })
             .client(client),
         )
@@ -471,6 +552,379 @@ async fn call(s: &AppState, tool: &str, args: &Value) -> anyhow::Result<Value> {
                 "head_hash": report.head_hash,
                 "error": report.error,
             }))
+        }
+        other => anyhow::bail!("unknown tool '{other}'"),
+    }
+}
+
+// ---------- changes ----------
+//
+// Tools that change the gateway's configuration, per scope. They call the
+// web API's handlers, so they check the same role, validate the same way and
+// record the same `config_changed` records (with "via MCP, token …"). None
+// writes to a PLC, and none changes MCP, API tokens or the web server.
+
+/// A change tool: its name, what it does, and its arguments.
+fn change_tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+    json!({
+        "name": name,
+        "description": format!(
+            "{description} Changes the gateway's configuration: confirm with the user first."
+        ),
+        "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": false},
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// A read tool that belongs to a scope (what the changes work on).
+fn scope_read_tool(name: &str, description: &str, properties: Value) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "annotations": {"readOnlyHint": true, "openWorldHint": false},
+        "inputSchema": {"type": "object", "properties": properties, "additionalProperties": false},
+    })
+}
+
+fn change_tools() -> Vec<(&'static str, Value)> {
+    let text = |d: &str| json!({"type": "string", "description": d});
+    let target_fields = json!({
+        "name": text("Short unique name, e.g. line1. Used in audit records."),
+        "listen": text("Where clients connect, e.g. 0.0.0.0:4841 (a free port per target)."),
+        "endpoint_url": text("The PLC's endpoint, e.g. opc.tcp://192.168.0.10:4840."),
+        "min_security": {"type": "string", "enum": ["none", "sign", "sign_and_encrypt"],
+            "description": "Lowest security offered to clients and used towards the PLC."},
+        "discovery_interval_secs": {"type": "integer", "minimum": 1},
+        "max_connections": {"type": "integer", "minimum": 1},
+        "max_connections_per_address": {"type": "integer", "minimum": 1},
+    });
+    let mut update_fields = target_fields.clone();
+    update_fields["new_name"] = text("Rename the target.");
+    update_fields["name"] = text("The target to change.");
+    let rule = json!({
+        "target": text("Target name."),
+        "node_id": text("The node as in the audit trail, e.g. ns=3;s=\"DB1\".\"Life\"."),
+        "client": text("Only writes from this client (IP address or application URI)."),
+    });
+    let mut rule_add = rule.clone();
+    rule_add["name"] = text("Display name, for people reading the list.");
+    let thumbprint = json!({"thumbprint": text("The certificate's SHA-1 thumbprint (hex).")});
+    let role = json!({"type": "string", "enum": ["admin", "operator", "auditor"]});
+    vec![
+        (
+            "targets",
+            scope_read_tool(
+                "list_targets",
+                "The configured targets (PLCs) with their settings and summarised nodes.",
+                json!({}),
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "discover_endpoints",
+                "Asks an OPC UA server for its endpoints (security modes, user tokens, \
+             certificate), to check a PLC before adding it. Recorded as a discovery.",
+                json!({"endpoint_url": text("e.g. opc.tcp://192.168.0.10:4840")}),
+                &["endpoint_url"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "add_target",
+                "Adds a target: the gateway starts accepting clients for that PLC.",
+                target_fields,
+                &["name", "listen", "endpoint_url"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "update_target",
+                "Changes a target; only the given fields change. Clients of the target \
+             are disconnected.",
+                update_fields,
+                &["name"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "delete_target",
+                "Removes a target: its clients are disconnected and no longer audited.",
+                json!({"name": text("Target name.")}),
+                &["name"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "summarise_node",
+                "Writes to this node are summarised periodically instead of recorded one \
+             by one (for noisy nodes such as a life bit).",
+                rule_add,
+                &["target", "node_id"],
+            ),
+        ),
+        (
+            "targets",
+            change_tool(
+                "record_node_again",
+                "Undoes summarise_node: every write to the node is recorded again.",
+                rule,
+                &["target", "node_id"],
+            ),
+        ),
+        (
+            "certificates",
+            scope_read_tool(
+                "list_certificates",
+                "The gateway's own certificate and the trusted and rejected ones.",
+                json!({}),
+            ),
+        ),
+        (
+            "certificates",
+            change_tool(
+                "trust_server_certificate",
+                "Trusts the certificate a target's PLC presents, after checking it has this \
+             thumbprint (see discover_endpoints).",
+                json!({"target": text("Target name."), "thumbprint": text("SHA-1 thumbprint (hex).")}),
+                &["target", "thumbprint"],
+            ),
+        ),
+        (
+            "certificates",
+            change_tool(
+                "trust_rejected_certificate",
+                "Trusts a rejected certificate (e.g. an OPC UA client's): it may connect.",
+                thumbprint.clone(),
+                &["thumbprint"],
+            ),
+        ),
+        (
+            "certificates",
+            change_tool(
+                "untrust_certificate",
+                "Removes a certificate from the trusted ones.",
+                thumbprint.clone(),
+                &["thumbprint"],
+            ),
+        ),
+        (
+            "certificates",
+            change_tool(
+                "delete_rejected_certificate",
+                "Deletes a rejected certificate.",
+                thumbprint,
+                &["thumbprint"],
+            ),
+        ),
+        (
+            "settings",
+            scope_read_tool(
+                "get_settings",
+                "The audit, export and certificate settings.",
+                json!({}),
+            ),
+        ),
+        (
+            "settings",
+            change_tool(
+                "update_audit_settings",
+                "Changes audit settings; only the given fields change. Shorter retention \
+             deletes older records for good.",
+                json!({
+                    "retention_days": {"type": "integer", "minimum": 0,
+                        "description": "Keep records this many days; 0 keeps everything."},
+                    "fail_mode": {"type": "string", "enum": ["open", "closed"],
+                        "description": "closed: a write only reaches the PLC once recorded."},
+                    "record_old_value": {"type": "boolean"},
+                    "ignored_summary_secs": {"type": "integer", "minimum": 1},
+                }),
+                &[],
+            ),
+        ),
+        (
+            "settings",
+            change_tool(
+                "update_export_settings",
+                "Sets or removes (null) the QuestDB export. Omitted password/token keep \
+             the stored one.",
+                json!({"questdb": {"type": ["object", "null"], "properties": {
+                "url": text("e.g. http://questdb:9000"),
+                "table": text("Table name, e.g. opcua_audit."),
+                "username": text("Basic auth user."),
+                "password": text("Basic auth password."),
+                "token": text("Bearer token."),
+                "ca_pem": text("CA certificates (PEM) for https with a private CA."),
+                "interval_secs": {"type": "integer", "minimum": 1},
+            }, "required": ["url", "table", "interval_secs"]}}),
+                &["questdb"],
+            ),
+        ),
+        (
+            "settings",
+            change_tool(
+                "update_certificate_hostnames",
+                "The host names and IP addresses clients use to reach the gateway, put in \
+             its certificate when it is generated next.",
+                json!({"certificate_hostnames": {"type": "array", "items": {"type": "string"}}}),
+                &["certificate_hostnames"],
+            ),
+        ),
+        (
+            "users",
+            scope_read_tool("list_users", "The web UI users and their roles.", json!({})),
+        ),
+        (
+            "users",
+            change_tool(
+                "create_user",
+                "Creates a web UI user. They must choose a new password at the first login.",
+                json!({"username": text("Letters, digits and . _ - @"),
+                   "password": text("At least 8 characters."), "role": role}),
+                &["username", "password", "role"],
+            ),
+        ),
+        (
+            "users",
+            change_tool(
+                "update_user",
+                "Changes a user's role and/or password; their sessions end.",
+                json!({"username": text("The user."), "role": role,
+                   "password": text("New password, at least 8 characters.")}),
+                &["username"],
+            ),
+        ),
+        (
+            "users",
+            change_tool(
+                "delete_user",
+                "Deletes a user and their API tokens. The last admin cannot be deleted.",
+                json!({"username": text("The user.")}),
+                &["username"],
+            ),
+        ),
+    ]
+}
+
+/// A web API handler's answer as a tool result.
+async fn reply(response: impl IntoResponse) -> anyhow::Result<Value> {
+    let response = response.into_response();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 << 20).await?;
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    if !status.is_success() {
+        let message = value["error"].as_str().unwrap_or(status.as_str());
+        anyhow::bail!("{message}");
+    }
+    // structuredContent must be an object.
+    Ok(match value {
+        Value::Null => json!({"ok": true}),
+        Value::Object(_) => value,
+        other => json!({"items": other}),
+    })
+}
+
+/// `base` with the fields of `changes` put over it.
+fn overlay(mut base: Value, changes: &Value, skip: &[&str]) -> Value {
+    if let (Some(b), Some(c)) = (base.as_object_mut(), changes.as_object()) {
+        for (k, v) in c {
+            if !skip.contains(&k.as_str()) {
+                b.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    base
+}
+
+fn arg<T: serde::de::DeserializeOwned>(args: &Value) -> anyhow::Result<T> {
+    serde_json::from_value(args.clone()).map_err(|e| anyhow::anyhow!("invalid arguments: {e}"))
+}
+
+fn required(args: &Value, key: &str) -> anyhow::Result<String> {
+    string(args, key).ok_or_else(|| anyhow::anyhow!("'{key}' is required"))
+}
+
+async fn change(s: &AppState, ctx: &Caller, tool: &str, args: Value) -> anyhow::Result<Value> {
+    use axum::extract::{Path, State};
+    let st = || State(s.clone());
+    let user = ctx.auth_user();
+    match tool {
+        "list_targets" => reply(super::targets(st(), user).await).await,
+        "discover_endpoints" => {
+            reply(super::discover_url(st(), user, Json(arg(&args)?)).await).await
+        }
+        "add_target" => reply(super::create_target(st(), user, Json(arg(&args)?)).await).await,
+        "update_target" => {
+            let name = required(&args, "name")?;
+            let current = super::target_config(s, &name)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e.1))?;
+            let mut target = overlay(serde_json::to_value(current)?, &args, &["name", "new_name"]);
+            target["name"] = json!(string(&args, "new_name").unwrap_or_else(|| name.clone()));
+            reply(super::update_target(st(), user, Path(name), Json(arg(&target)?)).await).await
+        }
+        "delete_target" => {
+            let name = required(&args, "name")?;
+            reply(super::delete_target(st(), user, Path(name)).await).await
+        }
+        "summarise_node" | "record_node_again" => {
+            let target = required(&args, "target")?;
+            let rule = overlay(json!({}), &args, &["target"]);
+            if tool == "summarise_node" {
+                reply(super::ignore_node(st(), user, Path(target), Json(arg(&rule)?)).await).await
+            } else {
+                reply(super::unignore_node(st(), user, Path(target), Json(arg(&rule)?)).await).await
+            }
+        }
+        "list_certificates" => reply(super::certificates(st(), user).await).await,
+        "trust_server_certificate" => {
+            let target = required(&args, "target")?;
+            let body = overlay(json!({}), &args, &["target"]);
+            reply(super::trust_server(st(), user, Path(target), Json(arg(&body)?)).await).await
+        }
+        "trust_rejected_certificate" => {
+            let t = required(&args, "thumbprint")?;
+            reply(super::trust_rejected(st(), user, Path(t)).await).await
+        }
+        "untrust_certificate" => {
+            let t = required(&args, "thumbprint")?;
+            reply(super::untrust(st(), user, Path(t)).await).await
+        }
+        "delete_rejected_certificate" => {
+            let t = required(&args, "thumbprint")?;
+            reply(super::delete_rejected(st(), user, Path(t)).await).await
+        }
+        "get_settings" => reply(super::settings::get(st(), user).await).await,
+        "update_audit_settings" => {
+            let current = serde_json::to_value(s.targets.config().await.audit)?;
+            let audit = overlay(current, &args, &[]);
+            reply(super::settings::put_audit(st(), user, Json(arg(&audit)?)).await).await
+        }
+        "update_export_settings" => {
+            reply(super::settings::put_export(st(), user, Json(arg(&args)?)).await).await
+        }
+        "update_certificate_hostnames" => {
+            reply(super::settings::put_gateway(st(), user, Json(arg(&args)?)).await).await
+        }
+        "list_users" => reply(super::list_users(st(), user).await).await,
+        "create_user" => reply(super::create_user(st(), user, Json(arg(&args)?)).await).await,
+        "update_user" => {
+            let name = required(&args, "username")?;
+            let body = overlay(json!({}), &args, &["username"]);
+            reply(super::update_user(st(), user, Path(name), Json(arg(&body)?)).await).await
+        }
+        "delete_user" => {
+            let name = required(&args, "username")?;
+            reply(super::delete_user(st(), user, Path(name)).await).await
         }
         other => anyhow::bail!("unknown tool '{other}'"),
     }

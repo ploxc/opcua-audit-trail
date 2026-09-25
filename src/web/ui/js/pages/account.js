@@ -13,7 +13,8 @@ import {
   toast,
 } from "../components.js";
 import { time } from "../format.js";
-import { load, render, renderPage, state } from "../state.js";
+import { can, load, render, renderPage, state } from "../state.js";
+import { SCOPE_LABELS } from "./settings.js";
 
 export function loginView() {
   return html`<div class="login">
@@ -112,11 +113,12 @@ function tokensCard() {
     ${when(
       tokens.length,
       () => html`<table class="mt">
-        <thead><tr><th>Name</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>May change</th><th>Created</th><th>Last used</th><th></th></tr></thead>
         <tbody>
           ${tokens.map(
             (t) => html`<tr>
               <td>${t.name} <span class="muted mono">${t.id}</span></td>
+              <td>${t.scopes.length ? t.scopes.join(", ") : html`<span class="muted">nothing (read only)</span>`}</td>
               <td class="nowrap">${time(t.created_at)}</td>
               <td class="nowrap">${t.last_used ? time(t.last_used) : html`<span class="muted">never</span>`}</td>
               <td class="actions-cell">
@@ -135,6 +137,20 @@ function tokensCard() {
           <label>New token</label>
           <input name="name" required maxlength="64" placeholder="e.g. Claude Desktop on my laptop">
         </div>
+        ${when(
+          can("admin") && mcp.allow.length,
+          () => html`<div>
+            <label>May also change</label>
+            ${mcp.allow.map(
+              (scope) => html`<label class="inline small">
+                <input type="checkbox" name="scopes" value="${scope}">
+                ${SCOPE_LABELS[scope] || scope}
+              </label>`,
+            )}
+            <p class="help small">Nothing ticked: the token can only read. Give a token only
+            what it needs, and delete it when the work is done.</p>
+          </div>`,
+        )}
         <div><button class="primary" type="submit">Create token</button></div>
       </form>`,
     )}
@@ -201,7 +217,8 @@ export const actions = {
 export const forms = {
   /** Creates an API token and shows its secret once. */
   async token(form) {
-    state.account.newToken = await post("/me/tokens", formData(form));
+    const scopes = [...form.querySelectorAll("input[name=scopes]:checked")].map((i) => i.value);
+    state.account.newToken = await post("/me/tokens", { name: formData(form).name, scopes });
     state.account.tokens = await get("/me/tokens");
     form.reset();
     renderPage();

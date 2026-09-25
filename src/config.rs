@@ -34,7 +34,15 @@ pub struct Config {
 #[serde(deny_unknown_fields, default)]
 pub struct McpConfig {
     pub enabled: bool,
+    /// What assistants may change at most (see [`MCP_SCOPES`]); each token
+    /// gets a part of it. Empty: read only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
 }
+
+/// What an assistant can be allowed to change through MCP. The MCP settings
+/// themselves, API tokens and the web server are never among them.
+pub const MCP_SCOPES: [&str; 4] = ["targets", "certificates", "settings", "users"];
 
 /// Copies of the audit trail outside the gateway. Every record carries its
 /// hash, so an external copy also anchors the local chain: rewriting the
@@ -312,6 +320,17 @@ impl Config {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(bad) = self
+            .mcp
+            .allow
+            .iter()
+            .find(|a| !MCP_SCOPES.contains(&a.as_str()))
+        {
+            bail!(
+                "mcp.allow: unknown '{bad}' (possible: {})",
+                MCP_SCOPES.join(", ")
+            );
+        }
         if self.audit.ignored_summary_secs == 0 {
             bail!("audit.ignored_summary_secs must be > 0");
         }

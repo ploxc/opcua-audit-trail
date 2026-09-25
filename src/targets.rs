@@ -323,8 +323,16 @@ fn write_settings(path: &std::path::Path, config: &Config) -> anyhow::Result<()>
             t["interval_secs"] = value(q.interval_secs as i64);
         }
     }
-    if config.mcp.enabled || root.contains_key("mcp") {
-        table(root, "mcp")["enabled"] = value(config.mcp.enabled);
+    if config.mcp.enabled || !config.mcp.allow.is_empty() || root.contains_key("mcp") {
+        let mcp = table(root, "mcp");
+        mcp["enabled"] = value(config.mcp.enabled);
+        if config.mcp.allow.is_empty() {
+            mcp.remove("allow");
+        } else {
+            mcp["allow"] = value(Array::from_iter(
+                config.mcp.allow.iter().map(String::as_str),
+            ));
+        }
     }
     let export = table(root, "export");
     // Syslog export is no longer supported.

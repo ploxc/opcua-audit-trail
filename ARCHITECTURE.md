@@ -355,9 +355,16 @@ need, and it keeps an SDK dependency out of the binary.
   user with that user's current role and ends with the user. The session
   cookie is not accepted here, so the endpoint is exempt from the CSRF header
   check: a cross-site request cannot carry the bearer token.
-- **Read-only tools:** search the trail (the `/api/audit` filters), one
-  record, the status, the most written nodes, verify. None writes to a PLC or
-  changes configuration.
+- **Read tools:** search the trail (the `/api/audit` filters), one record,
+  the status, the most written nodes, verify.
+- **Change tools, per scope** (`targets`, `certificates`, `settings`,
+  `users`): listed and callable only when the scope is in `[mcp] allow`
+  (Settings), in the token's own scopes (chosen at creation, stored with
+  it), and the token's user is an admin. They call the web API's handlers
+  with the token's user, so role checks, validation and `config_changed`
+  records are the same; the record's `by` says "via MCP, token <id>". None
+  writes to a PLC, and MCP settings, tokens and the web server are not
+  reachable. Password and token arguments are hidden in `mcp_query`.
 - **Audited:** every tool call is an `mcp_query` record with the user, the
   token id (never the secret), the tool and its arguments.
 

@@ -205,9 +205,21 @@ pub struct AuthUser {
     pub username: String,
     pub role: Role,
     pub must_change_password: bool,
+    /// Set when an AI assistant acts through MCP: the token's id.
+    #[serde(skip)]
+    pub via_token: Option<String>,
 }
 
 impl AuthUser {
+    /// Who did it, for audit records: the user, and the token when an AI
+    /// assistant acted through MCP.
+    pub fn actor(&self) -> String {
+        match &self.via_token {
+            Some(token) => format!("{} (via MCP, token {token})", self.username),
+            None => self.username.clone(),
+        }
+    }
+
     pub fn require(&self, role: Role) -> Result<(), ApiError> {
         if self.role >= role {
             Ok(())
@@ -254,6 +266,7 @@ impl FromRequestParts<AppState> for AuthUser {
             username,
             role: current.role,
             must_change_password: current.must_change_password,
+            via_token: None,
         };
         let path = parts.uri.path();
         let allowed = ["/me", "/me/password", "/logout"]
@@ -392,6 +405,7 @@ pub async fn login(
             username: user.username,
             role: state.role,
             must_change_password: state.must_change_password,
+            via_token: None,
         }),
     ))
 }

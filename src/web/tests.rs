@@ -1113,3 +1113,126 @@ fn mcp_needs_https_off_loopback() {
     assert!(!super::mcp::transport_is_safe(&web("0.0.0.0:8080", false)));
     assert!(super::mcp::transport_is_safe(&web("0.0.0.0:8080", true)));
 }
+
+/// Changes through MCP need all three: the gateway allows the scope, the
+/// token has it, and the token's user is an admin.
+#[tokio::test]
+async fn mcp_changes_need_gateway_token_and_role() {
+    let w = web().await;
+    let admin = w.login("admin").await;
+    let (status, _, _) = w
+        .send(
+            Method::PUT,
+            "/api/settings/mcp",
+            Some(&admin),
+            Some(json!({ "enabled": true, "allow": ["targets", "users"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let token = |user: String, scopes: Value| {
+        let w = &w;
+        async move {
+            let (status, t) = w
+                .post(
+                    "/api/me/tokens",
+                    &user,
+                    json!({ "name": "t", "scopes": scopes }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{t}");
+            t["secret"].as_str().unwrap().to_string()
+        }
+    };
+    let names = |tools: Value| -> Vec<String> {
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+    // Read only token: no change tools.
+    let read = token(admin.clone(), json!([])).await;
+    let tools = names(w.mcp(&read, list.clone()).await.1);
+    assert!(!tools.contains(&"add_target".to_string()));
+
+    // Targets and certificates; the gateway only allows targets.
+    let config = token(admin.clone(), json!(["targets", "certificates"])).await;
+    let tools = names(w.mcp(&config, list.clone()).await.1);
+    assert!(tools.contains(&"add_target".to_string()));
+    assert!(!tools.contains(&"trust_rejected_certificate".to_string()));
+    let call = |name: &str, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments}})
+    };
+    let (_, refused) = w
+        .mcp(
+            &config,
+            call("trust_rejected_certificate", json!({"thumbprint": "00"})),
+        )
+        .await;
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("may not"));
+
+    // A change goes through the same checks and is recorded as via MCP.
+    let (_, added) = w
+        .mcp(
+            &config,
+            call(
+                "add_target",
+                json!({"name": "plc9", "listen": format!("127.0.0.1:{}", free_port()),
+                       "endpoint_url": w.plc.url}),
+            ),
+        )
+        .await;
+    assert_eq!(added["result"]["isError"], false, "{added}");
+    let (_, updated) = w
+        .mcp(
+            &config,
+            call(
+                "update_target",
+                json!({"name": "plc9", "min_security": "sign"}),
+            ),
+        )
+        .await;
+    assert_eq!(updated["result"]["isError"], false, "{updated}");
+    let (_, targets) = w.get("/api/targets", &admin).await;
+    let plc9 = targets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["config"]["name"] == "plc9" || t["name"] == "plc9")
+        .cloned()
+        .unwrap_or_default();
+    assert!(plc9.to_string().contains("sign"), "{targets}");
+    let (_, records) = w
+        .get("/api/audit?kind=config_changed&limit=5", &admin)
+        .await;
+    assert!(records.to_string().contains("via MCP"), "{records}");
+
+    // A user's password never lands in the trail.
+    let users = token(admin.clone(), json!(["users"])).await;
+    let (_, created) = w
+        .mcp(
+            &users,
+            call(
+                "create_user",
+                json!({"username": "bot", "password": "secret-pass-1",
+                                       "role": "auditor"}),
+            ),
+        )
+        .await;
+    assert_eq!(created["result"]["isError"], false, "{created}");
+    let (_, queries) = w.get("/api/audit?kind=mcp_query&limit=50", &admin).await;
+    assert!(!queries.to_string().contains("secret-pass-1"));
+
+    // An auditor's token changes nothing, whatever its scopes.
+    let auditor = w.login("auditor").await;
+    let weak = token(auditor, json!(["targets"])).await;
+    let tools = names(w.mcp(&weak, list).await.1);
+    assert!(!tools.contains(&"add_target".to_string()));
+}

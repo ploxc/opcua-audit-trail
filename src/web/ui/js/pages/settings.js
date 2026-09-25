@@ -245,6 +245,14 @@ function gatewayCard(st, off, save) {
   </form>`;
 }
 
+/** What an assistant can be allowed to change, for people. */
+export const SCOPE_LABELS = {
+  targets: "Targets (add, change, remove, summarised nodes)",
+  certificates: "Certificates (trust, untrust)",
+  settings: "Audit, export and certificate settings",
+  users: "Users",
+};
+
 function mcpCard(m, off, save) {
   return html`<form class="card" data-form="settings-mcp">
     <h2>AI assistants (MCP)</h2>
@@ -255,8 +263,23 @@ function mcpCard(m, off, save) {
       </label>
       <p class="help">
         Lets an AI assistant such as Claude read the audit trail and the gateway status with an
-        API token (Account page). Read-only, and every question is recorded in the trail. Off:
-        the endpoint answers nothing and tokens stop working.
+        API token (Account page). Every question is recorded in the trail. Off: the endpoint
+        answers nothing and tokens stop working.
+      </p>
+    </div>
+    <div class="setting">
+      <span class="title">Assistants may also change</span>
+      ${m.scopes.map(
+        (scope) => html`<label class="inline">
+          <input type="checkbox" name="allow" value="${scope}"
+            ${flag(m.allow.includes(scope), "checked")} ${off}>
+          ${SCOPE_LABELS[scope] || scope}
+        </label>`,
+      )}
+      <p class="help">
+        The most any token may change; each token gets a part of this when it is created, and
+        only an administrator's token can change anything. Changes are recorded as made via MCP.
+        Assistants never write to a PLC, and never change these MCP settings or API tokens.
       </p>
       ${when(
         !m.transport_ok,
@@ -376,7 +399,8 @@ export const forms = {
 
   async "settings-mcp"(form) {
     const enabled = form.elements.enabled.checked;
-    await put("/settings/mcp", { enabled });
+    const allow = [...form.querySelectorAll("input[name=allow]:checked")].map((i) => i.value);
+    await put("/settings/mcp", { enabled, allow });
     toast(enabled ? "MCP endpoint on" : "MCP endpoint off");
     state.settings = await get("/settings");
     renderPage();
