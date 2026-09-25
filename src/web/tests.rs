@@ -997,6 +997,16 @@ async fn mcp_reads_the_trail_with_a_token_and_records_every_call() {
     let verify = w.mcp_tool(&secret, "verify_audit_trail", json!({})).await;
     assert_eq!(verify["intact"], true);
 
+    // A misspelt filter is refused instead of returning everything.
+    let (_, wrong) = w
+        .mcp(
+            &secret,
+            json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                   "params": {"name": "search_audit_trail", "arguments": {"kind": "write"}}}),
+        )
+        .await;
+    assert_eq!(wrong["result"]["isError"], true, "{wrong}");
+
     // Every tool call is itself a record, with the token's user.
     let calls = w
         .mcp_tool(&secret, "search_audit_trail", json!({"event": "mcp_query"}))

@@ -178,8 +178,34 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            if !tools().iter().any(|t| t["name"] == name) {
+            let Some(tool) = tools().into_iter().find(|t| t["name"] == name) else {
                 return Some(error(id, -32602, &format!("unknown tool '{name}'")));
+            };
+            // An argument the tool does not know would otherwise be ignored
+            // silently, and a search would return unfiltered records.
+            let known = &tool["inputSchema"]["properties"];
+            let unknown: Vec<&String> = args
+                .as_object()
+                .map(|a| {
+                    a.keys()
+                        .filter(|k| known.get(k.as_str()).is_none())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !unknown.is_empty() {
+                let allowed: Vec<&String> = known
+                    .as_object()
+                    .map(|p| p.keys().collect())
+                    .unwrap_or_default();
+                return Some(result(
+                    id,
+                    json!({
+                        "content": [{"type": "text", "text": format!(
+                            "unknown argument(s) {unknown:?} for {name}; allowed: {allowed:?}"
+                        )}],
+                        "isError": true,
+                    }),
+                ));
             }
             record(s, ctx, name, &args).await;
             let answer = match call(s, name, &args).await {
