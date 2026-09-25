@@ -153,40 +153,6 @@ Basic256Sha256           SignAndEncrypt       3  Anonymous, UserName
 None                     None                 0  Anonymous, UserName
 ```
 
-## Certificates
-
-The gateway follows standard OPC UA trust handling, in its `pki/` directory:
-
-* **PLC → gateway.** The PLC must trust the gateway certificate,
-  `pki/own/cert.der`. Import it into the PLC's trust list. The PLC should
-  trust *only* the gateway, so no client can bypass it.
-* **Gateway → PLC.** On the first secure connection the PLC certificate lands
-  in `pki/rejected/`. Move it to `pki/trusted/`.
-* **Client → gateway.** Unknown client certificates land in `pki/rejected/`,
-  and each one is recorded as `certificate_rejected` in the audit trail. Move a
-  certificate to `pki/trusted/` to allow that client.
-
-The web UI's **Certificates** page does all of this with buttons. The
-**Targets** page can trust a PLC certificate directly from discovery.
-
-## Security per target
-
-```toml
-[[targets]]
-name = "line1"
-listen = "0.0.0.0:4841"
-endpoint_url = "opc.tcp://192.168.0.10:4840"
-min_security = "sign_and_encrypt"   # "none" (default), "sign", "sign_and_encrypt"
-max_connections = 50                # client connections at once (default)
-max_connections_per_address = 10    # per client address (default)
-```
-
-The gateway offers clients the endpoints the PLC advertises. Endpoint
-discovery is not authenticated, so set `min_security` as soon as the PLC
-supports security: endpoints below it are never offered or used, whatever
-the network says. The connection limits protect the PLC, which accepts only a
-few secure channels.
-
 ## Installation
 
 Release archives (Linux x86_64/ARM64/ARMv7 static, Windows, macOS) and
@@ -301,84 +267,6 @@ rebinding. On other addresses it answers to IP addresses, the machine's
 names and the certificate host names; add a reverse proxy's name with
 `allowed_hosts = ["audit.example.com"]` under `[web]`.
 
-## Audit export
-
-The audit trail lives in the gateway (SQLite) and can also be copied to other
-systems. Each destination keeps its own position in `data/export-state.json`:
-nothing is skipped while a destination is down, and records are delivered at
-least once.
-
-```toml
-[export.questdb]              # long-term storage and SQL analysis
-url = "http://questdb:9000"   # ILP over HTTP(S); each batch is acknowledged
-table = "opcua_audit"         # created on first write
-# token = "…"  or  username = "…" / password = "…"  (use https off-host)
-# ca_file = "questdb-ca.pem"  # https with a private CA; default: public roots
-```
-
-In the web UI (Settings), a private CA is pasted as PEM text; the gateway
-keeps it in `data/questdb-ca.pem`. Syslog export is not supported (any more):
-see [docs/export/SYSLOG.md](docs/export/SYSLOG.md).
-
-Every exported record carries its sequence number, its hash and the previous
-record's hash. Once records are outside the gateway, rewriting the local
-database no longer goes unnoticed: `verify` checks the chain against the last
-record each destination acknowledged. Note the head that `verify` prints and
-check it later, for example from another machine's copy:
-
-```sh
-opcua-audit-gateway verify --expect 1234:<hash printed by the earlier run>
-```
-
-If an exporter's last position is no longer in the trail (a truncated or
-rebuilt database), it records an `export_gap` and the dashboard raises it.
-In QuestDB, make retries idempotent with
-`ALTER TABLE opcua_audit DEDUP ENABLE UPSERT KEYS(ts, seq)`.
-
-The dashboard shows each destination's state and how many records are waiting.
-
-## Noisy nodes (life bits, counters)
-
-An HMI that writes a life bit every second adds 86 400 records a day and
-buries the writes that matter. Such nodes can be **summarised**: their value
-writes are no longer recorded one by one, but counted, and every hour one
-`ignored_writes` record per node says how many writes there were (and how many
-failed), from which clients, from when to when, and the last value. A write
-to such a node therefore never goes unnoticed entirely.
-
-In the web UI (admin): **Audit trail → Most written** lists the nodes written
-most in the last 24 hours. **Summarise…** opens a dialog that explains what
-happens and asks whose writes to summarise: every client's, or only one
-client's (the same node written by anyone else stays recorded one by one).
-The same button is in a write record's details and on a variable in the
-Browser. Summarised nodes carry a *summarised* label in the audit trail and the
-Browser, and each target lists them under **Summarised nodes**, with **Record
-every write again** to undo it. Changes apply at once, without disconnecting
-clients, and are audited (`config_changed`).
-
-In `config.toml`:
-
-```toml
-[audit]
-ignored_summary_secs = 3600         # one summary per node per hour (default; also in Settings)
-
-[[targets]]
-name = "line1"
-# …
-[[targets.ignore]]
-node_id = 'ns=3;s="DB1"."Life"'     # as shown in the audit trail
-name = "Life bit"                   # optional, shown in the web UI
-[[targets.ignore]]
-node_id = "ns=3;i=1234"
-client = "10.0.0.5"                 # only from this address or application URI
-```
-
-Only writes of a node's value are summarised; method calls, other attributes
-and other services are always recorded. Summarised writes skip the read of the
-old value, which also saves the PLC a request per write. In `fail_mode =
-"closed"` they are not held back for a committed record; a summary that has
-not been written yet is lost if the gateway crashes.
-
 ## Web UI
 
 | Page | Role | |
@@ -465,6 +353,118 @@ SHA-256 hash; delete one on the Account page. Admins see every user's
 tokens on the Users page and can revoke any of them; resetting a user's
 password or deleting the user deletes theirs. The endpoint does not accept the web UI's session cookie. Turning
 the endpoint off stops every token at once.
+
+## Certificates
+
+The gateway follows standard OPC UA trust handling, in its `pki/` directory:
+
+* **PLC → gateway.** The PLC must trust the gateway certificate,
+  `pki/own/cert.der`. Import it into the PLC's trust list. The PLC should
+  trust *only* the gateway, so no client can bypass it.
+* **Gateway → PLC.** On the first secure connection the PLC certificate lands
+  in `pki/rejected/`. Move it to `pki/trusted/`.
+* **Client → gateway.** Unknown client certificates land in `pki/rejected/`,
+  and each one is recorded as `certificate_rejected` in the audit trail. Move a
+  certificate to `pki/trusted/` to allow that client.
+
+The web UI's **Certificates** page does all of this with buttons. The
+**Targets** page can trust a PLC certificate directly from discovery.
+
+## Security per target
+
+```toml
+[[targets]]
+name = "line1"
+listen = "0.0.0.0:4841"
+endpoint_url = "opc.tcp://192.168.0.10:4840"
+min_security = "sign_and_encrypt"   # "none" (default), "sign", "sign_and_encrypt"
+max_connections = 50                # client connections at once (default)
+max_connections_per_address = 10    # per client address (default)
+```
+
+The gateway offers clients the endpoints the PLC advertises. Endpoint
+discovery is not authenticated, so set `min_security` as soon as the PLC
+supports security: endpoints below it are never offered or used, whatever
+the network says. The connection limits protect the PLC, which accepts only a
+few secure channels.
+
+## Audit export
+
+The audit trail lives in the gateway (SQLite) and can also be copied to other
+systems. Each destination keeps its own position in `data/export-state.json`:
+nothing is skipped while a destination is down, and records are delivered at
+least once.
+
+```toml
+[export.questdb]              # long-term storage and SQL analysis
+url = "http://questdb:9000"   # ILP over HTTP(S); each batch is acknowledged
+table = "opcua_audit"         # created on first write
+# token = "…"  or  username = "…" / password = "…"  (use https off-host)
+# ca_file = "questdb-ca.pem"  # https with a private CA; default: public roots
+```
+
+In the web UI (Settings), a private CA is pasted as PEM text; the gateway
+keeps it in `data/questdb-ca.pem`. Syslog export is not supported (any more):
+see [docs/export/SYSLOG.md](docs/export/SYSLOG.md).
+
+Every exported record carries its sequence number, its hash and the previous
+record's hash. Once records are outside the gateway, rewriting the local
+database no longer goes unnoticed: `verify` checks the chain against the last
+record each destination acknowledged. Note the head that `verify` prints and
+check it later, for example from another machine's copy:
+
+```sh
+opcua-audit-gateway verify --expect 1234:<hash printed by the earlier run>
+```
+
+If an exporter's last position is no longer in the trail (a truncated or
+rebuilt database), it records an `export_gap` and the dashboard raises it.
+In QuestDB, make retries idempotent with
+`ALTER TABLE opcua_audit DEDUP ENABLE UPSERT KEYS(ts, seq)`.
+
+The dashboard shows each destination's state and how many records are waiting.
+
+## Noisy nodes (life bits, counters)
+
+An HMI that writes a life bit every second adds 86 400 records a day and
+buries the writes that matter. Such nodes can be **summarised**: their value
+writes are no longer recorded one by one, but counted, and every hour one
+`ignored_writes` record per node says how many writes there were (and how many
+failed), from which clients, from when to when, and the last value. A write
+to such a node therefore never goes unnoticed entirely.
+
+In the web UI (admin): **Audit trail → Most written** lists the nodes written
+most in the last 24 hours. **Summarise…** opens a dialog that explains what
+happens and asks whose writes to summarise: every client's, or only one
+client's (the same node written by anyone else stays recorded one by one).
+The same button is in a write record's details and on a variable in the
+Browser. Summarised nodes carry a *summarised* label in the audit trail and the
+Browser, and each target lists them under **Summarised nodes**, with **Record
+every write again** to undo it. Changes apply at once, without disconnecting
+clients, and are audited (`config_changed`).
+
+In `config.toml`:
+
+```toml
+[audit]
+ignored_summary_secs = 3600         # one summary per node per hour (default; also in Settings)
+
+[[targets]]
+name = "line1"
+# …
+[[targets.ignore]]
+node_id = 'ns=3;s="DB1"."Life"'     # as shown in the audit trail
+name = "Life bit"                   # optional, shown in the web UI
+[[targets.ignore]]
+node_id = "ns=3;i=1234"
+client = "10.0.0.5"                 # only from this address or application URI
+```
+
+Only writes of a node's value are summarised; method calls, other attributes
+and other services are always recorded. Summarised writes skip the read of the
+old value, which also saves the PLC a request per write. In `fail_mode =
+"closed"` they are not held back for a committed record; a summary that has
+not been written yet is lost if the gateway crashes.
 
 ## Development
 
