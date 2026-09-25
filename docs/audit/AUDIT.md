@@ -1,7 +1,8 @@
 # Security audit
 
-**Status:** open findings only. Fixed findings are removed from this file;
-the git history keeps them.
+**Status:** no open findings. Fixed findings are removed from this file;
+the git history keeps them. What remains are the accepted items and what
+was reviewed and found sound.
 
 **Reviews:**
 - **First audit** at `bbfa4cf`, with an independent verification that added
@@ -9,7 +10,9 @@ the git history keeps them.
   still listed below (W6, N8, N12, N14, N23) and the accepted items. The
   fixes are in `ead63fb`, `2f7698e`, `81812d2`, `c186a74` and `ec325e0`.
 - **Second review** at `4d1470d` (2026-09-25), after the first-login change,
-  HTTPS by default, the MCP endpoint and API tokens. Findings S1–S20.
+  HTTPS by default, the MCP endpoint and API tokens. Findings S1–S20. All
+  of them, and the remaining W6, N8, N12, N14 and N23, are fixed on the
+  branch `security-audit-2`, one commit per finding or group.
 
 **Method:** manual code review by three independent agents (MCP and tokens;
 login, HTTPS and Docker; the status of the first audit), with the main
@@ -26,8 +29,7 @@ claims checked against the code again. No proof-of-concept exploits.
 
 ## Summary
 
-| ID | Severity | Title |
-|---|---|---|
+No open findings.
 
 ## Accepted
 
