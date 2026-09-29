@@ -1,9 +1,10 @@
 // Building blocks shared by the pages: icons and logos, the header buttons,
 // status badges, foldable sections, dialogs, toasts and form helpers.
 
-import { Html, html, when } from "./html.js";
+import { h, html, render, safe } from "./vdom.js";
+import { post } from "./api.js";
 import { CHANGE_EVENTS, ERROR_EVENTS, EVENT_LABELS, WARNING_EVENTS } from "./format.js";
-import { state } from "./state.js";
+import { redraw, state } from "./state.js";
 
 // ---------- icons and logos ----------
 
@@ -30,67 +31,96 @@ const ICON_PATHS = {
     '<path d="m17 7-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/>',
 };
 
-/** An inline SVG icon by name (see ICON_PATHS). */
+/** An inline SVG icon by name (see ICON_PATHS; constant markup, not data). */
 export const icon = (name, cls = "") =>
-  new Html(
-    `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name]}</svg>`,
-  );
+  h("svg", {
+    class: `icon ${cls}`,
+    viewBox: "0 0 24 24",
+    "aria-hidden": "true",
+    dangerouslySetInnerHTML: { __html: ICON_PATHS[name] },
+  });
 
 const LOGO_PATH =
   "m 107.60293,0.64220653 c -35.769829,0 -65.039135,29.45982647 -65.039135,65.27483247 V 94.927484 L 30.45287,82.757639 7.3579379,105.74314 32.676186,131.18345 7.3579379,156.5017 30.214018,179.35778 55.477552,154.09425 80.619032,179.35778 103.71607,156.37227 75.147546,127.66697 V 65.917039 c 0,-18.289883 14.380372,-32.691083 32.455384,-32.691083 18.07499,0 32.45538,14.4012 32.45538,32.691083 0,18.275197 -14.35769,32.665875 -32.41224,32.68897 l -16.215592,-0.09996 -0.124161,32.583751 16.296613,0.1 v 0.002 c 35.7698,0 65.03913,-29.45983 65.03913,-65.274832 0,-35.815005 -29.26933,-65.27483198 -65.03913,-65.27483198 z";
 
 /** The Ploxc logo. */
 export const logo = (cls = "") =>
-  new Html(
-    `<svg class="logo ${cls}" viewBox="0 0 180 180" aria-hidden="true">` +
-      `<circle class="dot" cx="107.599" cy="65.927" r="16.292"/>` +
-      `<path class="mark" d="${LOGO_PATH}"/>` +
-      `</svg>`,
-  );
+  html`<svg class="logo ${cls}" viewBox="0 0 180 180" aria-hidden="true">
+    <circle class="dot" cx="107.599" cy="65.927" r="16.292" />
+    <path class="mark" d=${LOGO_PATH} />
+  </svg>`;
 
 // The gateway's own mark: traffic enters on the left and leaves through the
 // gateway (the ring) towards the target and the audit trail.
 export const gatewayLogo = (cls = "") =>
-  new Html(
-    `<svg class="logo gateway-logo ${cls}" viewBox="0 0 512 512" aria-hidden="true">` +
-      `<g class="mark-line" fill="none" stroke-width="75.1" stroke-linecap="round">` +
-      `<line x1="143.3" y1="256" x2="37.6" y2="256"/>` +
-      `<line x1="342.3" y1="183.6" x2="423.3" y2="115.6"/>` +
-      `<line x1="342.3" y1="328.4" x2="423.3" y2="396.4"/>` +
-      `<circle cx="256" cy="256" r="112.7"/>` +
-      `</g>` +
-      `<circle class="dot" cx="256" cy="256" r="37.6"/>` +
-      `</svg>`,
-  );
+  html`<svg class="logo gateway-logo ${cls}" viewBox="0 0 512 512" aria-hidden="true">
+    <g class="mark-line" fill="none" stroke-width="75.1" stroke-linecap="round">
+      <line x1="143.3" y1="256" x2="37.6" y2="256" />
+      <line x1="342.3" y1="183.6" x2="423.3" y2="115.6" />
+      <line x1="342.3" y1="328.4" x2="423.3" y2="396.4" />
+      <circle cx="256" cy="256" r="112.7" />
+    </g>
+    <circle class="dot" cx="256" cy="256" r="37.6" />
+  </svg>`;
 
 // ---------- header buttons and links ----------
 
 /** Opens the sidebar on narrow screens (hidden on wide ones). */
-export const menuButton = new Html(
-  `<button class="icon-button menu-button" data-action="menu" aria-label="Menu">` +
-    `${icon("menu").s}</button>`,
-);
+export const MenuButton = () =>
+  html`<button
+    class="icon-button menu-button"
+    aria-label="Menu"
+    onClick=${() => {
+      state.navOpen = !state.navOpen;
+      redraw();
+    }}
+  >
+    ${icon("menu")}
+  </button>`;
+
+/** Logs out and starts from a clean page: nothing of the session stays behind. */
+export const logout = safe(async () => {
+  await post("/logout");
+  location.hash = "";
+  location.reload();
+});
 
 /** The localStorage key of the light or dark mode the user picked. */
 export const THEME_KEY = "ploxc-color-mode";
 
-// Both icons are rendered; the stylesheet shows the one for the other mode.
-export const themeButton = () =>
+// Like ploxc.com: follow the system until the user picks a mode.
+function toggleTheme() {
+  const root = document.documentElement;
+  const dark = root.dataset.theme
+    ? root.dataset.theme === "dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+  try {
+    localStorage.setItem(THEME_KEY, root.dataset.theme);
+  } catch {}
+}
+
+// Both icons are drawn; the stylesheet shows the one for the other mode.
+export const ThemeButton = () =>
   html`<button
     class="icon-button"
-    data-action="theme"
+    onClick=${toggleTheme}
     title="Light or dark mode"
     aria-label="Toggle light or dark mode"
-  >${icon("light", "icon-sun")}${icon("dark", "icon-moon")}</button>`;
+  >
+    ${icon("light", "icon-sun")}${icon("dark", "icon-moon")}
+  </button>`;
 
-export const ploxcLink = () =>
-  html`<a class="ploxc-link" href="https://ploxc.com" target="_blank" rel="noopener">${logo()}Ploxc</a>`;
+export const PloxcLink = () =>
+  html`<a class="ploxc-link" href="https://ploxc.com" target="_blank" rel="noopener"
+    >${logo()}Ploxc</a
+  >`;
 
 // ---------- badges ----------
 
 /** An OPC UA status code, coloured by its severity (Good, Uncertain, Bad). */
 export const statusBadge = (status) => {
-  if (!status) return "";
+  if (!status) return null;
   const kind = status.startsWith("Good") ? "ok" : status.startsWith("Uncertain") ? "warn" : "bad";
   return html`<span class="badge plain ${kind}">${status}</span>`;
 };
@@ -123,19 +153,25 @@ export const eventBadge = (type) => {
 // ---------- foldable section ----------
 
 /**
- * A section of a card that opens on click; closed unless opened. Which folds
- * are open is kept in `state.open` (by `key`), so it survives the periodic
- * refresh. `body` may be a function, only called when open.
+ * A section of a card that opens on click, closed unless opened. Which folds
+ * are open is kept in `state.open` by `id`, so it survives leaving the page.
+ * The children are only drawn when open.
  */
-export function fold(key, title, summary, body) {
-  const open = state.open?.has(key);
+export function Fold({ id, title, summary, children }) {
+  const open = state.open?.has(id);
+  const toggle = () => {
+    state.open ||= new Set();
+    if (open) state.open.delete(id);
+    else state.open.add(id);
+    redraw();
+  };
   return html`<div class="fold">
-    <button type="button" class="fold-head" data-action="fold" data-key="${key}">
+    <button type="button" class="fold-head" onClick=${toggle}>
       <span class="chevron">${open ? "▾" : "▸"}</span>
       <h3>${title}</h3>
       <span class="fold-summary">${summary}</span>
     </button>
-    ${when(open, body)}
+    ${open && (typeof children === "function" ? children() : children)}
   </div>`;
 }
 
@@ -143,24 +179,29 @@ export function fold(key, title, summary, body) {
 
 /**
  * A dialog in the page, instead of the browser's confirm() and prompt().
- * Resolves with the form's fields when confirmed, or null when cancelled.
+ * `body` is text or `html` output. Resolves with the form's fields when
+ * confirmed, or null when cancelled.
  */
 export function dialog({ title, body = "", confirm = "OK", danger = false }) {
   return new Promise((resolve) => {
     const d = document.createElement("dialog");
     d.className = "dialog";
-    d.innerHTML = html`<form method="dialog">
-      <h2>${title}</h2>
-      <div class="dialog-body">${body}</div>
-      <div class="dialog-actions">
-        <button type="submit" value="" formnovalidate>Cancel</button>
-        <button type="submit" value="ok" class="${danger ? "danger" : "primary"}">${confirm}</button>
-      </div>
-    </form>`.s;
+    render(
+      html`<form method="dialog">
+        <h2>${title}</h2>
+        <div class="dialog-body">${body}</div>
+        <div class="dialog-actions">
+          <button type="submit" value="" formnovalidate>Cancel</button>
+          <button type="submit" value="ok" class=${danger ? "danger" : "primary"}>${confirm}</button>
+        </div>
+      </form>`,
+      d,
+    );
     document.body.append(d);
     d.addEventListener("close", () => {
       const data =
         d.returnValue === "ok" ? Object.fromEntries(new FormData(d.querySelector("form"))) : null;
+      render(null, d);
       d.remove();
       resolve(data);
     });

@@ -23,10 +23,9 @@ image. Merge only when all checks are green.
   kind and the error/warning `Severity`.
 - `src/web/`: the web API (`mod.rs`), settings, login, TLS, and `mcp.rs`, the
   MCP endpoint for AI assistants.
-- `src/web/ui/`: the web UI, JavaScript without a build step, embedded in the
-  binary. Pages are string views (`html.js`) or Preact components
-  (`vdom.js`, `component` in `PAGES`); the Targets page is the model for a
-  component.
+- `src/web/ui/`: the web UI, Preact components written with htm (vendored,
+  no build step), embedded in the binary. `vdom.js` lists what htm does
+  differently from HTML (closed `<input />`, spaces at line ends, entities).
 - `examples/`: `demo_plc`, `demo_client`, `stress`.
 - `tools/screenshots/`: remakes the README screenshots (`npm install && npm
   run shoot`): a fresh gateway, the demo PLC and two demo clients, Chrome

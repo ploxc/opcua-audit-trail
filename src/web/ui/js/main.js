@@ -1,22 +1,24 @@
-// OPC UA Audit Gateway web UI: start-up, routing, rendering, periodic
-// refresh and event handling. No build step.
+// OPC UA Audit Gateway web UI: start-up, routing, drawing, periodic refresh.
+// No build step.
 //
-// A page is either a string view or a Preact component (`component` in
-// PAGES, see vdom.js). String views use the `html` template tag (html.js):
-// every interpolated value is escaped unless it is itself `html` output, so
-// server data can never inject markup, and a redraw replaces the page's
-// `innerHTML`. A component is diffed into the page, and handles its own
-// events. Events of the string views are handled by delegation on
-// `data-action` and `data-form` attributes (the Content-Security-Policy
-// forbids inline handlers): each such page module exports its `actions` and
-// `forms`, merged below.
+// The whole UI is one Preact component tree (see vdom.js), drawn from the
+// shared `state` (state.js). After a change, `redraw()` diffs the tree into
+// the page again: only what changed is touched, so what is typed, the focus
+// and scroll positions stay. Every template escapes what it interpolates, so
+// server data can never inject markup.
 
-import { html, when } from "./html.js";
-import { h, render as drawComponent } from "./vdom.js";
-import { get, post } from "./api.js";
-import { alarmCounts, refreshAlarms } from "./alarms.js";
-import { THEME_KEY, gatewayLogo, icon, ploxcLink, themeButton, toast } from "./components.js";
-import * as summarise from "./summarise.js";
+import { h, html, render } from "./vdom.js";
+import { get } from "./api.js";
+import { AlarmCounts, refreshAlarms } from "./alarms.js";
+import {
+  THEME_KEY,
+  PloxcLink,
+  ThemeButton,
+  gatewayLogo,
+  icon,
+  logout,
+  toast,
+} from "./components.js";
 import { BROWSER_EMPTY, can, setHooks, state } from "./state.js";
 import * as account from "./pages/account.js";
 import * as audit from "./pages/audit.js";
@@ -36,9 +38,15 @@ const PAGES = [
     label: "Dashboard",
     role: "auditor",
     icon: "dashboard",
-    view: dashboard.dashboardView,
+    component: dashboard.DashboardPage,
   },
-  { id: "audit", label: "Audit trail", role: "auditor", icon: "audit", view: audit.auditView },
+  {
+    id: "audit",
+    label: "Audit trail",
+    role: "auditor",
+    icon: "audit",
+    component: audit.AuditPage,
+  },
   {
     id: "targets",
     label: "Targets",
@@ -51,16 +59,22 @@ const PAGES = [
     label: "Certificates",
     role: "auditor",
     icon: "certificates",
-    view: certificates.certificatesView,
+    component: certificates.CertificatesPage,
   },
-  { id: "browser", label: "Browser", role: "operator", icon: "browser", view: browser.browserView },
-  { id: "users", label: "Users", role: "admin", icon: "users", view: users.usersView },
+  {
+    id: "browser",
+    label: "Browser",
+    role: "operator",
+    icon: "browser",
+    component: browser.BrowserPage,
+  },
+  { id: "users", label: "Users", role: "admin", icon: "users", component: users.UsersPage },
   {
     id: "settings",
     label: "Settings",
     role: "auditor",
     icon: "settings",
-    view: settings.settingsView,
+    component: settings.SettingsPage,
   },
   {
     id: "account",
@@ -68,7 +82,7 @@ const PAGES = [
     role: "auditor",
     icon: "account",
     hidden: true,
-    view: account.accountView,
+    component: account.AccountPage,
   },
 ];
 
@@ -79,48 +93,28 @@ const currentPage = () => {
   return page && can(page.role) ? page : PAGES[0];
 };
 
-// ---------- rendering ----------
+// ---------- drawing ----------
 
 const app = document.getElementById("app");
-let refreshTimer = null;
 
-// The element a component page is drawn in, so it can be unmounted (its
-// state and effects end) before the element is replaced.
-let mounted = null;
-
-function unmountPage() {
-  if (mounted) drawComponent(null, mounted);
-  mounted = null;
-}
-
-/** Draws a component page into `el` (a redraw diffs it into what is there). */
-function mountPage(el, page) {
-  if (mounted !== el) unmountPage();
-  mounted = el;
-  drawComponent(h(page.component), el);
-}
-
-/** Draws everything: the login or password screen, or the sidebar and the current page. */
-function render() {
-  if (state.user === undefined) return;
-  unmountPage();
-  if (!state.user) {
-    app.innerHTML = account.loginView().s;
-    app.querySelector("input[name=username]")?.focus();
-    return;
-  }
-  if (state.user.must_change_password) {
-    app.innerHTML = account.mustChangeView().s;
-    app.querySelector("input[name=new]")?.focus();
-    return;
-  }
+/** Draws the UI from `state`: the login or password screen, or the sidebar and the page. */
+function App() {
+  if (state.user === undefined) return html`<div class="boot">Loading…</div>`;
+  if (!state.user) return html`<${account.LoginPage} />`;
+  if (state.user.must_change_password) return html`<${account.MustChangePage} />`;
   const page = currentPage();
-  app.innerHTML = html`<div class="shell">
-    ${sidebar(page)}
-    <main class="main" id="page">${page.component ? "" : page.view()}</main>
-  </div>`.s;
-  if (page.component) mountPage(document.getElementById("page"), page);
+  // The key starts a page afresh when it is opened: what it edited is gone.
+  return html`<div class="shell ${state.navOpen ? "nav-open" : ""}">
+    <${Sidebar} page=${page} />
+    <main class="main" id="page"><${page.component} key=${page.id} /></main>
+  </div>`;
 }
+
+const redraw = () => render(h(App), app);
+
+// The start-up screen of index.html is replaced, not reused by the diff.
+app.textContent = "";
+redraw();
 
 // A dot next to "Targets" when a target is down or refuses the gateway
 // (red), or does not accept it for another reason (amber).
@@ -135,35 +129,31 @@ function targetsDot() {
     (t) => !down.includes(t) && t.status?.gateway_trust?.state === "failed",
   );
   const list = down.length ? down : other;
-  if (!list.length) return "";
+  if (!list.length) return null;
   const title = `Needs attention: ${list.map((t) => t.name).join(", ")}`;
-  return html`<span class="nav-dot ${down.length ? "bad" : "warn"}" title="${title}"
-    aria-label="${title}"></span>`;
-}
-
-// The sidebar is not redrawn with the page: update the dot in place.
-function updateTargetsDot() {
-  const el = document.querySelector(".targets-dot");
-  if (el) el.innerHTML = html`${targetsDot()}`.s;
+  return html`<span
+    class="nav-dot ${down.length ? "bad" : "warn"}"
+    title=${title}
+    aria-label=${title}
+  ></span>`;
 }
 
 // The sidebar: brand, navigation with counts, the user and their buttons.
-function sidebar(page) {
+function Sidebar({ page }) {
   const rejected = state.status?.rejected_certificates || 0;
-  const link = (p) => html`<a href="#/${p.id}" class="${p.id === page.id ? "active" : ""}">
+  const link = (p) => html`<a href="#/${p.id}" class=${p.id === page.id ? "active" : ""}>
     ${icon(p.icon)}${p.label}
-    ${when(
-      p.id === "certificates" && rejected,
-      html`<span class="count" title="Certificates waiting for a decision">${rejected}</span>`,
-    )}
-    ${when(p.id === "audit", () => html`<span class="alarm-counts">${alarmCounts()}</span>`)}
-    ${when(p.id === "targets", () => html`<span class="targets-dot">${targetsDot()}</span>`)}
+    ${
+      p.id === "certificates" &&
+      rejected > 0 &&
+      html`<span class="count" title="Certificates waiting for a decision">${rejected}</span>`
+    }
+    ${p.id === "audit" && html`<${AlarmCounts} />`}
+    ${p.id === "targets" && html`<span class="targets-dot">${targetsDot()}</span>`}
   </a>`;
   return html`<aside class="sidebar">
     <div class="brand">${gatewayLogo()}<div>Audit Gateway<small>OPC UA</small></div></div>
-    <nav class="nav">
-      ${PAGES.filter((p) => !p.hidden && can(p.role)).map(link)}
-    </nav>
+    <nav class="nav">${PAGES.filter((p) => !p.hidden && can(p.role)).map(link)}</nav>
     <div class="sidebar-foot">
       <div class="user-row">
         <div class="who">${state.user.username}<small>${state.user.role}</small></div>
@@ -171,72 +161,15 @@ function sidebar(page) {
           <a href="#/account" class="button icon-button" title="Account" aria-label="Account">
             ${icon("account")}
           </a>
-          ${themeButton()}
-          <button class="icon-button" data-action="logout" title="Log out" aria-label="Log out">
+          <${ThemeButton} />
+          <button class="icon-button" onClick=${logout} title="Log out" aria-label="Log out">
             ${icon("logout")}
           </button>
         </div>
       </div>
-      <div class="made-by">${ploxcLink()}<span class="version">${state.version}</span></div>
+      <div class="made-by"><${PloxcLink} /><span class="version">${state.version}</span></div>
     </div>
   </aside>`;
-}
-
-/**
- * Redraws the current page only. A periodic refresh must not wipe what the
- * user is typing: the values of the form that has focus, the focus itself and
- * the scroll positions inside the page (e.g. the browser tree) are kept.
- */
-function renderPage() {
-  const el = document.getElementById("page");
-  if (!el) return render();
-  updateTargetsDot();
-
-  // A component page is diffed, which keeps all of that by itself.
-  const page = currentPage();
-  if (page.component) return mountPage(el, page);
-  unmountPage();
-
-  // Remember the form being typed in, and scroll positions.
-  const active = document.activeElement;
-  const typing =
-    active &&
-    el.contains(active) &&
-    /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName) &&
-    active.type !== "file";
-  const form = typing ? active.closest("form[data-form]") : null;
-  const kept = form
-    ? [...form.elements]
-        .filter((e) => e.name && e.type !== "file")
-        .map((e) => [e.name, e.type === "checkbox" ? e.checked : e.value])
-    : [];
-  const focusName = typing ? active.name : null;
-  const scrolls = [...el.querySelectorAll("[data-keep-scroll]")].map((e) => [
-    e.dataset.keepScroll,
-    e.scrollTop,
-    e.scrollLeft,
-  ]);
-
-  el.innerHTML = page.view().s;
-
-  // Put them back.
-  for (const [key, top, left] of scrolls) {
-    const again = el.querySelector(`[data-keep-scroll="${key}"]`);
-    if (again) {
-      again.scrollTop = top;
-      again.scrollLeft = left;
-    }
-  }
-  if (form) {
-    const again = el.querySelector(`form[data-form="${form.dataset.form}"]`);
-    for (const [name, value] of kept) {
-      const input = again?.elements.namedItem(name);
-      if (!input || input instanceof RadioNodeList) continue;
-      if (input.type === "checkbox") input.checked = value;
-      else input.value = value;
-    }
-    again?.elements.namedItem(focusName)?.focus?.();
-  }
 }
 
 // ---------- errors ----------
@@ -253,7 +186,7 @@ const fail = (e) => {
 function browserLost() {
   Object.assign(state.browser, BROWSER_EMPTY());
   toast("The browser session on the target has ended. Connect again to continue.", "bad");
-  renderPage();
+  redraw();
   schedule(currentPage().id);
 }
 
@@ -303,9 +236,11 @@ async function load() {
   } catch (e) {
     fail(e);
   }
-  renderPage();
+  redraw();
   schedule(page.id);
 }
+
+let refreshTimer = null;
 
 /** (Re)starts the periodic refresh of a page; one timer at a time. */
 function schedule(pageId) {
@@ -316,7 +251,7 @@ function schedule(pageId) {
     refreshTimer = setInterval(async () => {
       if (!state.user) return;
       try {
-        if ((await fn()) !== false) renderPage();
+        if ((await fn()) !== false) redraw();
       } catch (e) {
         fail(e);
       }
@@ -335,7 +270,7 @@ function schedule(pageId) {
   }
 }
 
-setHooks({ render, renderPage, load, schedule, fail });
+setHooks({ redraw, load, schedule, fail });
 
 // The sidebar's warning and error counts and the targets dot stay current
 // on every page.
@@ -348,7 +283,7 @@ setInterval(async () => {
     return;
   }
   reloadIfUpgraded();
-  updateTargetsDot();
+  redraw();
 }, 10000);
 
 // This page's UI version: the hash in the URL main.js was loaded from
@@ -363,113 +298,16 @@ function reloadIfUpgraded() {
   if (current === OWN_UI_VERSION) return;
   const active = document.activeElement;
   const typing =
-    active?.matches?.("input, textarea, select") && active.value !== "" && active.type !== "checkbox";
+    active?.matches?.("input, textarea, select") &&
+    active.value !== "" &&
+    active.type !== "checkbox";
   if (typing || document.querySelector("dialog[open], .dialog-backdrop")) return;
   location.reload();
 }
 
-// ---------- actions and forms ----------
-
-// Actions that belong to no page: the header buttons and the folds.
-const shellActions = {
-  async logout() {
-    await post("/logout");
-    // Start from a clean page: nothing of this user's session stays behind.
-    location.hash = "";
-    location.reload();
-  },
-  theme() {
-    // Like ploxc.com: follow the system until the user picks a mode.
-    const root = document.documentElement;
-    const dark = root.dataset.theme
-      ? root.dataset.theme === "dark"
-      : matchMedia("(prefers-color-scheme: dark)").matches;
-    root.dataset.theme = dark ? "light" : "dark";
-    try {
-      localStorage.setItem(THEME_KEY, root.dataset.theme);
-    } catch {}
-  },
-  menu() {
-    document.querySelector(".shell")?.classList.toggle("nav-open");
-  },
-  // Opens or closes a foldable section (components.js `fold`).
-  fold(el) {
-    state.open ||= new Set();
-    const key = el.dataset.key;
-    if (state.open.has(key)) state.open.delete(key);
-    else state.open.add(key);
-    renderPage();
-  },
-};
-
-// `data-action` name → handler(element, event).
-const actions = {
-  ...shellActions,
-  ...summarise.actions,
-  ...audit.actions,
-  ...certificates.actions,
-  ...browser.actions,
-  ...users.actions,
-  ...account.actions,
-  ...settings.actions,
-};
-
-// `data-form` name → handler(form).
-const forms = {
-  ...account.forms,
-  ...audit.forms,
-  ...certificates.forms,
-  ...browser.forms,
-  ...users.forms,
-  ...settings.forms,
-};
-
-// ---------- event delegation ----------
-
-// Clicks on buttons and links with a `data-action`. Selects and checkboxes
-// act on "change" instead (below).
-document.addEventListener("click", async (event) => {
-  const el = event.target.closest("[data-action]");
-  if (!el || el.tagName === "SELECT" || (el.tagName === "INPUT" && el.type === "checkbox")) return;
-  const action = actions[el.dataset.action];
-  if (!action) return;
-  event.preventDefault();
-  try {
-    await action(el, event);
-  } catch (e) {
-    fail(e);
-  }
-});
-
-document.addEventListener("change", async (event) => {
-  const el = event.target.closest("select[data-action], input[type=checkbox][data-action]");
-  if (!el) return;
-  try {
-    await actions[el.dataset.action]?.(el, event);
-  } catch (e) {
-    fail(e);
-  }
-});
-
-// Form submits: the submit button is disabled while the request runs.
-document.addEventListener("submit", async (event) => {
-  const form = event.target.closest("form[data-form]");
-  if (!form) return;
-  event.preventDefault();
-  const button = form.querySelector("button[type=submit]");
-  if (button) button.disabled = true;
-  try {
-    await forms[form.dataset.form](form);
-  } catch (e) {
-    fail(e);
-  } finally {
-    if (button) button.disabled = false;
-  }
-});
-
 window.addEventListener("hashchange", () => {
-  document.querySelector(".shell")?.classList.remove("nav-open");
-  render();
+  state.navOpen = false;
+  redraw();
   load();
 });
 
@@ -490,6 +328,6 @@ try {
   } catch {
     state.user = null;
   }
-  render();
+  redraw();
   if (state.user) await load();
 })();

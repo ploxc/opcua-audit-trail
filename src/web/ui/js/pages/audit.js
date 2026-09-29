@@ -2,56 +2,48 @@
 // dashboard), paging, a record's details, the most written nodes, the bar of
 // unacknowledged warnings and errors, and the integrity check.
 
-import { Html, flag, html, when } from "../html.js";
+import { html, safe, submit } from "../vdom.js";
 import { get, post } from "../api.js";
-import { dialog, eventBadge, formData, menuButton, statusBadge } from "../components.js";
+import { MenuButton, dialog, eventBadge, formData, statusBadge } from "../components.js";
 import { EVENT_GROUPS, eventsByLabel, plural, time, userLabel, valueText } from "../format.js";
-import { summariseControls, summarisedBadge } from "../summarise.js";
+import { SummariseControls, summarisedBadge } from "../summarise.js";
 import { alarm, unacked } from "../alarms.js";
-import { can, load, render, renderPage, schedule, state } from "../state.js";
+import { can, load, redraw, schedule, state } from "../state.js";
 
 // ---------- the records table ----------
 
 // A node as the trail names it: its display name, then its id.
 const nodeName = (e) =>
-  html`${e.display_name || e.node_id}${when(
-    e.display_name,
-    html` <span class="muted mono">${e.node_id}</span>`,
-  )}`;
+  html`${e.display_name || e.node_id}${
+    e.display_name && html` <span class="muted mono">${e.node_id}</span>`
+  }`;
 
 /** The "Details" cell of a record: what happened, per event type. */
 function eventSummary(e, target) {
   switch (e.type) {
     case "write": {
-      const attribute = when(
-        e.attribute !== "Value",
-        html` <span class="muted">(${e.attribute})</span>`,
-      );
-      const old = when(
-        e.old_value,
-        html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`,
-      );
-      const written = when(
-        e.written_status,
-        html` <span class="muted">status ${e.written_status}</span>`,
-      );
-      const sourceTime = when(
-        e.source_timestamp,
-        () =>
-          html` <span class="muted" title="${e.source_timestamp}">
+      const attribute =
+        e.attribute !== "Value" && html` <span class="muted">(${e.attribute})</span>`;
+      const old =
+        e.old_value &&
+        html`<span class="old">${valueText(e.old_value)}</span><span class="arrow">→</span>`;
+      const written =
+        e.written_status && html` <span class="muted">status ${e.written_status}</span>`;
+      const sourceTime =
+        e.source_timestamp &&
+        html` <span class="muted" title=${e.source_timestamp}>
             source time ${time(e.source_timestamp)}
-          </span>`,
-      );
+          </span>`;
       return html`<div>${nodeName(e)} ${summarisedBadge(target, e.node_id)}${attribute}</div>
         <div class="change">
-          ${old}${valueText(e.new_value)}
+          ${old}${valueText(e.new_value)}${" "}
           <span class="muted">${e.new_value.data_type}</span>${written}${sourceTime}
         </div>`;
     }
     case "ignored_writes":
       return html`<div>${nodeName(e)}</div>
         <div class="change">
-          ${e.count} writes${when(e.failed, html`, <b>${e.failed} failed</b>`)}, ${time(e.first)} –
+          ${e.count} writes${e.failed > 0 && html`, <b>${e.failed} failed</b>`}, ${time(e.first)} –${" "}
           ${time(e.last)}, last ${valueText(e.last_value)}
         </div>
         <div class="small muted">${e.clients.join("; ")}</div>`;
@@ -124,13 +116,18 @@ function eventSummary(e, target) {
  * A table of audit records. `compact` leaves out the record number (the
  * dashboard); `selectable` rows open the record's details on click.
  */
-export function auditTable(rows, { compact = false, selectable = false } = {}) {
+export function AuditTable({ rows, compact = false, selectable = false }) {
   if (!rows.length) return html`<p class="empty">No records.</p>`;
+  const select = (seq) => () => {
+    state.audit.selected = state.audit.selected === seq ? null : seq;
+    redraw();
+  };
   const row = (r) => html`<tr
+    key=${r.seq}
     class="${selectable ? "clickable" : ""} ${state.audit.selected === r.seq ? "selected" : ""}"
-    ${new Html(selectable ? `data-action="select-record" data-seq="${r.seq}"` : "")}
+    onClick=${selectable ? select(r.seq) : undefined}
   >
-    ${when(!compact, html`<td class="num muted">${r.seq}</td>`)}
+    ${!compact && html`<td class="num muted">${r.seq}</td>`}
     <td class="nowrap">${time(r.ts)}</td>
     <td>${eventBadge(r.event.type)}</td>
     <td class="target">${r.target || ""}</td>
@@ -142,7 +139,7 @@ export function auditTable(rows, { compact = false, selectable = false } = {}) {
     <table>
       <thead>
         <tr>
-          ${when(!compact, html`<th>#</th>`)}
+          ${!compact && html`<th>#</th>`}
           <th>Time</th>
           <th>Event</th>
           <th>Target</th>
@@ -151,7 +148,9 @@ export function auditTable(rows, { compact = false, selectable = false } = {}) {
           <th>Result</th>
         </tr>
       </thead>
-      <tbody>${rows.map(row)}</tbody>
+      <tbody>
+        ${rows.map(row)}
+      </tbody>
     </table>
   </div>`;
 }
@@ -159,7 +158,7 @@ export function auditTable(rows, { compact = false, selectable = false } = {}) {
 // Who made a record: the user, then the application and its address.
 const clientCell = (client) =>
   html`<div>${userLabel(client)}</div>
-    <div class="muted small" title="${client.application_uri || ""}">
+    <div class="muted small" title=${client.application_uri || ""}>
       ${client.application_name || ""} <span class="nowrap">${client.remote_addr}</span>
     </div>`;
 
@@ -184,21 +183,41 @@ function setFilters(f) {
   Object.assign(state.audit, { filters: f, cursor: null, back: [] });
 }
 
+/** Shows other records: new filters, or another page (`move`, see loadAudit). */
+async function show({ filters, move } = {}) {
+  if (filters) setFilters(filters);
+  state.audit.selected = null;
+  await loadAudit(move);
+  redraw();
+}
+
 // Pages of 100 records, fetched one at a time: the page only ever holds one.
 function pager(a) {
-  if (!a.rows.length || (!a.back.length && !a.olderAvailable)) return "";
+  if (!a.rows.length || (!a.back.length && !a.olderAvailable)) return null;
   const first = a.rows[0].seq,
     last = a.rows[a.rows.length - 1].seq;
   return html`<div class="pager">
     <span class="muted small">Page ${a.back.length + 1} · records #${last}–#${first}</span>
     <div class="inline">
-      <button class="small" data-action="page-newest" ${flag(!a.back.length, "disabled")}>
+      <button
+        class="small"
+        disabled=${!a.back.length}
+        onClick=${safe(() => show({ move: "first" }))}
+      >
         « Newest
       </button>
-      <button class="small" data-action="page-newer" ${flag(!a.back.length, "disabled")}>
+      <button
+        class="small"
+        disabled=${!a.back.length}
+        onClick=${safe(() => show({ move: "newer" }))}
+      >
         ‹ Newer
       </button>
-      <button class="small" data-action="page-older" ${flag(!a.olderAvailable, "disabled")}>
+      <button
+        class="small"
+        disabled=${!a.olderAvailable}
+        onClick=${safe(() => show({ move: "older" }))}
+      >
         Older ›
       </button>
     </div>
@@ -230,14 +249,32 @@ export async function loadAudit(move) {
 
 // ---------- most written nodes ----------
 
+/** Opens or closes the most written nodes. */
+const toggleTop = safe(async () => {
+  const a = state.audit;
+  a.showTop = !a.showTop;
+  a.top = null;
+  redraw();
+  if (a.showTop) {
+    a.top = await get("/audit/most-written?hours=24");
+    redraw();
+  }
+});
+
 /** The nodes written most in the last 24 hours, with a button to summarise each. */
 function mostWrittenCard() {
   const top = state.audit.top;
+  // Filters the records on a node.
+  const filterNode = (nodeId) =>
+    safe((event) => {
+      event.preventDefault();
+      return show({ filters: { ...state.audit.filters, node_id: nodeId } });
+    });
   const row = (n) => html`<tr>
     <td>${n.target || ""}</td>
     <td>
-      <a href="#" data-action="filter-node" data-node="${n.node_id}">${n.display_name || n.node_id}</a>
-      ${when(n.display_name, html`<div class="muted mono small">${n.node_id}</div>`)}
+      <a href="#" onClick=${filterNode(n.node_id)}>${n.display_name || n.node_id}</a>
+      ${n.display_name && html`<div class="muted mono small">${n.node_id}</div>`}
     </td>
     <td class="num">${n.count}</td>
     <td>
@@ -251,10 +288,15 @@ function mostWrittenCard() {
       }
     </td>
     <td>
-      ${summariseControls(
-        { target: n.target, node_id: n.node_id, name: n.display_name, client: n.last.client },
-        { compact: true },
-      )}
+      <${SummariseControls}
+        node=${{
+          target: n.target,
+          node_id: n.node_id,
+          name: n.display_name,
+          client: n.last.client,
+        }}
+        compact
+      />
     </td>
   </tr>`;
   const body = !top
@@ -272,13 +314,15 @@ function mostWrittenCard() {
                 <th></th>
               </tr>
             </thead>
-            <tbody>${top.map(row)}</tbody>
+            <tbody>
+              ${top.map(row)}
+            </tbody>
           </table>
         </div>`;
   return html`<div class="card">
     <div class="card-head">
       <h2>Most written nodes, last 24 hours</h2>
-      <button class="small" data-action="toggle-top">Close</button>
+      <button class="small" onClick=${toggleTop}>Close</button>
     </div>
     <p class="section-note">
       Nodes that fill the trail, such as a life bit or a clock, can be summarised: one record per
@@ -289,6 +333,36 @@ function mostWrittenCard() {
 }
 
 // ---------- unacknowledged warnings and errors ----------
+
+/** Shows the unacknowledged records of one severity. */
+const showAlarms = (severity) =>
+  safe(async () => {
+    const a = alarm(severity);
+    if (!a) return;
+    await show({ filters: { kinds: a.kinds.join(","), after_seq: String(a.acknowledged_up_to) } });
+  });
+
+/** Acknowledges every record of one severity, after asking. */
+const ackAlarms = (severity) =>
+  safe(async () => {
+    const n = unacked(severity);
+    const confirmed = await dialog({
+      title: `Acknowledge ${plural(n, severity)}?`,
+      confirm: "Acknowledge",
+      body: html`<p>
+          They stay in the audit trail, and the acknowledgement is recorded there too, under your
+          name.
+        </p>
+        <p class="muted small">New ${severity}s after this moment count again.</p>`,
+    });
+    if (!confirmed) return;
+    state.alarms = await post("/alarms/acknowledge", { severity });
+    if (state.audit.filters.after_seq) setFilters({});
+    await loadAudit();
+    load();
+  });
+
+const clearFilter = safe(() => show({ filters: {} }));
 
 /**
  * The bar above the records: how many warnings and errors nobody acknowledged,
@@ -305,61 +379,71 @@ function alarmBar() {
         ? "error"
         : "warning"
       : null;
-  if (!e && !w && !showing) return "";
+  if (!e && !w && !showing) return null;
   const block = (severity, n, word) =>
-    when(
-      n,
-      html`<div class="alarm-line">
-        <b>${plural(n, word)}</b> not acknowledged
-        <button class="small" data-action="show-alarms" data-severity="${severity}">Show</button>
-        ${when(
-          can("operator"),
-          html`<button class="small" data-action="ack-alarms" data-severity="${severity}">
-            Acknowledge ${word}s
-          </button>`,
-        )}
-      </div>`,
-    );
+    n > 0 &&
+    html`<div class="alarm-line">
+      <b>${plural(n, word)}</b> not acknowledged${" "}
+      <button class="small" onClick=${showAlarms(severity)}>Show</button>
+      ${
+        can("operator") &&
+        html`<button class="small" onClick=${ackAlarms(severity)}>Acknowledge ${word}s</button>`
+      }
+    </div>`;
   return html`<div class="alert ${e ? "bad" : "warn"} alarm-bar">
     ${block("error", e, "error")}${block("warning", w, "warning")}
-    ${when(!e && !w, html`<div class="alarm-line">Everything is acknowledged.</div>`)}
-    ${when(
-      showing,
+    ${!e && !w && html`<div class="alarm-line">Everything is acknowledged.</div>`}
+    ${
+      showing &&
       html`<div class="alarm-line small">
-        Showing only unacknowledged ${showing}s.
-        <button class="small" data-action="clear-filter">Show everything</button>
-      </div>`,
-    )}
+      Showing only unacknowledged ${showing}s.${" "}
+      <button class="small" onClick=${clearFilter}>Show everything</button>
+    </div>`
+    }
   </div>`;
 }
 
 // ---------- the page ----------
 
-export function auditView() {
+/** The "Live" toggle: reloads the records every 3 s. */
+function toggleLive() {
+  state.audit.live = !state.audit.live;
+  schedule("audit");
+  redraw();
+}
+
+const verify = safe(async () => {
+  state.audit.verify = await get("/audit/verify");
+  redraw();
+});
+
+export function AuditPage() {
   const a = state.audit;
   const f = a.filters;
   const targets = state.status?.targets || [];
   const selected = a.rows.find((r) => r.seq === a.selected);
   return html`
     <div class="page-head">
-      <div class="inline">${menuButton}<h1>Audit trail</h1></div>
+      <div class="inline"><${MenuButton} /><h1>Audit trail</h1></div>
       <div class="actions">
-        <button class="live-toggle ${a.live ? "on" : ""}" data-action="live" aria-pressed="${a.live}"
-          title="${a.live ? "Stop reloading" : "Reload the records every 3 s"}">
+        <button
+          class="live-toggle ${a.live ? "on" : ""}"
+          onClick=${toggleLive}
+          aria-pressed=${a.live ? "true" : "false"}
+          title=${a.live ? "Stop reloading" : "Reload the records every 3 s"}
+        >
           <span class="live-dot"></span>Live
         </button>
-        <button data-action="toggle-top">Most written</button>
-        <button data-action="verify">Verify integrity</button>
+        <button onClick=${toggleTop}>Most written</button>
+        <button onClick=${verify}>Verify integrity</button>
         <a class="button" href="/api/audit.csv?${auditQuery({ limit: "" })}">Export CSV</a>
       </div>
     </div>
-    ${when(a.verify, () => verifyResult(a.verify))}
-    ${alarmBar()}
-    ${when(a.showTop, mostWrittenCard)}
-    ${filtersForm(f, targets)}
-    <div class="${selected ? "split" : ""}">
-      <div class="card">${auditTable(a.rows, { selectable: true })}${pager(a)}</div>
-      ${when(selected, () => recordDetail(selected))}
+    ${a.verify && verifyResult(a.verify)} ${alarmBar()} ${a.showTop && mostWrittenCard()}
+    <${Filters} key=${JSON.stringify(f)} f=${f} targets=${targets} />
+    <div class=${selected ? "split" : ""}>
+      <div class="card"><${AuditTable} rows=${a.rows} selectable />${pager(a)}</div>
+      ${selected && recordDetail(selected)}
     </div>`;
 }
 
@@ -368,20 +452,22 @@ const verifyResult = (v) =>
   v.error
     ? html`<div class="alert bad"><b>Integrity check failed.</b> ${v.error}</div>`
     : html`<div class="alert ok">
-        All ${v.records} records (#${v.first_seq}–#${v.last_seq}) are intact. Chain head
+        All ${v.records} records (#${v.first_seq}–#${v.last_seq}) are intact. Chain head${" "}
         <span class="mono">${v.head_hash.slice(0, 16)}…</span>
       </div>`;
 
-// The filter form above the records.
-function filtersForm(f, targets) {
-  return html`<form class="card filters" data-form="audit-filter">
+/**
+ * The filter form above the records. Its fields start from the filters in
+ * use; the `key` above draws it afresh when they change (e.g. "Clear").
+ */
+function Filters({ f, targets }) {
+  const filter = submit((form) => show({ filters: formData(form) }));
+  return html`<form class="card filters" onSubmit=${filter}>
     <div>
       <label>Target</label>
       <select name="target">
         <option value="">All</option>
-        ${targets.map(
-          (t) => html`<option ${flag(f.target === t.name, "selected")}>${t.name}</option>`,
-        )}
+        ${targets.map((t) => html`<option selected=${f.target === t.name}>${t.name}</option>`)}
       </select>
     </div>
     <div>
@@ -389,9 +475,10 @@ function filtersForm(f, targets) {
       <select name="kinds">
         <option value="">All</option>
         ${EVENT_GROUPS.map(
-          ([k, label, kinds]) =>
-            html`<option value="${kinds.join(",")}" ${flag(f.kinds === kinds.join(","), "selected")}
-              >${label}</option>`,
+          ([, label, kinds]) =>
+            html`<option value=${kinds.join(",")} selected=${f.kinds === kinds.join(",")}>
+              ${label}
+            </option>`,
         )}
       </select>
     </div>
@@ -400,29 +487,29 @@ function filtersForm(f, targets) {
       <select name="kind">
         <option value="">All</option>
         ${eventsByLabel().map(
-          ([k, v]) => html`<option value="${k}" ${flag(f.kind === k, "selected")}>${v}</option>`,
+          ([k, v]) => html`<option value=${k} selected=${f.kind === k}>${v}</option>`,
         )}
       </select>
     </div>
     <div>
       <label>User</label>
-      <input name="user" value="${f.user || ""}" placeholder="part of the name">
+      <input name="user" defaultValue=${f.user || ""} placeholder="part of the name" />
     </div>
     <div>
       <label>Node</label>
-      <input name="node_id" value="${f.node_id || ""}" placeholder="part of the id or name">
+      <input name="node_id" defaultValue=${f.node_id || ""} placeholder="part of the id or name" />
     </div>
     <div>
       <label>From</label>
-      <input type="datetime-local" name="since" value="${f.since || ""}">
+      <input type="datetime-local" name="since" defaultValue=${f.since || ""} />
     </div>
     <div>
       <label>Until</label>
-      <input type="datetime-local" name="until" value="${f.until || ""}">
+      <input type="datetime-local" name="until" defaultValue=${f.until || ""} />
     </div>
     <div class="inline">
       <button class="primary" type="submit">Filter</button>
-      <button type="button" data-action="clear-filter">Clear</button>
+      <button type="button" onClick=${clearFilter}>Clear</button>
     </div>
   </form>`;
 }
@@ -435,10 +522,14 @@ function recordDetail(selected) {
     (e.type === "write" && e.attribute === "Value") || e.type === "ignored_writes";
   // The record as stored, without its number, time and hash (shown above).
   const record = { target: selected.target, client: selected.client, event: e };
+  const close = () => {
+    state.audit.selected = null;
+    redraw();
+  };
   return html`<div class="card detail">
     <div class="card-head">
       <h2>Record #${selected.seq}</h2>
-      <button class="small" data-action="close-record">Close</button>
+      <button class="small" onClick=${close}>Close</button>
     </div>
     <dl class="kv">
       <dt>Time</dt>
@@ -446,121 +537,18 @@ function recordDetail(selected) {
       <dt>Hash</dt>
       <dd class="mono small">${selected.hash}</dd>
     </dl>
-    ${when(summarisable, () =>
-      summariseControls({
+    ${
+      summarisable &&
+      html`<${SummariseControls}
+      node=${{
         target: selected.target,
         node_id: e.node_id,
         name: e.display_name,
         client: selected.client,
-      }),
-    )}
+      }}
+    />`
+    }
     <h3 class="mt">Record</h3>
     <pre class="json">${JSON.stringify(record, null, 2)}</pre>
   </div>`;
 }
-
-// ---------- actions and forms ----------
-
-export const actions = {
-  "select-record"(el) {
-    const seq = Number(el.dataset.seq);
-    state.audit.selected = state.audit.selected === seq ? null : seq;
-    renderPage();
-  },
-  "close-record"() {
-    state.audit.selected = null;
-    renderPage();
-  },
-
-  /** Shows the unacknowledged records of one severity. */
-  async "show-alarms"(el) {
-    const a = alarm(el.dataset.severity);
-    if (!a) return;
-    setFilters({ kinds: a.kinds.join(","), after_seq: String(a.acknowledged_up_to) });
-    state.audit.selected = null;
-    await loadAudit();
-    renderPage();
-  },
-
-  /** Acknowledges every record of one severity, after asking. */
-  async "ack-alarms"(el) {
-    const severity = el.dataset.severity;
-    const n = unacked(severity);
-    const confirmed = await dialog({
-      title: `Acknowledge ${plural(n, severity)}?`,
-      confirm: "Acknowledge",
-      body: html`<p>
-          They stay in the audit trail, and the acknowledgement is recorded there too, under your
-          name.
-        </p>
-        <p class="muted small">New ${severity}s after this moment count again.</p>`,
-    });
-    if (!confirmed) return;
-    state.alarms = await post("/alarms/acknowledge", { severity });
-    if (state.audit.filters.after_seq) setFilters({});
-    await loadAudit();
-    render();
-    load();
-  },
-
-  /** Opens or closes the most written nodes. */
-  async "toggle-top"() {
-    const a = state.audit;
-    a.showTop = !a.showTop;
-    a.top = null;
-    renderPage();
-    if (a.showTop) {
-      a.top = await get("/audit/most-written?hours=24");
-      renderPage();
-    }
-  },
-
-  /** Filters the records on a node (from the most written nodes). */
-  async "filter-node"(el) {
-    setFilters({ ...state.audit.filters, node_id: el.dataset.node });
-    state.audit.selected = null;
-    await loadAudit();
-    renderPage();
-  },
-
-  async "page-older"() {
-    state.audit.selected = null;
-    await loadAudit("older");
-    renderPage();
-  },
-  async "page-newer"() {
-    state.audit.selected = null;
-    await loadAudit("newer");
-    renderPage();
-  },
-  async "page-newest"() {
-    state.audit.selected = null;
-    await loadAudit("first");
-    renderPage();
-  },
-  async verify() {
-    state.audit.verify = await get("/audit/verify");
-    renderPage();
-  },
-  async "clear-filter"() {
-    setFilters({});
-    await loadAudit();
-    renderPage();
-  },
-
-  /** The "Live" toggle: reloads the records every 3 s. */
-  live() {
-    state.audit.live = !state.audit.live;
-    schedule("audit");
-    renderPage();
-  },
-};
-
-export const forms = {
-  async "audit-filter"(form) {
-    setFilters(formData(form));
-    state.audit.selected = null;
-    await loadAudit();
-    renderPage();
-  },
-};

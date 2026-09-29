@@ -1,15 +1,15 @@
 // Certificates page: the gateway's own certificate (download, import,
 // regenerate), certificates waiting for a decision, and trusted ones.
 
-import { html, when } from "../html.js";
+import { html, safe, submit, useState } from "../vdom.js";
 import { del, post } from "../api.js";
-import { dialog, formData, menuButton, readFile, toast } from "../components.js";
+import { MenuButton, dialog, readFile, toast } from "../components.js";
 import { time } from "../format.js";
-import { can, load, renderPage, state } from "../state.js";
+import { can, load, state } from "../state.js";
 
 // One certificate in a table, with its buttons.
 function certRow(c, actions) {
-  return html`<tr>
+  return html`<tr key=${c.thumbprint}>
     <td>${c.subject}<div class="mono muted small">${c.thumbprint}</div></td>
     <td class="nowrap small">${time(c.not_after)}</td>
     <td class="actions-cell">${actions}</td>
@@ -35,13 +35,57 @@ const certTable = (certs, actions, empty) =>
       </div>`
     : html`<p class="muted small">${empty}</p>`;
 
-export function certificatesView() {
+const trust = (thumb) =>
+  safe(async () => {
+    await post(`/certificates/rejected/${thumb}/trust`);
+    toast("Certificate trusted");
+    await load();
+  });
+
+const remove = (thumb) =>
+  safe(async () => {
+    await del(`/certificates/rejected/${thumb}`);
+    await load();
+  });
+
+const untrust = (thumb) =>
+  safe(async () => {
+    const confirmed = await dialog({
+      title: "Revoke trust?",
+      body:
+        "Applications using this certificate can no longer connect securely; " +
+        "their connections are closed.",
+      confirm: "Revoke",
+      danger: true,
+    });
+    if (!confirmed) return;
+    await post(`/certificates/trusted/${thumb}/untrust`);
+    await load();
+  });
+
+const regenerate = safe(async () => {
+  const confirmed = await dialog({
+    title: "Generate a new gateway certificate?",
+    body:
+      "Every PLC and client must trust the new one. " +
+      "All targets restart, which disconnects their clients.",
+    confirm: "Generate",
+    danger: true,
+  });
+  if (!confirmed) return;
+  await post("/certificates/own/regenerate");
+  toast("New certificate generated");
+  await load();
+});
+
+export function CertificatesPage() {
+  const [importing, setImporting] = useState(false);
   const c = state.certificates;
   if (!c) return html`<p class="muted">Loading…</p>`;
   const admin = can("admin");
   return html`
     <div class="page-head">
-      <div class="inline">${menuButton}<h1>Certificates</h1></div>
+      <div class="inline"><${MenuButton} /><h1>Certificates</h1></div>
     </div>
     <div class="card">
       <div class="card-head">
@@ -49,11 +93,11 @@ export function certificatesView() {
         <div class="inline">
           <a class="button small" href="/api/certificates/own/cert.pem">Download (.pem)</a>
           <a class="button small" href="/api/certificates/own/cert.der">Download (.der)</a>
-          ${when(
-            admin,
-            html`<button class="small" data-action="show-import">Import…</button>
-              <button class="small danger" data-action="regenerate">Regenerate</button>`,
-          )}
+          ${
+            admin &&
+            html`<button class="small" onClick=${() => setImporting(true)}>Import…</button>
+            <button class="small danger" onClick=${regenerate}>Regenerate</button>`
+          }
         </div>
       </div>
       ${
@@ -73,10 +117,10 @@ export function certificatesView() {
         nothing else.
       </p>
       <p class="hint">
-        For OPC UA only: the web UI's HTTPS certificate is a separate one, on the
+        For OPC UA only: the web UI's HTTPS certificate is a separate one, on the${" "}
         <a href="#/settings">Settings</a> page.
       </p>
-      ${when(state.showImport, importForm)}
+      ${importing && html`<${ImportForm} close=${() => setImporting(false)} />`}
     </div>
     <div class="card">
       <div class="card-head">
@@ -89,15 +133,9 @@ export function certificatesView() {
       ${certTable(
         c.rejected,
         (x) =>
-          when(
-            admin,
-            html`<button class="small primary" data-action="trust-cert" data-thumb="${x.thumbprint}">
-                Trust
-              </button>
-              <button class="small danger" data-action="delete-cert" data-thumb="${x.thumbprint}">
-                Delete
-              </button>`,
-          ),
+          admin &&
+          html`<button class="small primary" onClick=${trust(x.thumbprint)}>Trust</button>${" "}
+            <button class="small danger" onClick=${remove(x.thumbprint)}>Delete</button>`,
         "Nothing waiting.",
       )}
     </div>
@@ -109,91 +147,41 @@ export function certificatesView() {
       ${certTable(
         c.trusted,
         (x) =>
-          when(
-            admin,
-            html`<button class="small danger" data-action="untrust-cert" data-thumb="${x.thumbprint}">
-              Revoke trust
-            </button>`,
-          ),
+          admin &&
+          html`<button class="small danger" onClick=${untrust(x.thumbprint)}>
+            Revoke trust
+          </button>`,
         "No trusted certificates yet.",
       )}
     </div>`;
 }
 
 // Installing a certificate and key made elsewhere.
-const importForm = () => html`<form data-form="import" class="mt">
-  <div class="form-grid">
-    <div>
-      <label>Certificate (DER or PEM)</label>
-      <input type="file" name="certificate" required>
-    </div>
-    <div>
-      <label>Private key (PEM)</label>
-      <input type="file" name="private_key" required>
-    </div>
-    <div class="inline">
-      <button class="primary" type="submit">Install</button>
-      <button type="button" data-action="hide-import">Cancel</button>
-    </div>
-  </div>
-  <p class="hint">All targets restart with the new certificate. PLCs and clients must trust it.</p>
-</form>`;
-
-export const actions = {
-  async "trust-cert"(el) {
-    await post(`/certificates/rejected/${el.dataset.thumb}/trust`);
-    toast("Certificate trusted");
-    await load();
-  },
-  async "delete-cert"(el) {
-    await del(`/certificates/rejected/${el.dataset.thumb}`);
-    await load();
-  },
-  async "untrust-cert"(el) {
-    const confirmed = await dialog({
-      title: "Revoke trust?",
-      body:
-        "Applications using this certificate can no longer connect securely; " +
-        "their connections are closed.",
-      confirm: "Revoke",
-      danger: true,
-    });
-    if (!confirmed) return;
-    await post(`/certificates/trusted/${el.dataset.thumb}/untrust`);
-    await load();
-  },
-  "show-import"() {
-    state.showImport = true;
-    renderPage();
-  },
-  "hide-import"() {
-    state.showImport = false;
-    renderPage();
-  },
-  async regenerate() {
-    const confirmed = await dialog({
-      title: "Generate a new gateway certificate?",
-      body:
-        "Every PLC and client must trust the new one. " +
-        "All targets restart, which disconnects their clients.",
-      confirm: "Generate",
-      danger: true,
-    });
-    if (!confirmed) return;
-    await post("/certificates/own/regenerate");
-    toast("New certificate generated");
-    await load();
-  },
-};
-
-export const forms = {
+function ImportForm({ close }) {
   /** Installs the imported certificate and key (sent as base64). */
-  async import(form) {
+  const install = submit(async (form) => {
     const cert = await readFile(form.certificate.files[0]);
     const key = await readFile(form.private_key.files[0]);
     await post("/certificates/own", { certificate: cert, private_key: key });
-    state.showImport = false;
+    close();
     toast("Certificate installed");
     await load();
-  },
-};
+  });
+  return html`<form class="mt" onSubmit=${install}>
+    <div class="form-grid">
+      <div>
+        <label>Certificate (DER or PEM)</label>
+        <input type="file" name="certificate" required />
+      </div>
+      <div>
+        <label>Private key (PEM)</label>
+        <input type="file" name="private_key" required />
+      </div>
+      <div class="inline">
+        <button class="primary" type="submit">Install</button>
+        <button type="button" onClick=${close}>Cancel</button>
+      </div>
+    </div>
+    <p class="hint">All targets restart with the new certificate. PLCs and clients must trust it.</p>
+  </form>`;
+}

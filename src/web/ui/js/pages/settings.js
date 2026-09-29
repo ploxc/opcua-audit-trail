@@ -1,17 +1,21 @@
 // Settings page: the audit trail (retention, fail mode, old values, summary
 // interval), the export to QuestDB, the gateway certificate's host names,
 // and read-only information about the web UI and files.
+//
+// The forms' fields start from the saved settings (`defaultValue`, see
+// vdom.js). After a save the settings are loaded again and the form is
+// reset to them, which also empties the secret fields.
 
-import { flag, html, when } from "../html.js";
+import { html, safe, submit } from "../vdom.js";
 import { get, post, put } from "../api.js";
-import { dialog, formData, menuButton, toast } from "../components.js";
-import { can, renderPage, state } from "../state.js";
+import { MenuButton, dialog, formData, toast } from "../components.js";
+import { can, redraw, state } from "../state.js";
 import { time } from "../format.js";
 
 // How an export destination is doing, from the last /status answer.
 function exportState(name) {
   const e = (state.status?.exports || []).find((x) => x.name === name);
-  if (!e) return "";
+  if (!e) return null;
   const kind = e.last_error || e.gap ? "bad" : e.pending > 0 ? "warn" : "ok";
   const text = e.last_error
     ? `Failing: ${e.last_error}`
@@ -34,31 +38,37 @@ function secretField(prefix, name, label, isSet, off) {
       name="${prefix}_${name}"
       type="password"
       autocomplete="new-password"
-      placeholder="${isSet ? "•••••• (unchanged)" : ""}"
-      ${off}
-    >
-    ${when(
-      isSet,
+      placeholder=${isSet ? "•••••• (unchanged)" : ""}
+      disabled=${off}
+    />
+    ${
+      isSet &&
       html`<label class="inline small">
-        <input type="checkbox" name="${prefix}_${name}_clear" ${off}> remove
-      </label>`,
-    )}
+      <input type="checkbox" name="${prefix}_${name}_clear" disabled=${off} /> remove
+    </label>`
+    }
   </div>`;
 }
 
-export function settingsView() {
+/** Loads the settings (and the status, with `status`) again, redraws and resets `form`. */
+async function reload(form, { status = false } = {}) {
+  state.settings = await get("/settings");
+  if (status) state.status = await get("/status");
+  redraw();
+  form.reset();
+}
+
+const saveButton = (edit) =>
+  edit && html`<div class="actions mt"><button class="primary" type="submit">Save</button></div>`;
+
+export function SettingsPage() {
   const st = state.settings;
   const head = html`<div class="page-head">
-    <div class="inline">${menuButton}<h1>Settings</h1></div>
+    <div class="inline"><${MenuButton} /><h1>Settings</h1></div>
   </div>`;
   if (!st) return html`${head}<p class="muted">Loading…</p>`;
   // Only admins can change settings; others see them disabled.
   const edit = can("admin");
-  const off = flag(!edit, "disabled");
-  const save = when(
-    edit,
-    html`<div class="actions mt"><button class="primary" type="submit">Save</button></div>`,
-  );
   return html`${head}
     <p class="section-note">
       Saved in <span class="mono">${st.config_file}</span> and applied at once, without
@@ -66,18 +76,57 @@ export function settingsView() {
       target (security, summarised nodes) are on the <a href="#/targets">Targets</a> page.
     </p>
     <div class="settings-grid">
-      ${auditCard(st.audit, off, save)}
-      ${exportCard(st.export.questdb, off, save)}
-      ${gatewayCard(st, off, save)}
-      ${mcpCard(st.mcp, off, save)}
-      ${webCard(st)}
+      ${auditCard(st.audit, edit)} ${exportCard(st.export.questdb, edit)}
+      ${gatewayCard(st, edit)} ${mcpCard(st.mcp, edit)} ${webCard(st)}
     </div>`;
 }
 
 // ---------- the cards ----------
 
-function auditCard(a, off, save) {
-  return html`<form class="card" data-form="settings-audit">
+/** Saves the audit settings; shortening retention or failing closed asks first. */
+const saveAudit = submit(async (form) => {
+  const d = formData(form);
+  const body = {
+    retention_days: Number(d.retention_days),
+    fail_mode: d.fail_mode,
+    record_old_value: form.elements.record_old_value.checked,
+    ignored_summary_secs: Number(d.summary_minutes) * 60,
+  };
+  const old = state.settings.audit;
+  const shorter =
+    body.retention_days > 0 &&
+    (old.retention_days === 0 || body.retention_days < old.retention_days);
+  if (shorter) {
+    const confirmed = await dialog({
+      title: `Keep records for ${body.retention_days} days?`,
+      confirm: "Save",
+      danger: true,
+      body: html`<p>
+          Records older than ${body.retention_days} days are deleted for good, starting right
+          away.
+        </p>
+        <p class="muted small">Exported copies (QuestDB) are not affected.</p>`,
+    });
+    if (!confirmed) return;
+  }
+  if (body.fail_mode === "closed" && old.fail_mode !== "closed") {
+    const confirmed = await dialog({
+      title: "Reject writes when the trail cannot be written?",
+      confirm: "Save",
+      body:
+        "From now on, a write only reaches the PLC after its record is stored. " +
+        "If the audit trail fails (e.g. a full disk), clients can no longer write.",
+    });
+    if (!confirmed) return;
+  }
+  await put("/settings/audit", body);
+  toast("Audit trail settings saved");
+  await reload(form, { status: true });
+});
+
+function auditCard(a, edit) {
+  const off = !edit;
+  return html`<form class="card" onSubmit=${saveAudit}>
     <h2>Audit trail</h2>
     <div class="setting">
       <label class="title" for="retention">Keep records for</label>
@@ -89,9 +138,9 @@ function auditCard(a, off, save) {
           min="0"
           max="36500"
           required
-          value="${a.retention_days}"
-          ${off}
-        >
+          defaultValue=${a.retention_days}
+          disabled=${off}
+        />
         days
       </div>
       <p class="help">
@@ -107,9 +156,9 @@ function auditCard(a, off, save) {
             type="radio"
             name="fail_mode"
             value="open"
-            ${flag(a.fail_mode === "open", "checked")}
-            ${off}
-          >
+            defaultChecked=${a.fail_mode === "open"}
+            disabled=${off}
+          />
           Keep forwarding writes
           <span class="muted small">
             Clients are never held up; records that could not be stored are counted and reported.
@@ -120,9 +169,9 @@ function auditCard(a, off, save) {
             type="radio"
             name="fail_mode"
             value="closed"
-            ${flag(a.fail_mode === "closed", "checked")}
-            ${off}
-          >
+            defaultChecked=${a.fail_mode === "closed"}
+            disabled=${off}
+          />
           Reject writes
           <span class="muted small">
             A write only reaches the PLC after its record is stored. Safer, but the audit trail must
@@ -133,7 +182,12 @@ function auditCard(a, off, save) {
     </div>
     <div class="setting">
       <label class="inline">
-        <input type="checkbox" name="record_old_value" ${flag(a.record_old_value, "checked")} ${off}>
+        <input
+          type="checkbox"
+          name="record_old_value"
+          defaultChecked=${a.record_old_value}
+          disabled=${off}
+        />
         Record the old value of each write
       </label>
       <p class="help">
@@ -151,9 +205,9 @@ function auditCard(a, off, save) {
           min="1"
           max="1440"
           required
-          value="${Math.max(1, Math.round(a.ignored_summary_secs / 60))}"
-          ${off}
-        >
+          defaultValue=${Math.max(1, Math.round(a.ignored_summary_secs / 60))}
+          disabled=${off}
+        />
         minutes
       </div>
       <p class="help">
@@ -165,13 +219,42 @@ function auditCard(a, off, save) {
       <dt>Database</dt>
       <dd class="mono">${a.database}</dd>
     </dl>
-    ${save}
+    ${saveButton(edit)}
   </form>`;
 }
 
+/**
+ * Saves the export settings. A secret is only sent when typed (or removed),
+ * so saving other fields keeps it.
+ */
+const saveExport = submit(async (form) => {
+  const d = formData(form);
+  const on = (name) => form.elements[name].checked;
+  const secret = (body, name, prefix) => {
+    if (d[`${prefix}_${name}`]) body[name] = d[`${prefix}_${name}`];
+    else if (form.elements[`${prefix}_${name}_clear`]?.checked) body[name] = "";
+  };
+  const body = {};
+  if (on("questdb_on")) {
+    body.questdb = {
+      url: d.q_url,
+      table: d.q_table || "opcua_audit",
+      username: d.q_username || null,
+      ca_pem: d.q_ca_pem || "",
+      interval_secs: Number(d.q_interval) || 5,
+    };
+    secret(body.questdb, "password", "q");
+    secret(body.questdb, "token", "q");
+  }
+  await put("/settings/export", body);
+  toast("Export settings saved");
+  await reload(form, { status: true });
+});
+
 // `q` is the QuestDB export, or null when there is none.
-function exportCard(q, off, save) {
-  return html`<form class="card" data-form="settings-export">
+function exportCard(q, edit) {
+  const off = !edit;
+  return html`<form class="card" onSubmit=${saveExport}>
     <h2>Export</h2>
     <p class="section-note">
       A copy of every record outside the gateway, for long-term storage and as proof that the local
@@ -180,27 +263,43 @@ function exportCard(q, off, save) {
     </p>
     <div class="setting">
       <label class="inline title">
-        <input type="checkbox" name="questdb_on" ${flag(q, "checked")} ${off}> QuestDB
+        <input type="checkbox" name="questdb_on" defaultChecked=${!!q} disabled=${off} /> QuestDB
       </label>
       ${exportState("questdb")}
       <div class="form-grid">
         <div>
           <label>URL</label>
-          <input name="q_url" placeholder="http://questdb:9000" value="${q?.url || ""}" ${off}>
+          <input
+            name="q_url"
+            placeholder="http://questdb:9000"
+            defaultValue=${q?.url || ""}
+            disabled=${off}
+          />
         </div>
         <div>
           <label>Table</label>
-          <input name="q_table" value="${q?.table || "opcua_audit"}" ${off}>
+          <input name="q_table" defaultValue=${q?.table || "opcua_audit"} disabled=${off} />
         </div>
         <div>
           <label>User name</label>
-          <input name="q_username" autocomplete="off" value="${q?.username || ""}" ${off}>
+          <input
+            name="q_username"
+            autocomplete="off"
+            defaultValue=${q?.username || ""}
+            disabled=${off}
+          />
         </div>
         ${secretField("q", "password", "Password", q?.password_set, off)}
         ${secretField("q", "token", "Or a token", q?.token_set, off)}
         <div>
           <label>Every (s)</label>
-          <input name="q_interval" type="number" min="1" value="${q?.interval_secs || 5}" ${off}>
+          <input
+            name="q_interval"
+            type="number"
+            min="1"
+            defaultValue=${q?.interval_secs || 5}
+            disabled=${off}
+          />
         </div>
       </div>
       <div class="mt-xs">
@@ -210,17 +309,27 @@ function exportCard(q, off, save) {
           rows="6"
           class="mono small"
           spellcheck="false"
-          placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"
-          ${off}
-        >${q?.ca_pem || ""}</textarea>
+          placeholder=${"-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----"}
+          defaultValue=${q?.ca_pem || ""}
+          disabled=${off}
+        ></textarea>
       </div>
     </div>
-    ${save}
+    ${saveButton(edit)}
   </form>`;
 }
 
-function gatewayCard(st, off, save) {
-  return html`<form class="card" data-form="settings-gateway">
+const saveGateway = submit(async (form) => {
+  const names = formData(form)
+    .certificate_hostnames.split(/[\s,;]+/)
+    .filter(Boolean);
+  await put("/settings/gateway", { certificate_hostnames: names });
+  toast("Saved. Generate a new certificate to use it (Certificates page).");
+  await reload(form);
+});
+
+function gatewayCard(st, edit) {
+  return html`<form class="card" onSubmit=${saveGateway}>
     <h2>Gateway certificate</h2>
     <dl class="kv small readonly-kv">
       <dt>Application name</dt>
@@ -234,16 +343,16 @@ function gatewayCard(st, off, save) {
         id="hostnames"
         name="certificate_hostnames"
         placeholder="gateway.local, 192.168.0.20"
-        value="${st.gateway.certificate_hostnames.join(", ")}"
-        ${off}
-      >
+        defaultValue=${st.gateway.certificate_hostnames.join(", ")}
+        disabled=${!edit}
+      />
       <p class="help">
         How clients reach the gateway, put in its certificate. Used when the certificate is
-        generated: after a change, generate a new one on the
+        generated: after a change, generate a new one on the${" "}
         <a href="#/certificates">Certificates</a> page.
       </p>
     </div>
-    ${save}
+    ${saveButton(edit)}
   </form>`;
 }
 
@@ -258,35 +367,42 @@ export const SCOPE_LABELS = {
 /** The role a token's user needs for a scope (as mcp_scope_role in config.rs). */
 export const scopeRole = (scope) => (scope === "alarms" ? "operator" : "admin");
 
-function mcpCard(m, off, save) {
-  return html`<form class="card" data-form="settings-mcp">
+const saveMcp = submit(async (form) => {
+  const enabled = form.elements.enabled.checked;
+  await put("/settings/mcp", { enabled });
+  toast(enabled ? "MCP endpoint on" : "MCP endpoint off");
+  await reload(form);
+});
+
+function mcpCard(m, edit) {
+  return html`<form class="card" onSubmit=${saveMcp}>
     <h2>AI assistants (MCP)</h2>
     <div class="setting">
       <label class="inline">
-        <input type="checkbox" name="enabled" ${flag(m.enabled, "checked")} ${off}>
+        <input type="checkbox" name="enabled" defaultChecked=${m.enabled} disabled=${!edit} />
         MCP endpoint on
       </label>
       <p class="help">
-        Lets an AI assistant such as Claude read the audit trail and the gateway status with an
+        Lets an AI assistant such as Claude read the audit trail and the gateway status with an${" "}
         <a href="#/account">API token</a>, which each user creates on their Account page. Every
-        question is recorded in the trail. Off: the endpoint
-        answers nothing and tokens stop working.
+        question is recorded in the trail. Off: the endpoint answers nothing and tokens stop
+        working.
       </p>
       <p class="help">
         What an assistant may change (targets, certificates, …) is chosen per token when an
         administrator creates it. Assistants never write to a PLC, and never change these MCP
         settings or API tokens.
       </p>
-      ${when(
-        !m.transport_ok,
+      ${
+        !m.transport_ok &&
         html`<div class="alert bad small">
-          The web UI uses plain HTTP on a network address, so the endpoint refuses requests: the
-          token would cross the network unencrypted. Set <span class="mono">tls = true</span>
-          under <span class="mono">[web]</span> and restart.
-        </div>`,
-      )}
+        The web UI uses plain HTTP on a network address, so the endpoint refuses requests: the
+        token would cross the network unencrypted. Set <span class="mono">tls = true</span>${" "}
+        under <span class="mono">[web]</span> and restart.
+      </div>`
+      }
     </div>
-    ${save}
+    ${saveButton(edit)}
   </form>`;
 }
 
@@ -304,9 +420,13 @@ function webCard(st) {
       <dd class="mono">${st.web.listen}</dd>
       <dt>HTTPS</dt>
       <dd>
-        ${https}
-        ${when(st.web.tls_env, () => html`<span class="muted small">(set by
-          <span class="mono">${st.web.tls_env}</span>)</span>`)}
+        ${https}${" "}
+        ${
+          st.web.tls_env &&
+          html`<span class="muted small"
+          >(set by <span class="mono">${st.web.tls_env}</span>)</span
+        >`
+        }
       </dd>
       <dt>Certificates</dt>
       <dd class="mono">${st.gateway.pki_dir}</dd>
@@ -318,9 +438,24 @@ function webCard(st) {
       them in the <span class="mono">[web]</span> and <span class="mono">[gateway]</span> sections
       of the config file, then restart the gateway.
     </p>
-    ${when(st.web.certificate && !st.web.tls_certificate, () => webCertificate(st.web.certificate))}
+    ${st.web.certificate && !st.web.tls_certificate && webCertificate(st.web.certificate)}
   </div>`;
 }
+
+const regenerateWebCertificate = safe(async () => {
+  const ok = await dialog({
+    title: "New HTTPS certificate?",
+    confirm: "Regenerate",
+    body:
+      "The web UI uses it after the gateway restarts. Browsers and AI assistants that " +
+      "trusted the current one must trust the new one. PLCs are not affected.",
+  });
+  if (!ok) return;
+  await post("/web-certificate/regenerate");
+  toast("New certificate: restart the gateway to use it");
+  state.settings = await get("/settings");
+  redraw();
+});
 
 // The web UI's own HTTPS certificate: separate from the gateway's OPC UA
 // certificate, so renewing it never concerns a PLC.
@@ -331,10 +466,10 @@ function webCertificate(c) {
       <div class="inline">
         <a class="button small" href="/api/web-certificate/cert.pem">Download (.pem)</a>
         <a class="button small" href="/api/web-certificate/cert.der">Download (.der)</a>
-        ${when(
-          can("admin"),
-          html`<button class="small" data-action="regenerate-web-certificate">Regenerate</button>`,
-        )}
+        ${
+          can("admin") &&
+          html`<button class="small" onClick=${regenerateWebCertificate}>Regenerate</button>`
+        }
       </div>
     </div>
     <dl class="kv small readonly-kv">
@@ -347,124 +482,12 @@ function webCertificate(c) {
     </dl>
     <p class="help small">
       Self-signed, so there is no separate root CA: trust this certificate itself. macOS: open the
-      .pem, then in Keychain Access set it to <i>Always Trust</i>. Windows: import it into
-      <i>Trusted Root Certification Authorities</i>. AI assistants (Node):
-      <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>. It
-      names localhost, this machine and the host names under Gateway certificate; after changing
-      those, regenerate it and restart the gateway. This is not the certificate PLCs trust
-      (that is on the <a href="#/certificates">Certificates</a> page).
+      .pem, then in Keychain Access set it to <i>Always Trust</i>. Windows: import it into${" "}
+      <i>Trusted Root Certification Authorities</i>. AI assistants (Node):${" "}
+      <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>. It names
+      localhost, this machine and the host names under Gateway certificate; after changing those,
+      regenerate it and restart the gateway. This is not the certificate PLCs trust (that is on
+      the <a href="#/certificates">Certificates</a> page).
     </p>
   </div>`;
 }
-
-// ---------- forms ----------
-
-export const actions = {
-  async "regenerate-web-certificate"() {
-    const ok = await dialog({
-      title: "New HTTPS certificate?",
-      confirm: "Regenerate",
-      body:
-        "The web UI uses it after the gateway restarts. Browsers and AI assistants that " +
-        "trusted the current one must trust the new one. PLCs are not affected.",
-    });
-    if (!ok) return;
-    await post("/web-certificate/regenerate");
-    toast("New certificate: restart the gateway to use it");
-    state.settings = await get("/settings");
-    renderPage();
-  },
-};
-
-export const forms = {
-  /** Saves the audit settings; shortening retention or failing closed asks first. */
-  async "settings-audit"(form) {
-    const d = formData(form);
-    const body = {
-      retention_days: Number(d.retention_days),
-      fail_mode: d.fail_mode,
-      record_old_value: form.elements.record_old_value.checked,
-      ignored_summary_secs: Number(d.summary_minutes) * 60,
-    };
-    const old = state.settings.audit;
-    const shorter =
-      body.retention_days > 0 &&
-      (old.retention_days === 0 || body.retention_days < old.retention_days);
-    if (shorter) {
-      const confirmed = await dialog({
-        title: `Keep records for ${body.retention_days} days?`,
-        confirm: "Save",
-        danger: true,
-        body: html`<p>
-            Records older than ${body.retention_days} days are deleted for good, starting right
-            away.
-          </p>
-          <p class="muted small">Exported copies (QuestDB) are not affected.</p>`,
-      });
-      if (!confirmed) return;
-    }
-    if (body.fail_mode === "closed" && old.fail_mode !== "closed") {
-      const confirmed = await dialog({
-        title: "Reject writes when the trail cannot be written?",
-        confirm: "Save",
-        body:
-          "From now on, a write only reaches the PLC after its record is stored. " +
-          "If the audit trail fails (e.g. a full disk), clients can no longer write.",
-      });
-      if (!confirmed) return;
-    }
-    await put("/settings/audit", body);
-    toast("Audit trail settings saved");
-    state.settings = await get("/settings");
-    state.status = await get("/status");
-    renderPage();
-  },
-
-  /**
-   * Saves the export settings. A secret is only sent when typed (or removed),
-   * so saving other fields keeps it.
-   */
-  async "settings-export"(form) {
-    const d = formData(form);
-    const on = (name) => form.elements[name].checked;
-    const secret = (body, name, prefix) => {
-      if (d[`${prefix}_${name}`]) body[name] = d[`${prefix}_${name}`];
-      else if (form.elements[`${prefix}_${name}_clear`]?.checked) body[name] = "";
-    };
-    const body = {};
-    if (on("questdb_on")) {
-      body.questdb = {
-        url: d.q_url,
-        table: d.q_table || "opcua_audit",
-        username: d.q_username || null,
-        ca_pem: d.q_ca_pem || "",
-        interval_secs: Number(d.q_interval) || 5,
-      };
-      secret(body.questdb, "password", "q");
-      secret(body.questdb, "token", "q");
-    }
-    await put("/settings/export", body);
-    toast("Export settings saved");
-    state.settings = await get("/settings");
-    state.status = await get("/status");
-    renderPage();
-  },
-
-  async "settings-mcp"(form) {
-    const enabled = form.elements.enabled.checked;
-    await put("/settings/mcp", { enabled });
-    toast(enabled ? "MCP endpoint on" : "MCP endpoint off");
-    state.settings = await get("/settings");
-    renderPage();
-  },
-
-  async "settings-gateway"(form) {
-    const names = formData(form)
-      .certificate_hostnames.split(/[\s,;]+/)
-      .filter(Boolean);
-    await put("/settings/gateway", { certificate_hostnames: names });
-    toast("Saved. Generate a new certificate to use it (Certificates page).");
-    state.settings = await get("/settings");
-    renderPage();
-  },
-};
