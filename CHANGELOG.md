@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The Targets page keeps refreshing the targets' status while a target is
-  edited, and what has been typed stays. Leaving the page drops an unsaved
-  edit. The page is built with Preact (vendored, no build step).
+- The web UI is built with Preact (vendored, no build step). It looks the
+  same, but a refresh no longer disturbs what is being typed on any page: the
+  Targets page keeps refreshing the targets' status while a target is edited,
+  and the audit trail's Live mode leaves the filters alone. Leaving a page
+  drops an unsaved edit.
 - The container image has a description on its package page: that it is the
   Docker image, how to start it and where the first password is.
 

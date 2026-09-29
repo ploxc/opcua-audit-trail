@@ -2,21 +2,16 @@
 // with its security (endpoints, logins, certificates) and summarised nodes,
 // and the form to add or edit a target.
 //
-// Written as Preact components (vdom.js). What is being edited lives in the
-// page's own `useState`, not in the shared `state`: the form's fields are
-// controlled by it, so the periodic refresh can redraw the page without
-// touching what the user typed.
-//
-// In a template, an inline element at the start or the end of a line loses
-// the space next to it (like JSX): write `${" "}` there, or keep it mid-line.
+// What is being edited lives in the page's own `useState`, not in the shared
+// `state`: the form's fields are controlled by it, so the periodic refresh
+// can redraw the page without touching what the user typed.
 
-import { Fold, Raw, html, safe, useEffect, useState } from "../vdom.js";
-import { html as markup } from "../html.js";
+import { html, safe, useEffect, useState } from "../vdom.js";
 import { del, get, post, put } from "../api.js";
-import { dialog, menuButton, stateBadge, toast } from "../components.js";
+import { Fold, MenuButton, dialog, stateBadge, toast } from "../components.js";
 import { clientUrl } from "../format.js";
-import { summariseSection } from "../summarise.js";
-import { can, fail, load, renderPage, state } from "../state.js";
+import { SummariseSection } from "../summarise.js";
+import { can, fail, load, redraw, state } from "../state.js";
 
 // How secure an endpoint is, and the minimum a target asks, on one scale.
 const MODE_RANK = { None: 0, Sign: 1, SignAndEncrypt: 2 };
@@ -180,7 +175,7 @@ function Security({ t, endpoints, onMinSecurity }) {
     const confirmed = await dialog({
       title: "Trust this server certificate?",
       confirm: "Trust",
-      body: markup`<p><b>${shown.subject}</b></p>
+      body: html`<p><b>${shown.subject}</b></p>
         <p>Thumbprint <span class="mono">${shown.thumbprint}</span></p>
         <p>Compare the thumbprint with the one shown on the PLC first.</p>`,
     });
@@ -191,7 +186,7 @@ function Security({ t, endpoints, onMinSecurity }) {
     });
     toast(`Trusted ${trustedCert.subject}`);
     state.certificates = await get("/certificates");
-    renderPage();
+    redraw();
   });
   const targetCert = cert
     ? html`${cert.subject}${" "}
@@ -304,7 +299,7 @@ export function TargetsPage() {
   if (!s) return html`<p class="muted">Loading…</p>`;
   return html`
     <div class="page-head">
-      <div class="inline"><${Raw} markup=${menuButton} /><h1>Targets</h1></div>
+      <div class="inline"><${MenuButton} /><h1>Targets</h1></div>
       ${
         can("admin") &&
         !editing &&
@@ -347,7 +342,7 @@ function TargetCard({ t, editing, setEditing }) {
       // Also after a failure: the card shows why. If the status cannot be
       // read, the periodic refresh tries again; the check's own error is shown.
       state.status = await get("/status").catch(() => state.status);
-      renderPage();
+      redraw();
     }
     const now = state.status.targets.find((x) => x.name === t.name);
     const trust = now?.status?.gateway_trust?.state;
@@ -377,7 +372,7 @@ function TargetCard({ t, editing, setEditing }) {
     <div class="card-head">
       <div class="inline">
         <h2>${t.name}</h2>
-        <${Raw} markup=${stateBadge(t.status?.state)} />
+        ${stateBadge(t.status?.state)}
         ${trustBadge(t.status?.gateway_trust)}
       </div>
       <div class="inline">
@@ -414,7 +409,7 @@ function TargetCard({ t, editing, setEditing }) {
       }
     </dl>
     <${Security} t=${t} endpoints=${state.targets.discovery[t.name] || t.status?.endpoints} />
-    <${Raw} markup=${summariseSection(t)} />
+    <${SummariseSection} t=${t} />
   </div>`;
 }
 

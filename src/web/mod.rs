@@ -313,7 +313,6 @@ fn ui_version() -> &'static str {
 /// under `/js/`. A new module must be added here.
 const SCRIPTS: &[(&str, &str)] = &[
     ("main.js", include_str!("ui/js/main.js")),
-    ("html.js", include_str!("ui/js/html.js")),
     ("api.js", include_str!("ui/js/api.js")),
     ("state.js", include_str!("ui/js/state.js")),
     ("format.js", include_str!("ui/js/format.js")),

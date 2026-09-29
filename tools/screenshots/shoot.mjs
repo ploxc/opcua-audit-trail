@@ -158,12 +158,12 @@ async function shoot(browser, scheme) {
   await snap("targets");
 
   await page.goto(WEB + "/#/browser");
-  await page.click("form[data-form=browser-connect] button[type=submit]");
+  await page.getByRole("button", { name: "Connect" }).click();
   const node = (name) => page.locator(".node", { hasText: name }).first();
   // The tree starts with the Objects folder's children.
-  await node("Line1").locator("[data-action=toggle-node]").click();
+  await node("Line1").locator(".toggle").click();
   await node("Setpoint").click();
-  await page.click("[data-action=watch]");
+  await page.getByRole("button", { name: "Watch value" }).click();
   // The watch list shows the value after its first refresh (every second).
   await page
     .locator(".card", { hasText: "Watch list" })

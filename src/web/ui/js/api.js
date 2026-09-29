@@ -1,6 +1,6 @@
 // Calls to the gateway's JSON API under /api.
 
-import { render, state } from "./state.js";
+import { redraw, state } from "./state.js";
 
 /** An error response from the API; `status` is the HTTP status. */
 export class ApiError extends Error {
@@ -27,11 +27,9 @@ export async function api(method, path, body) {
   }
   const response = await fetch("/api" + path, options);
   if (response.status === 401 && path !== "/login") {
-    // Only on the way out: redrawing an open login screen again (a timer
-    // that still runs) would wipe what is being typed.
     const wasLoggedIn = state.user !== null;
     state.user = null;
-    if (wasLoggedIn) render();
+    if (wasLoggedIn) redraw();
     throw new ApiError(401, "Not logged in");
   }
   const text = await response.text();

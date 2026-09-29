@@ -1,14 +1,14 @@
 // Dashboard page: warnings, key figures, one card per target with its
 // connected clients, the audit export state and the latest changes.
 
-import { html, when } from "../html.js";
+import { html } from "../vdom.js";
 import { get } from "../api.js";
-import { menuButton, stateBadge } from "../components.js";
+import { MenuButton, stateBadge } from "../components.js";
 import { CHANGE_EVENTS, clientUrl, since } from "../format.js";
 import { can, state } from "../state.js";
-import { auditTable } from "./audit.js";
+import { AuditTable } from "./audit.js";
 
-export function dashboardView() {
+export function DashboardPage() {
   const s = state.status;
   if (!s) return html`<p class="muted">Loading…</p>`;
   const targets = s.targets;
@@ -17,7 +17,7 @@ export function dashboardView() {
   const recent = state.dashboardChanges || [];
   return html`
     <div class="page-head">
-      <div class="inline">${menuButton}<h1>Dashboard</h1></div>
+      <div class="inline"><${MenuButton} /><h1>Dashboard</h1></div>
       <span class="muted small">Gateway ${s.version} · updates every 5 s</span>
     </div>
     ${alerts(s)}
@@ -42,58 +42,59 @@ export function dashboardView() {
         </div>
       </div>
     </div>
-    ${when(
-      !targets.length,
+    ${
+      !targets.length &&
       html`<div class="card">
-        <h2>No targets yet</h2>
-        <p class="muted">
-          A target is an OPC UA server (usually a PLC) that clients reach through the gateway.
-        </p>
-        ${when(can("admin"), html`<a class="button primary" href="#/targets">Add a target</a>`)}
-      </div>`,
-    )}
-    ${targets.map((t) => targetCard(t))}
-    ${when(s.exports?.length, () => exportCard(s.exports))}
+      <h2>No targets yet</h2>
+      <p class="muted">
+        A target is an OPC UA server (usually a PLC) that clients reach through the gateway.
+      </p>
+      ${can("admin") && html`<a class="button primary" href="#/targets">Add a target</a>`}
+    </div>`
+    }
+    ${targets.map((t) => html`<${TargetCard} key=${t.name} t=${t} />`)}
+    ${s.exports?.length > 0 && exportCard(s.exports)}
     <div class="card">
       <div class="card-head">
         <h2>Latest changes</h2>
         <a href="#/audit" class="small">Full audit trail</a>
       </div>
-      ${auditTable(recent, { compact: true })}
+      <${AuditTable} rows=${recent} compact />
     </div>`;
 }
 
 // Problems that need attention: failing exports, lost events, certificates
 // waiting for a decision.
 function alerts(s) {
-  return html`${when(
-    s.exports?.some((e) => e.last_error),
+  return html`${
+    s.exports?.some((e) => e.last_error) &&
     html`<div class="alert warn">
-        Audit export is failing; records wait in the local store and are sent once the destination
-        is back.
-      </div>`,
-  )}
+      Audit export is failing; records wait in the local store and are sent once the destination
+      is back.
+    </div>`
+  }
     ${s.exports
       ?.filter((e) => e.gap)
       .map((e) => html`<div class="alert bad">Export to ${e.name}: ${e.gap}</div>`)}
-    ${when(
-      s.lost_audit_events > 0,
+    ${
+      s.lost_audit_events > 0 &&
       html`<div class="alert bad">
-        ${s.lost_audit_events} audit events could not be stored. Check the disk of the audit
-        database.
-      </div>`,
-    )}
-    ${when(
-      s.rejected_certificates > 0 && can("admin"),
+      ${s.lost_audit_events} audit events could not be stored. Check the disk of the audit
+      database.
+    </div>`
+    }
+    ${
+      s.rejected_certificates > 0 &&
+      can("admin") &&
       html`<div class="alert warn">
-        ${s.rejected_certificates} certificate(s) are waiting for a decision.
-        <a href="#/certificates">Review</a>
-      </div>`,
-    )}`;
+      ${s.rejected_certificates} certificate(s) are waiting for a decision.${" "}
+      <a href="#/certificates">Review</a>
+    </div>`
+    }`;
 }
 
 // One target: where clients connect, the server behind it, and its clients.
-function targetCard(t) {
+function TargetCard({ t }) {
   const st = t.status || {};
   const clientRow = (c) => html`<tr>
     <td class="mono nowrap">${c.remote_addr}</td>
@@ -114,15 +115,15 @@ function targetCard(t) {
       <dd class="mono">${clientUrl(t.listen)}</dd>
       <dt>Target server</dt>
       <dd class="mono">${t.endpoint_url}</dd>
-      ${when(
-        st.endpoints?.length,
+      ${
+        st.endpoints?.length > 0 &&
         html`<dt>Server</dt>
-          <dd>
-            ${st.endpoints?.[0]?.server_application_name}
-            <span class="muted">${st.endpoints?.[0]?.server_application_uri}</span>
-          </dd>`,
-      )}
-      ${when(st.last_error, html`<dt>Error</dt><dd class="small">${st.last_error}</dd>`)}
+        <dd>
+          ${st.endpoints[0].server_application_name}${" "}
+          <span class="muted">${st.endpoints[0].server_application_uri}</span>
+        </dd>`
+      }
+      ${st.last_error && html`<dt>Error</dt><dd class="small">${st.last_error}</dd>`}
     </dl>
     <h3 class="mt">Connected clients</h3>
     ${
@@ -138,7 +139,9 @@ function targetCard(t) {
                 <th>Since</th>
               </tr>
             </thead>
-            <tbody>${t.clients.map(clientRow)}</tbody>
+            <tbody>
+              ${t.clients.map(clientRow)}
+            </tbody>
           </table>
         </div>`
         : html`<p class="muted small">No clients connected.</p>`
@@ -153,7 +156,7 @@ function exportCard(exports) {
     <td>
       ${
         e.last_error
-          ? html`<span class="badge warn" title="${e.last_error}">Failing</span>
+          ? html`<span class="badge warn" title=${e.last_error}>Failing</span>
             <div class="small muted">${e.last_error}</div>`
           : html`<span class="badge ok">OK</span>`
       }
@@ -178,7 +181,9 @@ function exportCard(exports) {
             <th>Last delivery</th>
           </tr>
         </thead>
-        <tbody>${exports.map(row)}</tbody>
+        <tbody>
+          ${exports.map(row)}
+        </tbody>
       </table>
     </div>
   </div>`;

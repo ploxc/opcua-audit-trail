@@ -1,10 +1,12 @@
 // The UI's shared state, the role check, and the hooks through which any
 // module can redraw or reload the page.
 //
-// Everything the pages show lives in the one `state` object; views read it,
-// actions change it and then redraw. The hooks keep the import graph free of
-// cycles: page modules call `render()` or `load()` from here, and main.js,
-// which imports the pages, supplies the implementations with `setHooks`.
+// What the gateway sent lives in the one `state` object: components read it
+// when they are drawn, handlers change it and then redraw. What only one
+// component needs while it is shown (a form being edited) is its own
+// `useState`. The hooks keep the import graph free of cycles: page modules
+// call `redraw()` or `load()` from here, and main.js, which imports the
+// pages, supplies the implementations with `setHooks`.
 
 const ROLE_LEVEL = { auditor: 0, operator: 1, admin: 2 };
 
@@ -22,7 +24,8 @@ export const BROWSER_EMPTY = () => ({
 
 // Also set later, by the page that needs them: `dashboardChanges` and
 // `changesToday` (dashboard), `alarms` (sidebar counts), `open` (the folds
-// that are open), `showImport` (certificates), `settings` (settings page).
+// that are open), `navOpen` (the sidebar on a narrow screen), `settings`
+// (settings page).
 export const state = {
   // undefined: not known yet (starting up); null: not logged in.
   user: undefined,
@@ -57,15 +60,13 @@ export const can = (role) => state.user && ROLE_LEVEL[state.user.role] >= ROLE_L
 
 const hooks = {};
 
-/** Called once by main.js with its `render`, `renderPage`, `load`, `schedule` and `fail`. */
+/** Called once by main.js with its `redraw`, `load`, `schedule` and `fail`. */
 export function setHooks(implementations) {
   Object.assign(hooks, implementations);
 }
 
-/** Redraws everything: the login screen, or the sidebar and the current page. */
-export const render = () => hooks.render();
-/** Redraws the current page only, keeping what the user is typing. */
-export const renderPage = () => hooks.renderPage();
+/** Draws the UI again from `state` (a diff: what is typed stays). */
+export const redraw = () => hooks.redraw();
 /** Loads the data of the current page, redraws it and restarts its refresh timer. */
 export const load = () => hooks.load();
 /** Restarts the periodic refresh for a page. */

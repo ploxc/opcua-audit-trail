@@ -212,10 +212,6 @@ p {
 .mt {
   margin-top: 16px;
 }
-/* The wrapper of markup inside a component (`Raw`, vdom.js): no box of its own. */
-.raw {
-  display: contents;
-}
 
 /* ---------- Icons and logos ---------- */
 
