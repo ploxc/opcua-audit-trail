@@ -370,7 +370,7 @@ checks that every file in `js/` is served).
 | --- | --- |
 | `js/main.js` | Start-up, routing (the page list), rendering of the sidebar and the page, periodic refresh, event delegation; merges the pages' actions and forms |
 | `js/html.js` | The escaping `html` template tag for string views, `Html`, `when`, `flag` |
-| `js/vdom.js` | Preact for component pages: the `html` tag (htm), `useState`, `Raw` (string markup in a component), `safe` (a handler that toasts a failed request), `Fold` |
+| `js/vdom.js` | Preact for component pages: the `html` tag (htm), the hooks, `Raw` (string markup in a component), `safe` (a handler that toasts a failed request), `Fold` |
 | `js/vendor/` | Preact, its hooks and htm, with licenses and how to update them |
 | `js/api.js` | `fetch` helpers for `/api` (`get`, `post`, `put`, `del`) |
 | `js/state.js` | The shared `state`, the role check `can`, and the `render`/`renderPage`/`load`/`schedule` hooks that main.js implements |
@@ -388,8 +388,9 @@ by delegation on `data-action` (clicks, and changes of selects and
 checkboxes) and `data-form` (submits), because the CSP forbids inline
 handlers. A component is diffed into the page, so a redraw keeps focus, what
 is typed and scroll positions; it keeps what it edits in `useState`, handles
-its events itself and reads the shared `state` when it is drawn. Page modules never import main.js: they redraw through the hooks in
-`state.js`, which keeps the import graph free of cycles. The code is
+its events itself and reads the shared `state` when it is drawn. Page
+modules never import main.js: they redraw through the hooks in `state.js`,
+which keeps the import graph free of cycles. The code is
 formatted with Prettier (`src/web/ui/.prettierrc.json`: width 100, markup in
 templates left as written).
 
