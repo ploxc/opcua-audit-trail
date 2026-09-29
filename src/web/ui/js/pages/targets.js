@@ -10,7 +10,7 @@
 // In a template, an inline element at the start or the end of a line loses
 // the space next to it (like JSX): write `${" "}` there, or keep it mid-line.
 
-import { Fold, Raw, html, safe, useState } from "../vdom.js";
+import { Fold, Raw, html, safe, useEffect, useState } from "../vdom.js";
 import { html as markup } from "../html.js";
 import { del, get, post, put } from "../api.js";
 import { dialog, menuButton, stateBadge, toast } from "../components.js";
@@ -286,6 +286,21 @@ export function TargetsPage() {
   // new one), with what has been typed; null when none is.
   const [editing, setEditing] = useState(null);
   const s = state.status;
+
+  // The target being edited was deleted or renamed meanwhile (another admin,
+  // an AI assistant): drop the edit, or the form would vanish while the Add
+  // and Edit buttons stay hidden.
+  const gone =
+    !!s && editing?.original != null && !s.targets.some((t) => t.name === editing.original);
+  useEffect(() => {
+    if (!gone) return;
+    toast(
+      `Target ${editing.original} was changed or deleted meanwhile: the edit is dropped`,
+      "warn",
+    );
+    setEditing(null);
+  }, [gone]);
+
   if (!s) return html`<p class="muted">Loading…</p>`;
   return html`
     <div class="page-head">
@@ -328,9 +343,10 @@ function TargetCard({ t, editing, setEditing }) {
         `/targets/${encodeURIComponent(t.name)}/discover`,
       );
     } finally {
-      // Also after a failure: the card shows why.
-      state.status = await get("/status");
       setChecking(false);
+      // Also after a failure: the card shows why. If the status cannot be
+      // read, the periodic refresh tries again; the check's own error is shown.
+      state.status = await get("/status").catch(() => state.status);
       renderPage();
     }
     const now = state.status.targets.find((x) => x.name === t.name);

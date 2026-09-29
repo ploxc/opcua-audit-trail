@@ -12,23 +12,24 @@
 // still no build step and no npm at runtime.
 
 import { h, render } from "./vendor/preact.js";
-import { useState } from "./vendor/preact-hooks.js";
+import { useEffect, useState } from "./vendor/preact-hooks.js";
 import htm from "./vendor/htm.js";
-import { Html } from "./html.js";
+import { Html, esc } from "./html.js";
 import { fail, renderPage, state } from "./state.js";
 
 export const html = htm.bind(h);
-export { h, render, useState };
+export { h, render, useEffect, useState };
 
 /**
  * Markup from the string `html` tag of html.js, for a part of a component
  * that is not converted yet. Its `data-action` handlers keep working (they
- * are delegated); the markup is only replaced when it changes.
+ * are delegated); the markup is only replaced when it changes. Anything that
+ * is not `html` output is escaped, so server data can never inject markup.
  */
 export const Raw = ({ markup }) =>
   h("span", {
     class: "raw",
-    dangerouslySetInnerHTML: { __html: markup instanceof Html ? markup.s : String(markup ?? "") },
+    dangerouslySetInnerHTML: { __html: markup instanceof Html ? markup.s : esc(markup) },
   });
 
 /**
