@@ -154,7 +154,7 @@ async function shoot(browser, scheme) {
   await snap("dashboard");
 
   await page.goto(WEB + "/#/targets");
-  await page.click("[data-action=fold]");
+  await page.click(".fold-head");
   await snap("targets");
 
   await page.goto(WEB + "/#/browser");

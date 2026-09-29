@@ -23,8 +23,10 @@ image. Merge only when all checks are green.
   kind and the error/warning `Severity`.
 - `src/web/`: the web API (`mod.rs`), settings, login, TLS, and `mcp.rs`, the
   MCP endpoint for AI assistants.
-- `src/web/ui/`: the web UI, plain JavaScript without a build step, embedded
-  in the binary.
+- `src/web/ui/`: the web UI, JavaScript without a build step, embedded in the
+  binary. Pages are string views (`html.js`) or Preact components
+  (`vdom.js`, `component` in `PAGES`); the Targets page is the model for a
+  component.
 - `examples/`: `demo_plc`, `demo_client`, `stress`.
 - `tools/screenshots/`: remakes the README screenshots (`npm install && npm
   run shoot`): a fresh gateway, the demo PLC and two demo clients, Chrome
@@ -32,9 +34,9 @@ image. Merge only when all checks are green.
 
 ## Rules that are easy to break
 
-- **A new UI module** must be added to `SCRIPTS` in `src/web/mod.rs`
-  (`every_ui_module_is_served` checks it). Script URLs carry a hash of the UI,
-  so browsers never run old code.
+- **A new UI module** (also a vendored file) must be added to `SCRIPTS` in
+  `src/web/mod.rs` (`every_ui_module_is_served` checks it). Script URLs carry
+  a hash of the UI, so browsers never run old code.
 - **A new audit event kind** needs a label in `EVENT_LABELS`
   (`src/web/ui/js/format.js`); if it is an error or warning, add it to
   `Severity::kinds` and to `ERROR_EVENTS`/`WARNING_EVENTS`. A test keeps them
