@@ -320,6 +320,13 @@ const SCRIPTS: &[(&str, &str)] = &[
     ("components.js", include_str!("ui/js/components.js")),
     ("summarise.js", include_str!("ui/js/summarise.js")),
     ("alarms.js", include_str!("ui/js/alarms.js")),
+    ("vdom.js", include_str!("ui/js/vdom.js")),
+    ("vendor/preact.js", include_str!("ui/js/vendor/preact.js")),
+    (
+        "vendor/preact-hooks.js",
+        include_str!("ui/js/vendor/preact-hooks.js"),
+    ),
+    ("vendor/htm.js", include_str!("ui/js/vendor/htm.js")),
     ("pages/account.js", include_str!("ui/js/pages/account.js")),
     ("pages/audit.js", include_str!("ui/js/pages/audit.js")),
     ("pages/browser.js", include_str!("ui/js/pages/browser.js")),

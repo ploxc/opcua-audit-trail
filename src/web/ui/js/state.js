@@ -38,7 +38,7 @@ export const state = {
     olderAvailable: false,
     live: false,
   },
-  targets: { editing: null, discovery: {} },
+  targets: { discovery: {} },
   certificates: null,
   browser: { target: "", ...BROWSER_EMPTY() },
   users: [],
@@ -57,7 +57,7 @@ export const can = (role) => state.user && ROLE_LEVEL[state.user.role] >= ROLE_L
 
 const hooks = {};
 
-/** Called once by main.js with its `render`, `renderPage`, `load` and `schedule`. */
+/** Called once by main.js with its `render`, `renderPage`, `load`, `schedule` and `fail`. */
 export function setHooks(implementations) {
   Object.assign(hooks, implementations);
 }
@@ -70,3 +70,5 @@ export const renderPage = () => hooks.renderPage();
 export const load = () => hooks.load();
 /** Restarts the periodic refresh for a page. */
 export const schedule = (pageId) => hooks.schedule(pageId);
+/** Shows a failed request (a toast; a 401 already shows the login). */
+export const fail = (error) => hooks.fail(error);

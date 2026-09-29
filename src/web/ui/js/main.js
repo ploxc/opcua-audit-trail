@@ -1,13 +1,18 @@
 // OPC UA Audit Gateway web UI: start-up, routing, rendering, periodic
-// refresh and event handling. No build step, no dependencies.
+// refresh and event handling. No build step.
 //
-// Rendering uses the `html` template tag (html.js): every interpolated value
-// is escaped unless it is itself `html` output, so server data can never
-// inject markup. Events are handled by delegation on `data-action` and
-// `data-form` attributes (the Content-Security-Policy forbids inline
-// handlers): each page module exports its `actions` and `forms`, merged below.
+// A page is either a string view or a Preact component (`component` in
+// PAGES, see vdom.js). String views use the `html` template tag (html.js):
+// every interpolated value is escaped unless it is itself `html` output, so
+// server data can never inject markup, and a redraw replaces the page's
+// `innerHTML`. A component is diffed into the page, and handles its own
+// events. Events of the string views are handled by delegation on
+// `data-action` and `data-form` attributes (the Content-Security-Policy
+// forbids inline handlers): each such page module exports its `actions` and
+// `forms`, merged below.
 
 import { html, when } from "./html.js";
+import { h, render as drawComponent } from "./vdom.js";
 import { get, post } from "./api.js";
 import { alarmCounts, refreshAlarms } from "./alarms.js";
 import { THEME_KEY, gatewayLogo, icon, ploxcLink, themeButton, toast } from "./components.js";
@@ -34,7 +39,13 @@ const PAGES = [
     view: dashboard.dashboardView,
   },
   { id: "audit", label: "Audit trail", role: "auditor", icon: "audit", view: audit.auditView },
-  { id: "targets", label: "Targets", role: "auditor", icon: "targets", view: targets.targetsView },
+  {
+    id: "targets",
+    label: "Targets",
+    role: "auditor",
+    icon: "targets",
+    component: targets.TargetsPage,
+  },
   {
     id: "certificates",
     label: "Certificates",
@@ -73,9 +84,26 @@ const currentPage = () => {
 const app = document.getElementById("app");
 let refreshTimer = null;
 
+// The element a component page is drawn in, so it can be unmounted (its
+// state and effects end) before the element is replaced.
+let mounted = null;
+
+function unmountPage() {
+  if (mounted) drawComponent(null, mounted);
+  mounted = null;
+}
+
+/** Draws a component page into `el` (a redraw diffs it into what is there). */
+function mountPage(el, page) {
+  if (mounted !== el) unmountPage();
+  mounted = el;
+  drawComponent(h(page.component), el);
+}
+
 /** Draws everything: the login or password screen, or the sidebar and the current page. */
 function render() {
   if (state.user === undefined) return;
+  unmountPage();
   if (!state.user) {
     app.innerHTML = account.loginView().s;
     app.querySelector("input[name=username]")?.focus();
@@ -89,8 +117,9 @@ function render() {
   const page = currentPage();
   app.innerHTML = html`<div class="shell">
     ${sidebar(page)}
-    <main class="main" id="page">${page.view()}</main>
+    <main class="main" id="page">${page.component ? "" : page.view()}</main>
   </div>`.s;
+  if (page.component) mountPage(document.getElementById("page"), page);
 }
 
 // A dot next to "Targets" when a target is down or refuses the gateway
@@ -163,6 +192,11 @@ function renderPage() {
   if (!el) return render();
   updateTargetsDot();
 
+  // A component page is diffed, which keeps all of that by itself.
+  const page = currentPage();
+  if (page.component) return mountPage(el, page);
+  unmountPage();
+
   // Remember the form being typed in, and scroll positions.
   const active = document.activeElement;
   const typing =
@@ -183,7 +217,7 @@ function renderPage() {
     e.scrollLeft,
   ]);
 
-  el.innerHTML = currentPage().view().s;
+  el.innerHTML = page.view().s;
 
   // Put them back.
   for (const [key, top, left] of scrolls) {
@@ -289,11 +323,9 @@ function schedule(pageId) {
     }, ms);
   };
   if (pageId === "dashboard") every(5000, dashboard.refreshDashboard);
-  // Target status (a new target starts as "Checking…"), but not while a
-  // target is being edited: that would redraw the form.
+  // Target status (a new target starts as "Checking…").
   if (pageId === "targets") {
     every(5000, async () => {
-      if (state.targets.editing) return false;
       state.status = await get("/status");
     });
   }
@@ -303,7 +335,7 @@ function schedule(pageId) {
   }
 }
 
-setHooks({ render, renderPage, load, schedule });
+setHooks({ render, renderPage, load, schedule, fail });
 
 // The sidebar's warning and error counts and the targets dot stay current
 // on every page.
@@ -375,7 +407,6 @@ const actions = {
   ...shellActions,
   ...summarise.actions,
   ...audit.actions,
-  ...targets.actions,
   ...certificates.actions,
   ...browser.actions,
   ...users.actions,
@@ -387,7 +418,6 @@ const actions = {
 const forms = {
   ...account.forms,
   ...audit.forms,
-  ...targets.forms,
   ...certificates.forms,
   ...browser.forms,
   ...users.forms,

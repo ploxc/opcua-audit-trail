@@ -284,11 +284,10 @@ solved), not once per client.
 
 ## Web UI
 
-Served by the same binary (axum). The frontend is plain JavaScript without a
-build step (`src/web/ui/`), embedded in the binary, so one `cargo build`
-produces everything, also for ARMv7. A strict Content-Security-Policy (no
-inline scripts) applies. All rendering goes through an escaping template
-helper.
+Served by the same binary (axum). The frontend is JavaScript without a build
+step (`src/web/ui/`), embedded in the binary, so one `cargo build` produces
+everything, also for ARMv7. A strict Content-Security-Policy (no inline
+scripts) applies. All rendering escapes what it interpolates.
 
 The UI talks to the gateway through `/api/*`. That is the UI's own API, not
 a public interface: it only takes a web session cookie (plus the CSRF
@@ -360,7 +359,8 @@ only).
 The frontend lives in `src/web/ui/`: `index.html`, `style.css` (grouped in
 commented sections: tokens and theme, layout, sidebar, forms, tables, badges,
 alerts, dialogs, then per page), the Inter fonts and native ES modules in
-`js/`. There is no build step and no npm dependency at runtime; the gateway
+`js/`. There is no build step and no npm at runtime: Preact and htm are
+vendored, unchanged, in `js/vendor/` (about 7 kB gzipped), and the gateway
 embeds every file with `include_str!` and serves the modules under `/js/`
 (`SCRIPTS` in `src/web/mod.rs`, which a new module must be added to; a test
 checks that every file in `js/` is served).
@@ -369,7 +369,9 @@ checks that every file in `js/` is served).
 | Module | Contents |
 | --- | --- |
 | `js/main.js` | Start-up, routing (the page list), rendering of the sidebar and the page, periodic refresh, event delegation; merges the pages' actions and forms |
-| `js/html.js` | The escaping `html` template tag, `Html`, `when`, `flag` |
+| `js/html.js` | The escaping `html` template tag for string views, `Html`, `when`, `flag` |
+| `js/vdom.js` | Preact for component pages: the `html` tag (htm), `useState`, `Raw` (string markup in a component), `safe` (a handler that toasts a failed request), `Fold` |
+| `js/vendor/` | Preact, its hooks and htm, with licenses and how to update them |
 | `js/api.js` | `fetch` helpers for `/api` (`get`, `post`, `put`, `del`) |
 | `js/state.js` | The shared `state`, the role check `can`, and the `render`/`renderPage`/`load`/`schedule` hooks that main.js implements |
 | `js/format.js` | Times, values, user labels, event labels and groups |
@@ -378,10 +380,15 @@ checks that every file in `js/` is served).
 | `js/alarms.js` | Unacknowledged warning and error counts in the sidebar |
 | `js/pages/*.js` | One module per page (dashboard, audit, targets, certificates, browser, users, settings, account with the login screens): its view, and its `actions` and `forms` |
 
-Rendering replaces `innerHTML` with the output of `html` templates; events
-are handled by delegation on `data-action` (clicks, and changes of selects
-and checkboxes) and `data-form` (submits), because the CSP forbids inline
-handlers. Page modules never import main.js: they redraw through the hooks in
+A page is a string view or a Preact component (`view` or `component` in the
+page list of main.js); the Targets page is a component, the others still
+string views, converted one at a time. A string view is redrawn by replacing
+`innerHTML` with the output of `html` templates, and its events are handled
+by delegation on `data-action` (clicks, and changes of selects and
+checkboxes) and `data-form` (submits), because the CSP forbids inline
+handlers. A component is diffed into the page, so a redraw keeps focus, what
+is typed and scroll positions; it keeps what it edits in `useState`, handles
+its events itself and reads the shared `state` when it is drawn. Page modules never import main.js: they redraw through the hooks in
 `state.js`, which keeps the import graph free of cycles. The code is
 formatted with Prettier (`src/web/ui/.prettierrc.json`: width 100, markup in
 templates left as written).
@@ -490,7 +497,7 @@ dependency out of the binary.
 | X509 / issued user tokens | Rejected with `BadIdentityTokenRejected` and audited, and not offered in the endpoint list; a per-target service account is a later option |
 | Fail-closed guarantee | A `change_intent` record is committed before a change request is forwarded; the outcome follows as a normal record |
 | Web UI login | Local users with roles |
-| Frontend technology | Vanilla JS without a build step, instead of Svelte: a single `cargo build`, no Node toolchain in CI or cross builds |
+| Frontend technology | JavaScript without a build step, instead of Svelte: a single `cargo build`, no Node toolchain in CI or cross builds. Pages are string templates or, for forms and live data, Preact components with htm instead of JSX (vendored, no bundler) |
 | UI style | Ploxc brand (Modbux, ploxc.com), with fonts and icons embedded in the binary |
 | Browser identity | Direct session on the target with the gateway certificate and a login entered in the UI (not stored), read-only |
 | Noisy nodes | Summarised per node and interval, never dropped silently; admin-only, audited, optionally per client |
