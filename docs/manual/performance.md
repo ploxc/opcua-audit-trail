@@ -7,13 +7,13 @@ What the gateway costs, measured on a real PLC, and how to measure your own.
 The gateway ran natively on a Phoenix Contact AXC F 2152 (ARMv7, two cores),
 next to the PLC runtime, in front of the PLC's own OPC UA server. Four
 clients, `Basic256Sha256` SignAndEncrypt, user name login, 20 to 30 seconds
-per run.
+per run. One gateway build, not pinned, unless noted.
 
 | | Direct to the PLC | Through the gateway |
 |---|---|---|
 | New session (connect, read, close) | 0.44 s | 3.2 s |
 | Monitored items: notifications | 940/s | 790/s |
-| Writes, `fail_mode = "closed"`, old value recorded (default) | 284/s, p50 10 ms | 20/s, p50 145 ms |
+| Writes, `fail_mode = "closed"`, old value recorded (default) | 280/s, p50 10 ms | 20/s, p50 145 ms |
 | Writes, `fail_mode = "open"`, old value recorded | | 54/s, p50 54 ms |
 | Writes, `fail_mode = "open"`, `record_old_value = false` | | 87/s, p50 32 ms |
 
@@ -37,6 +37,33 @@ false` trade evidence for speed (see [Audit trail](audit-trail.md)).
 
 On a PC or a server the gateway is much faster; there the PLC is usually the
 limit.
+
+What did not help on the PLCnext: another memory allocator (mimalloc: +5%,
+noise) and a build for its CPU (`-C target-cpu=cortex-a9`, NEON: +15% on
+writes, nothing on sessions). One core is enough: pinned to one core, writes
+stayed at 66/s.
+
+## Keep the gateway off the PLC's real-time core
+
+On a PLCnext the program runs on its own core (ESM1: Linux CPU 0 on an AXC F
+2152). Pin the gateway to the other one, so it never takes time from the PLC
+cycle. Check which core the real-time threads use:
+
+```sh
+for p in $(pidof Arp.System.Application); do cat /proc/$p/task/*/status; done \
+  | grep Cpus_allowed_list | sort | uniq -c
+```
+
+Threads on `0` only are the real-time ones. Then, as root:
+
+```sh
+mkdir -p /etc/systemd/system/opcua-audit-gateway.service.d
+printf '[Service]\nCPUAffinity=1\n' > /etc/systemd/system/opcua-audit-gateway.service.d/cpu.conf
+systemctl daemon-reload && systemctl restart opcua-audit-gateway
+grep Cpus_allowed_list /proc/$(pidof opcua-audit-gateway)/status   # 1
+```
+
+If tasks run in ESM2 (CPU 1), the gateway shares that core with them.
 
 ## Measure your own
 
