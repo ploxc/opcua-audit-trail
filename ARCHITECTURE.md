@@ -305,8 +305,16 @@ embedded, so the UI needs no internet access.
   application, user, security, since), last writes, lost audit events.
 - **Targets**: endpoint URL, _Discover_ (policies, modes, user tokens, server
   certificate), follow vs. custom settings.
-- **Certificates**: own certificate (regenerate/import), trusted and rejected
-  clients, trusted upstream servers.
+- **Certificates**: own certificate (regenerate/import) with the host names
+  it must carry (the API reports the ones a certificate lacks), the web UI's
+  HTTPS certificate, trusted and rejected clients, trusted upstream servers.
+  An admin can turn on HTTPS: only `[web] tls = true` is written, never the
+  rest of `[web]`, and not when `OPCUA_GATEWAY_WEB_TLS` decides. It applies
+  at the next start. Under systemd (`INVOCATION_ID` set) the UI offers a
+  restart: the gateway stops with exit code 75 and `Restart=on-failure`
+  starts it again. Elsewhere a stopped gateway would stay stopped, so there
+  is no restart button (a restart in the same process could run two audit
+  writers on one trail).
 - **Browser**: address space tree, attributes, live values. It uses a separate
   gateway session and is read-only by default; writes from the UI are audited
   under the UI user.
@@ -334,13 +342,26 @@ embedded, so the UI needs no internet access.
 - **Discovery** of an arbitrary URL is admin-only and audited, so the UI
   cannot be used to probe the plant network.
 - **Settings**: retention, fail mode, old values, the summary interval, export
-  destinations and certificate host names. Written back to `config.toml`
+  destinations and MCP. Certificate host names are on the Certificates page
+  (the same API). Written back to `config.toml`
   (only those keys; comments stay) and applied live: the relay, retention
   and exporters read shared settings, and exporters restart with the new
   destinations. Export positions are kept per destination, so a new one gets
   the whole trail and the old one's last record stays a `verify` anchor.
   Secrets are write-only, and a new scheme, host or port of the URL forgets
-  them. The web listener, TLS and paths stay file-only.
+  them. The web listener and paths stay file-only.
+- **Live updates**: `GET /api/events` is a Server-Sent Events stream. After
+  every committed batch the audit writer publishes the last seq on a
+  `tokio::sync::watch`; the stream sends it as `event: audit` (at most about
+  three a second, bursts coalesce) and a comment every 15 s. Almost
+  everything the UI shows live makes an audit record, so the UI fetches the
+  open page again through the normal API: the stream carries no content and
+  needs no role checks of its own beyond auditor. It ends when the session
+  ends (checked at every event and keep-alive, without counting as
+  activity) and when the gateway stops (else the web server would wait for
+  it). `X-Accel-Buffering: no` keeps nginx-style proxies from buffering.
+  The UI keeps polling only the Browser's watch list (values read from the
+  PLC) and a quiet 30 s refresh for what is not in the trail.
 - Confirmations use an in-page dialog that explains the consequence.
 
 The web UI binds to `127.0.0.1` by default; on a loopback address it only
@@ -368,7 +389,7 @@ checks that every file in `js/` is served).
 <!-- prettier-ignore -->
 | Module | Contents |
 | --- | --- |
-| `js/main.js` | Start-up, routing (the page list), the `App` component (login screens, or the sidebar and the page), loading and periodic refresh |
+| `js/main.js` | Start-up, routing (the page list), the `App` component (login screens, or the sidebar and the page), loading, and the live updates (`EventSource`) |
 | `js/vdom.js` | Preact: the `html` tag (htm), the hooks, `safe` (a handler that toasts a failed request), `submit` (a form's handler) |
 | `js/vendor/` | Preact, its hooks and htm, with licenses and how to update them |
 | `js/api.js` | `fetch` helpers for `/api` (`get`, `post`, `put`, `del`) |
@@ -382,7 +403,7 @@ checks that every file in `js/` is served).
 The UI is one tree of Preact components, written with htm instead of JSX (no
 bundler), drawn from the shared `state`. After a change, `redraw()` diffs the
 tree into the page again: only what changed is touched, so what is typed,
-the focus and scroll positions stay while the periodic refresh redraws. What
+the focus and scroll positions stay while a live update redraws. What
 the gateway sent lives in `state`; what one component edits (a form) lives
 in its `useState`. Components set their event handlers themselves (the CSP
 forbids only inline handlers in markup). Page modules never import main.js:

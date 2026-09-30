@@ -239,53 +239,136 @@ async function load() {
   }
   redraw();
   schedule(page.id);
+  startLive();
 }
 
-let refreshTimer = null;
+/** Fetches again what the open page shows (after a new audit record). */
+async function refreshPage() {
+  if (!state.user || state.user.must_change_password) return;
+  refreshAlarms();
+  switch (currentPage().id) {
+    case "dashboard":
+      await dashboard.refreshDashboard();
+      break;
+    case "audit":
+      state.status = await get("/status");
+      if (state.audit.live) await audit.loadAudit();
+      break;
+    case "targets":
+      state.status = await get("/status");
+      state.certificates = await get("/certificates");
+      break;
+    case "certificates":
+      state.certificates = await get("/certificates");
+      state.settings = await get("/settings");
+      state.status = await get("/status");
+      break;
+    case "settings":
+      state.settings = await get("/settings");
+      state.status = await get("/status");
+      break;
+    case "users":
+      state.users = await get("/users");
+      state.userTokens = await get("/tokens");
+      break;
+    case "account":
+      state.account.tokens = await get("/me/tokens");
+      break;
+    default:
+      state.status = await get("/status");
+  }
+  reloadIfUpgraded();
+}
 
-/** (Re)starts the periodic refresh of a page; one timer at a time. */
+// A refresh at a time: events during one cause one more, not one each.
+let refreshing = false;
+let refreshAgain = false;
+
+async function refresh() {
+  if (refreshing) {
+    refreshAgain = true;
+    return;
+  }
+  refreshing = true;
+  do {
+    refreshAgain = false;
+    try {
+      await refreshPage();
+    } catch (e) {
+      fail(e);
+    }
+    redraw();
+  } while (refreshAgain);
+  refreshing = false;
+}
+
+// ---------- live updates ----------
+
+// The gateway announces every committed audit record on /api/events, as
+// its seq only. Almost everything the pages show makes a record (clients,
+// targets, certificates, settings, writes), so an event means: fetch the
+// open page again.
+let events = null;
+let lastSeq = null;
+let wasOpen = false;
+
+function startLive() {
+  if (events || !state.user || state.user.must_change_password) return;
+  events = new EventSource("/api/events");
+  events.addEventListener("open", () => {
+    lastSeq = null;
+    // After an interruption events may have been missed.
+    if (wasOpen) load();
+    wasOpen = true;
+  });
+  events.addEventListener("audit", (e) => {
+    const seq = Number(e.data);
+    // The first event after connecting only says where the trail is.
+    const first = lastSeq === null;
+    if (seq === lastSeq) return;
+    lastSeq = seq;
+    if (!first) refresh();
+  });
+  events.addEventListener("error", () => {
+    // The browser reconnects by itself, but gives up when the gateway is
+    // unreachable or refuses (the session ended). Then: a refresh (which
+    // shows the login if the session ended) and a new stream in 5 s.
+    if (events?.readyState === EventSource.CLOSED) {
+      events = null;
+      refresh();
+      setTimeout(startLive, 5000);
+    }
+  });
+}
+
+let watchTimer = null;
+
+/** (Re)starts the Browser's watch list: values read from the PLC, not in
+ * the trail, so they are polled every second. */
 function schedule(pageId) {
-  clearInterval(refreshTimer);
-  refreshTimer = null;
-  // Calls `fn` every `ms` and redraws, unless it returns false.
-  const every = (ms, fn) => {
-    refreshTimer = setInterval(async () => {
+  clearInterval(watchTimer);
+  watchTimer = null;
+  if (pageId === "browser" && state.browser.connection && state.browser.watch.length) {
+    watchTimer = setInterval(async () => {
       if (!state.user) return;
       try {
-        if ((await fn()) !== false) redraw();
+        await browser.pollWatch();
+        redraw();
       } catch (e) {
         fail(e);
       }
-    }, ms);
-  };
-  if (pageId === "dashboard") every(5000, dashboard.refreshDashboard);
-  // Target status (a new target starts as "Checking…").
-  if (pageId === "targets") {
-    every(5000, async () => {
-      state.status = await get("/status");
-    });
-  }
-  if (pageId === "audit" && state.audit.live) every(3000, () => audit.loadAudit());
-  if (pageId === "browser" && state.browser.connection && state.browser.watch.length) {
-    every(1000, browser.pollWatch);
+    }, 1000);
   }
 }
 
 setHooks({ redraw, load, schedule, fail });
 
-// The sidebar's warning and error counts and the targets dot stay current
-// on every page.
-setInterval(async () => {
-  refreshAlarms();
-  if (!state.user || state.user.must_change_password) return;
-  try {
-    state.status = await get("/status");
-  } catch {
-    return;
-  }
-  reloadIfUpgraded();
-  redraw();
-}, 10000);
+// What is not in the trail (the export queue, "checked 31 s ago") and a
+// stream that could not reconnect: a quiet refresh every 30 s.
+setInterval(() => {
+  startLive();
+  refresh();
+}, 30000);
 
 // This page's UI version: the hash in the URL main.js was loaded from
 // (/js/<hash>/main.js). After an upgrade the gateway reports another one;

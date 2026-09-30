@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live updates:** pages update by themselves as soon as something is
+  recorded (a client connects, a target goes down, a write), instead of
+  every 3 to 10 seconds. The gateway announces new audit records on
+  `/api/events` (Server-Sent Events); a reverse proxy must not buffer it
+  (see the manual's Web UI page).
+- **HTTPS from the web UI:** Certificates → Web UI certificate → Turn on
+  writes `tls = true` to the config file. Installed as a Linux service, the
+  UI then offers to restart the gateway and moves to `https://`.
+
 - **Manual:** a Performance page with measurements on a PLCnext AXC F 2152
   (what reads, writes and new sessions cost through the gateway, and what
   `fail_mode` and `record_old_value` change), and how to measure your own.

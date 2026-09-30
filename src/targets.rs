@@ -133,6 +133,29 @@ impl TargetManager {
         Ok((old, new_config))
     }
 
+    /// Turns on HTTPS for the web UI: `[web] tls = true` in the config file,
+    /// for the next start. Only that key is written, not the rest of `[web]`
+    /// (the running value may come from the environment instead).
+    pub async fn enable_web_tls(&self) -> anyhow::Result<()> {
+        use toml_edit::{value, Item, Table};
+        let mut config = self.config.lock().await;
+        let path = &self.config_path;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut doc: toml_edit::DocumentMut = text
+            .parse()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let root = doc.as_table_mut();
+        if !root.get("web").is_some_and(Item::is_table) {
+            root.insert("web", Item::Table(Table::new()));
+        }
+        root["web"]["tls"] = value(true);
+        crate::fsutil::write_atomic(path, doc.to_string().as_bytes(), None)
+            .with_context(|| format!("writing {}", path.display()))?;
+        config.web.tls = true;
+        Ok(())
+    }
+
     pub async fn targets(&self) -> Vec<TargetConfig> {
         self.config.lock().await.targets.clone()
     }

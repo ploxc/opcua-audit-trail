@@ -18,7 +18,7 @@ export function DashboardPage() {
   return html`
     <div class="page-head">
       <div class="inline"><${MenuButton} /><h1>Dashboard</h1></div>
-      <span class="muted small">Gateway ${s.version} · updates every 5 s</span>
+      <span class="muted small">Gateway ${s.version} · live</span>
     </div>
     ${alerts(s)}
     <div class="stats">
