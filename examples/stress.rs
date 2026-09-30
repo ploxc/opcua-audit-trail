@@ -42,6 +42,9 @@
 //!   in `./stress-client-pki`; a strict PLC must trust it for `--direct`.
 //! - `--namespace http://microsoft.com/Opc/OpcPlc/` for OPC PLC with
 //!   `docker/opc-plc/nodes.json` (default: the demo PLC's `urn:demo-plc:line`).
+//! - A real PLC's own nodes instead of `Line1.*`: `--write-node` (a number,
+//!   written as its own type), `--watch-node` (repeat it) and
+//!   `--string-node`, e.g. `--write-node "ns=6;s=Arp.Plc.Eclr/Main.speed"`.
 //! - `--api http://127.0.0.1:8080 --api-user admin --api-password …` counts
 //!   the gateway's `write` records afterwards and compares them with the
 //!   writes that got an answer. The user needs at least the auditor role.
@@ -62,9 +65,10 @@ use opcua::crypto::SecurityPolicy;
 use opcua::types::{
     AttributeId, DataValue, MessageSecurityMode, MonitoredItemCreateRequest, MonitoringMode,
     MonitoringParameters, NodeId, NumericRange, ReadValueId, StatusCode, TimestampsToReturn,
-    VariableId, WriteValue,
+    VariableId, Variant, WriteValue,
 };
 use parking_lot::Mutex;
+use std::str::FromStr;
 use tokio::task::JoinHandle;
 
 #[derive(Parser)]
@@ -126,6 +130,17 @@ struct Common {
     /// Namespace of the `Line1.*` nodes.
     #[arg(long, global = true, default_value = "urn:demo-plc:line")]
     namespace: String,
+    /// The node to write (writes, reconnect, soak) instead of
+    /// `Line1.Setpoint`, e.g. `ns=6;s=Arp.Plc.Eclr/MainInstance.speed`.
+    /// Written as its own number type.
+    #[arg(long, global = true)]
+    write_node: Option<String>,
+    /// A node to monitor (subscribe) instead of `Line1.*`; repeat it.
+    #[arg(long = "watch-node", global = true)]
+    watch_nodes: Vec<String>,
+    /// The string node for `large` instead of `Line1.Recipe`.
+    #[arg(long, global = true)]
+    string_node: Option<String>,
     /// Concurrent clients.
     #[arg(long, global = true, default_value_t = 4)]
     clients: usize,
@@ -251,30 +266,55 @@ impl Stats {
                      web UI, or move it from pki/rejected to pki/trusted)"
                 );
             }
+            // async-opcua reports a missing Anonymous login this way.
+            if e.contains("BadSecurityPolicyRejected") {
+                println!(
+                    "    hint: the server may not allow anonymous logins: \
+                     give --user and --password"
+                );
+            }
         }
     }
 }
 
 // ---------- OPC UA ----------
 
+/// The nodes a scenario uses: given on the command line, or the demo PLC's.
+struct Nodes {
+    write: NodeId,
+    watch: Vec<NodeId>,
+    string: NodeId,
+}
+
 struct Conn {
     session: Arc<Session>,
     event_loop: JoinHandle<StatusCode>,
-    ns: u16,
+    nodes: Arc<Nodes>,
 }
 
 impl Conn {
-    fn node(&self, name: &str) -> NodeId {
-        NodeId::new(self.ns, format!("Line1.{name}"))
-    }
-
-    fn write_value(&self, name: &str, value: DataValue) -> WriteValue {
+    fn write_value(node_id: &NodeId, value: impl Into<Variant>) -> WriteValue {
         WriteValue {
-            node_id: self.node(name),
+            node_id: node_id.clone(),
             attribute_id: AttributeId::Value as u32,
             index_range: NumericRange::None,
-            value,
+            value: DataValue::value_only(value.into()),
         }
+    }
+
+    /// Reads the write node once: servers refuse a value of another type
+    /// (BadTypeMismatch), and PLCs use Float and Int16 as often as Double.
+    async fn number_type(&self) -> anyhow::Result<Variant> {
+        let read = ReadValueId::from(self.nodes.write.clone());
+        let value = self
+            .session
+            .read(&[read], TimestampsToReturn::Neither, 0.0)
+            .await?
+            .pop()
+            .and_then(|d| d.value)
+            .context("write node has no value")?;
+        number(&value, 0.0)?;
+        Ok(value)
     }
 
     async fn close(self) {
@@ -287,6 +327,66 @@ impl Conn {
     fn drop_hard(self) {
         self.event_loop.abort();
     }
+}
+
+/// `value` as the same number type as `like`.
+fn number(like: &Variant, value: f64) -> anyhow::Result<Variant> {
+    Ok(match like {
+        Variant::Double(_) => Variant::Double(value),
+        Variant::Float(_) => Variant::Float(value as f32),
+        Variant::SByte(_) => Variant::SByte(value as i8),
+        Variant::Byte(_) => Variant::Byte(value as u8),
+        Variant::Int16(_) => Variant::Int16(value as i16),
+        Variant::UInt16(_) => Variant::UInt16(value as u16),
+        Variant::Int32(_) => Variant::Int32(value as i32),
+        Variant::UInt32(_) => Variant::UInt32(value as u32),
+        Variant::Int64(_) => Variant::Int64(value as i64),
+        Variant::UInt64(_) => Variant::UInt64(value as u64),
+        other => bail!("the write node must be a number, not {:?}", other.type_id()),
+    })
+}
+
+/// Parses the node options; looks up `--namespace` only for the defaults.
+async fn nodes(c: &Common, session: &Session) -> anyhow::Result<Nodes> {
+    let parse = |s: &String| {
+        NodeId::from_str(s).map_err(|_| anyhow::anyhow!("not a NodeId: {s} (use ns=6;s=…)"))
+    };
+    let needs_ns = c.write_node.is_none() || c.watch_nodes.is_empty() || c.string_node.is_none();
+    let ns = if needs_ns {
+        session
+            .get_namespace_index(&c.namespace)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "namespace {} not found ({e}); pick one with --namespace, \
+                     or give --write-node, --watch-node and --string-node",
+                    c.namespace
+                )
+            })?
+    } else {
+        0
+    };
+    let line = |name: &str| NodeId::new(ns, format!("Line1.{name}"));
+    let watch = if c.watch_nodes.is_empty() {
+        vec![line("Setpoint"), line("Running"), line("Recipe")]
+    } else {
+        c.watch_nodes.iter().map(parse).collect::<Result<_, _>>()?
+    };
+    Ok(Nodes {
+        write: c
+            .write_node
+            .as_ref()
+            .map(parse)
+            .transpose()?
+            .unwrap_or_else(|| line("Setpoint")),
+        watch,
+        string: c
+            .string_node
+            .as_ref()
+            .map(parse)
+            .transpose()?
+            .unwrap_or_else(|| line("Recipe")),
+    })
 }
 
 async fn connect(c: &Common, url: &str) -> anyhow::Result<Conn> {
@@ -308,6 +408,9 @@ async fn connect(c: &Common, url: &str) -> anyhow::Result<Conn> {
         .pki_dir("./stress-client-pki")
         .create_sample_keypair(true)
         .trust_server_certs(true)
+        // Trusting every server anyway: a PLC's certificate often names
+        // only its host name, and a PLC clock is often a few minutes off.
+        .verify_server_certs(false)
         .session_retry_limit(0)
         .session_timeout(c.session_timeout)
         .client()
@@ -334,20 +437,17 @@ async fn connect(c: &Common, url: &str) -> anyhow::Result<Conn> {
             bail!("no session within 10 s");
         }
     }
-    let ns = match session.get_namespace_index(&c.namespace).await {
-        Ok(ns) => ns,
+    let nodes = match nodes(c, &session).await {
+        Ok(nodes) => Arc::new(nodes),
         Err(e) => {
             event_loop.abort();
-            bail!(
-                "namespace {} not found ({e}); pick one with --namespace",
-                c.namespace
-            );
+            return Err(e);
         }
     };
     Ok(Conn {
         session,
         event_loop,
-        ns,
+        nodes,
     })
 }
 
@@ -435,12 +535,19 @@ async fn writes(c: Arc<Common>, url: String, rate: f64, duration: Duration) -> A
                 Ok(conn) => conn,
                 Err(e) => return stats.error(e),
             };
+            let like = match conn.number_type().await {
+                Ok(like) => like,
+                Err(e) => {
+                    stats.error(e);
+                    return conn.close().await;
+                }
+            };
             let mut n = 0u64;
             while Instant::now() < deadline {
                 let started = Instant::now();
                 n += 1;
                 let value = 50.0 + i as f64 + (n % 100) as f64 / 10.0;
-                let w = conn.write_value("Setpoint", DataValue::value_only(value));
+                let w = Conn::write_value(&conn.nodes.write, number(&like, value).unwrap());
                 match conn.session.write(&[w]).await {
                     Ok(r) => {
                         stats.timed(started);
@@ -494,12 +601,8 @@ async fn subscribe(
                     return conn.close().await;
                 }
             };
-            let nodes = [
-                NodeId::from(VariableId::Server_ServerStatus_CurrentTime),
-                conn.node("Setpoint"),
-                conn.node("Running"),
-                conn.node("Recipe"),
-            ];
+            let mut nodes = vec![NodeId::from(VariableId::Server_ServerStatus_CurrentTime)];
+            nodes.extend(conn.nodes.watch.iter().cloned());
             let requests: Vec<_> = (0..items)
                 .map(|i| {
                     MonitoredItemCreateRequest::new(
@@ -591,10 +694,18 @@ async fn reconnect(c: Arc<Common>, url: String, duration: Duration) -> Arc<Stats
                         continue;
                     }
                 };
+                let like = match conn.number_type().await {
+                    Ok(like) => like,
+                    Err(e) => {
+                        stats.error(e);
+                        conn.drop_hard();
+                        continue;
+                    }
+                };
                 for n in 0..5 {
                     let started = Instant::now();
                     let value = 40.0 + i as f64 + f64::from(n);
-                    let w = conn.write_value("Setpoint", DataValue::value_only(value));
+                    let w = Conn::write_value(&conn.nodes.write, number(&like, value).unwrap());
                     match conn.session.write(&[w]).await {
                         Ok(r) => {
                             stats.timed(started);
@@ -626,7 +737,7 @@ async fn large(c: Arc<Common>, url: String, kb: usize, duration: Duration) -> Ar
                 let fill = char::from(b'A' + ((i + n) % 26) as u8);
                 let text: String = std::iter::repeat_n(fill, kb * 1024).collect();
                 let started = Instant::now();
-                let w = conn.write_value("Recipe", DataValue::value_only(text));
+                let w = Conn::write_value(&conn.nodes.string, text);
                 match conn.session.write(&[w]).await {
                     Ok(r) => {
                         stats.timed(started);
