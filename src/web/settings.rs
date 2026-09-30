@@ -117,10 +117,10 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
                 .is_some()
                 .then_some(crate::config::WEB_TLS_ENV),
             tls_certificate: c.web.tls_certificate.as_deref().map(path),
-            certificate: super::tls::web_store(&c)
-                .read_own_cert()
-                .ok()
-                .map(|cert| crate::pki::CertificateInfo::from_x509(&cert)),
+            certificate: super::tls::web_store(&c).read_own_cert().ok().map(|cert| {
+                let names = &c.gateway.certificate_hostnames;
+                crate::pki::CertificateInfo::with_hostnames(&cert, names)
+            }),
         },
         mcp: McpView {
             enabled: c.mcp.enabled,

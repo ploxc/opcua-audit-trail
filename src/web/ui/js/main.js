@@ -213,6 +213,7 @@ async function load() {
         break;
       case "certificates":
         state.certificates = await get("/certificates");
+        state.settings = await get("/settings");
         state.status = await get("/status");
         break;
       case "browser":

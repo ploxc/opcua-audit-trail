@@ -4,10 +4,10 @@ From a fresh gateway to a client that writes through it. Secure connections
 need trust both ways, so a few steps go back and forth between the gateway
 and the PLC.
 
-1. **Gateway name** (Docker, or clients on other machines): Settings →
-   Gateway certificate → **Host names and IP addresses**: the name or IP
-   clients use to reach the gateway. Then Certificates → **Regenerate**. Do
-   this before the PLC trusts the certificate, or it must trust it again.
+1. **Gateway name** (Docker, or clients on other machines): Certificates →
+   **Host names and IP addresses**: the name or IP clients use to reach the
+   gateway. Save, and accept the new certificate it offers. Do this before
+   the PLC trusts the certificate, or it must trust it again.
 2. **Add the target:** Targets → **Add target**: a name, where clients
    connect (`0.0.0.0:4841`; in Docker, publish that port), and the PLC's
    endpoint URL (`opc.tcp://192.168.0.10:4840`). **Check now** shows whether

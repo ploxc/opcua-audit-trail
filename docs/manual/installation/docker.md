@@ -39,8 +39,8 @@ in two ways:
   stored. If the trail cannot be written (e.g. a full disk), clients cannot
   write. Change it in Settings → Audit trail.
 - **The gateway's name:** the container does not know the host's name or IP,
-  which clients use. Add them under Settings → Gateway certificate before a
-  PLC trusts the certificate (see [Your first PLC](../first-target.md)).
+  which clients use. Add them under Certificates → Host names and IP
+  addresses before a PLC trusts the certificate (see [Your first PLC](../first-target.md)).
 
 ## Changing the config
 
