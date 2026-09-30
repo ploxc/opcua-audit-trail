@@ -26,8 +26,9 @@ the PLC trusts the gateway.
 - **Download** as .der or .pem, **Import** one issued by your plant CA, or
   **Regenerate** it. After regenerating or importing, every PLC must trust
   the new one.
-- The host names and IP addresses clients use to reach the gateway go into
-  it (Settings, Gateway certificate); they are used the next time it is
-  generated.
-- This certificate is for OPC UA only; the web UI has its own (see
-  [HTTPS](https.md)).
+- **Host names and IP addresses:** how clients reach the gateway, on the
+  same card. A client refuses a certificate without the name it connected
+  with. After a change the page offers to regenerate; until then it shows
+  which names the certificate lacks.
+- This certificate is for OPC UA only; the web UI has its own, on the same
+  page under **Web UI certificate (HTTPS)** (see [HTTPS](https.md)).

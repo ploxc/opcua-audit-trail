@@ -974,12 +974,19 @@ async fn certificates(
     user: AuthUser,
 ) -> ApiResult<CertificatesResponse> {
     user.require(Role::Auditor)?;
+    let names = s
+        .targets
+        .config()
+        .await
+        .gateway
+        .certificate_hostnames
+        .clone();
     Ok(Json(CertificatesResponse {
         own: s
             .pki
             .own_certificate()
             .ok()
-            .map(|c| CertificateInfo::from_x509(&c)),
+            .map(|c| CertificateInfo::with_hostnames(&c, &names)),
         trusted: s.pki.trusted(),
         rejected: s.pki.rejected(),
     }))

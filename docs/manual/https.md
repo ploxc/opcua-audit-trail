@@ -19,15 +19,15 @@ Without `tls_certificate`, the web UI generates a self-signed certificate of
 its own in `<data_dir>/web-pki`. It is separate from the gateway's OPC UA
 certificate, so renewing it never concerns a PLC.
 
-It names `localhost`, `127.0.0.1`, the machine and the certificate host names
-(Settings, under Gateway certificate). Opening the UI by another name gives
-a name mismatch: add the name there, then **Settings → Web UI and files →
-Regenerate** and restart the gateway.
+It names `localhost`, `127.0.0.1`, the machine and the host names on the
+Certificates page. Opening the UI by another name gives a name mismatch: add
+the name there, then **Certificates → Web UI certificate (HTTPS) →
+Regenerate** and restart the gateway. The card shows which names it lacks.
 
 ## Trusting it
 
 Browsers ask once to accept a self-signed certificate. To stop that, trust
-it: **Settings → Web UI and files → Download (.pem)**. It is self-signed, so there is
+it: **Certificates → Web UI certificate (HTTPS) → Download (.pem)**. It is self-signed, so there is
 no separate root CA: the certificate itself is what you trust.
 
 - **macOS:** open the .pem; in Keychain Access, open the certificate, expand

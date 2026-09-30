@@ -5,10 +5,10 @@
 | Dashboard | auditor | Reachability of each target, connected clients, latest changes, problems that need attention |
 | Audit trail | auditor | Filters, record details, live mode, CSV export, integrity check, most written nodes (admin summarises them) |
 | Targets | auditor (operator discovers, admin edits) | Add/edit/remove targets without a restart, discovery, trust the PLC certificate |
-| Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate), trust or reject certificates |
+| Certificates | auditor (admin acts) | Gateway certificate (download/import/regenerate) and its host names, the web UI's HTTPS certificate, trust or reject certificates |
 | Browser | operator | Read-only address space browser with live values |
 | Users | admin | Users, roles and everyone's API tokens |
-| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB export, certificate host names, AI assistants (MCP); web server and paths shown read-only |
+| Settings | auditor (admin edits) | Retention, fail mode, old values, summary interval, QuestDB export, AI assistants (MCP); web server and paths shown read-only |
 | Account | everyone | Own password and API tokens |
 
 ## Errors and warnings

@@ -1,9 +1,11 @@
-// Certificates page: the gateway's own certificate (download, import,
-// regenerate), certificates waiting for a decision, and trusted ones.
+// Certificates page, everything about certificates in one place: the
+// gateway's OPC UA certificate with the host names it must carry, the web
+// UI's HTTPS certificate, certificates waiting for a decision, and trusted
+// ones.
 
 import { html, safe, submit, useState } from "../vdom.js";
-import { del, post } from "../api.js";
-import { MenuButton, dialog, readFile, toast } from "../components.js";
+import { del, post, put } from "../api.js";
+import { MenuButton, dialog, formData, readFile, toast } from "../components.js";
 import { time } from "../format.js";
 import { can, load, state } from "../state.js";
 
@@ -63,25 +65,64 @@ const untrust = (thumb) =>
     await load();
   });
 
-const regenerate = safe(async () => {
+/** Asks, then makes a new gateway certificate with the current host names. */
+async function regenerateOwn() {
   const confirmed = await dialog({
     title: "Generate a new gateway certificate?",
     body:
-      "Every PLC and client must trust the new one. " +
+      "It names the host names below. Every PLC and client must trust the new one. " +
       "All targets restart, which disconnects their clients.",
     confirm: "Generate",
     danger: true,
   });
   if (!confirmed) return;
   await post("/certificates/own/regenerate");
-  toast("New certificate generated");
+  toast("New certificate generated: let every PLC trust it");
+  await load();
+}
+const regenerate = safe(regenerateOwn);
+
+/** Saves the host names; offers a new certificate when the current one lacks them. */
+const saveHostnames = submit(async (form) => {
+  const names = formData(form)
+    .certificate_hostnames.split(/[\s,;]+/)
+    .filter(Boolean);
+  await put("/settings/gateway", { certificate_hostnames: names });
+  await load();
+  form.reset();
+  if (state.certificates.own?.missing_hostnames?.length) await regenerateOwn();
+  else toast("Saved");
+});
+
+const regenerateWebCertificate = safe(async () => {
+  const ok = await dialog({
+    title: "New HTTPS certificate?",
+    confirm: "Regenerate",
+    body:
+      "It names the host names above. The web UI uses it after the gateway restarts. " +
+      "Browsers and AI assistants that trusted the current one must trust the new one. " +
+      "PLCs are not affected.",
+  });
+  if (!ok) return;
+  await post("/web-certificate/regenerate");
+  toast("New certificate: restart the gateway to use it");
   await load();
 });
+
+// Names the configured host names a certificate does not carry yet.
+const missing = (c, fix) =>
+  c?.missing_hostnames?.length > 0 &&
+  html`<div class="alert warn small">
+    Not in this certificate yet:${" "}
+    <span class="mono">${c.missing_hostnames.join(", ")}</span>. Clients that use these names refuse
+    it. ${fix}
+  </div>`;
 
 export function CertificatesPage() {
   const [importing, setImporting] = useState(false);
   const c = state.certificates;
-  if (!c) return html`<p class="muted">Loading…</p>`;
+  const st = state.settings;
+  if (!c || !st) return html`<p class="muted">Loading…</p>`;
   const admin = can("admin");
   return html`
     <div class="page-head">
@@ -89,7 +130,7 @@ export function CertificatesPage() {
     </div>
     <div class="card">
       <div class="card-head">
-        <h2>Gateway certificate</h2>
+        <h2>Gateway certificate (OPC UA)</h2>
         <div class="inline">
           <a class="button small" href="/api/certificates/own/cert.pem">Download (.pem)</a>
           <a class="button small" href="/api/certificates/own/cert.der">Download (.der)</a>
@@ -109,19 +150,36 @@ export function CertificatesPage() {
             <dd class="mono">${c.own.thumbprint}</dd>
             <dt>Valid</dt>
             <dd>${time(c.own.not_before)} – ${time(c.own.not_after)}</dd>
+            <dt>Application URI</dt>
+            <dd class="mono">${st.gateway.application_uri}</dd>
           </dl>`
           : html`<p class="muted">No certificate.</p>`
       }
+      ${missing(c.own, admin ? "Regenerate to add them." : "An administrator can regenerate it.")}
+      <form class="setting" onSubmit=${saveHostnames}>
+        <label class="title" for="hostnames">Host names and IP addresses</label>
+        <div class="inline">
+          <input
+            id="hostnames"
+            name="certificate_hostnames"
+            placeholder="gateway.local, 192.168.0.20"
+            defaultValue=${st.gateway.certificate_hostnames.join(", ")}
+            disabled=${!admin}
+          />
+          ${admin && html`<button class="primary" type="submit">Save</button>`}
+        </div>
+        <p class="help">
+          How clients reach the gateway. Both certificates on this page name them; a client refuses a
+          certificate that lacks the name it connected with.
+        </p>
+      </form>
       <p class="hint">
         Clients trust this certificate to connect securely; each PLC must trust it too, and ideally
         nothing else.
       </p>
-      <p class="hint">
-        For OPC UA only: the web UI's HTTPS certificate is a separate one, on the${" "}
-        <a href="#/settings">Settings</a> page.
-      </p>
       ${importing && html`<${ImportForm} close=${() => setImporting(false)} />`}
     </div>
+    ${webCard(st.web, admin)}
     <div class="card">
       <div class="card-head">
         <h2>Waiting for a decision</h2>
@@ -154,6 +212,63 @@ export function CertificatesPage() {
         "No trusted certificates yet.",
       )}
     </div>`;
+}
+
+// The web UI's own HTTPS certificate: separate from the OPC UA one, so
+// renewing it never concerns a PLC.
+function webCard(web, admin) {
+  const cert = !web.tls_certificate && web.certificate;
+  return html`<div class="card">
+    <div class="card-head">
+      <h2>Web UI certificate (HTTPS)</h2>
+      ${
+        cert &&
+        html`<div class="inline">
+          <a class="button small" href="/api/web-certificate/cert.pem">Download (.pem)</a>
+          <a class="button small" href="/api/web-certificate/cert.der">Download (.der)</a>
+          ${
+            admin &&
+            html`<button class="small" onClick=${regenerateWebCertificate}>Regenerate</button>`
+          }
+        </div>`
+      }
+    </div>
+    <dl class="kv">
+      <dt>HTTPS</dt>
+      <dd>
+        ${web.tls ? "on" : "off"}${" "}
+        ${
+          !web.tls &&
+          html`<span class="muted small"
+            >(turn it on with <span class="mono">tls = true</span> under${" "}
+            <span class="mono">[web]</span> in the config file, then restart)</span
+          >`
+        }
+      </dd>
+      ${
+        web.tls_certificate
+          ? html`<dt>Certificate</dt>
+              <dd class="mono">${web.tls_certificate}</dd>`
+          : cert &&
+            html`<dt>Subject</dt>
+              <dd>${cert.subject}</dd>
+              <dt>Thumbprint</dt>
+              <dd class="mono">${cert.thumbprint}</dd>
+              <dt>Valid</dt>
+              <dd>${time(cert.not_before)} – ${time(cert.not_after)}</dd>`
+      }
+    </dl>
+    ${cert && missing(cert, admin ? "Regenerate it, then restart the gateway." : "")}
+    ${
+      cert &&
+      html`<p class="hint">
+        Self-signed, so there is no separate root CA: trust this certificate itself. macOS: open the
+        .pem, then in Keychain Access set it to <i>Always Trust</i>. Windows: import it into${" "}
+        <i>Trusted Root Certification Authorities</i>. AI assistants (Node):${" "}
+        <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>.
+      </p>`
+    }
+  </div>`;
 }
 
 // Installing a certificate and key made elsewhere.

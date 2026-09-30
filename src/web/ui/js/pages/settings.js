@@ -1,16 +1,16 @@
 // Settings page: the audit trail (retention, fail mode, old values, summary
-// interval), the export to QuestDB, the gateway certificate's host names,
-// and read-only information about the web UI and files.
+// interval), the export to QuestDB, AI assistants (MCP), and read-only
+// information about the web UI and files. Certificates, with the host names
+// they carry, are on the Certificates page.
 //
 // The forms' fields start from the saved settings (`defaultValue`, see
 // vdom.js). After a save the settings are loaded again and the form is
 // reset to them, which also empties the secret fields.
 
-import { html, safe, submit } from "../vdom.js";
-import { get, post, put } from "../api.js";
+import { html, submit } from "../vdom.js";
+import { get, put } from "../api.js";
 import { MenuButton, dialog, formData, toast } from "../components.js";
 import { can, redraw, state } from "../state.js";
-import { time } from "../format.js";
 
 // How an export destination is doing, from the last /status answer.
 function exportState(name) {
@@ -77,7 +77,7 @@ export function SettingsPage() {
     </p>
     <div class="settings-grid">
       ${auditCard(st.audit, edit)} ${exportCard(st.export.questdb, edit)}
-      ${gatewayCard(st, edit)} ${mcpCard(st.mcp, edit)} ${webCard(st)}
+      ${mcpCard(st.mcp, edit)} ${webCard(st)}
     </div>`;
 }
 
@@ -319,43 +319,6 @@ function exportCard(q, edit) {
   </form>`;
 }
 
-const saveGateway = submit(async (form) => {
-  const names = formData(form)
-    .certificate_hostnames.split(/[\s,;]+/)
-    .filter(Boolean);
-  await put("/settings/gateway", { certificate_hostnames: names });
-  toast("Saved. Generate a new certificate to use it (Certificates page).");
-  await reload(form);
-});
-
-function gatewayCard(st, edit) {
-  return html`<form class="card" onSubmit=${saveGateway}>
-    <h2>Gateway certificate</h2>
-    <dl class="kv small readonly-kv">
-      <dt>Application name</dt>
-      <dd>${st.gateway.application_name}</dd>
-      <dt>Application URI</dt>
-      <dd class="mono">${st.gateway.application_uri}</dd>
-    </dl>
-    <div class="setting">
-      <label class="title" for="hostnames">Host names and IP addresses</label>
-      <input
-        id="hostnames"
-        name="certificate_hostnames"
-        placeholder="gateway.local, 192.168.0.20"
-        defaultValue=${st.gateway.certificate_hostnames.join(", ")}
-        disabled=${!edit}
-      />
-      <p class="help">
-        How clients reach the gateway, put in its certificate. Used when the certificate is
-        generated: after a change, generate a new one on the${" "}
-        <a href="#/certificates">Certificates</a> page.
-      </p>
-    </div>
-    ${saveButton(edit)}
-  </form>`;
-}
-
 /** What a token can be allowed to change, for people: a name and what it covers. */
 export const SCOPE_LABELS = {
   targets: ["Targets", "add, change and remove PLCs; summarised nodes"],
@@ -420,7 +383,7 @@ function webCard(st) {
       <dd class="mono">${st.web.listen}</dd>
       <dt>HTTPS</dt>
       <dd>
-        ${https}${" "}
+        ${https} (<a href="#/certificates">certificate</a>)${" "}
         ${
           st.web.tls_env &&
           html`<span class="muted small"
@@ -437,57 +400,6 @@ function webCard(st) {
       These take effect only when the gateway starts, and a wrong value can lock you out: change
       them in the <span class="mono">[web]</span> and <span class="mono">[gateway]</span> sections
       of the config file, then restart the gateway.
-    </p>
-    ${st.web.certificate && !st.web.tls_certificate && webCertificate(st.web.certificate)}
-  </div>`;
-}
-
-const regenerateWebCertificate = safe(async () => {
-  const ok = await dialog({
-    title: "New HTTPS certificate?",
-    confirm: "Regenerate",
-    body:
-      "The web UI uses it after the gateway restarts. Browsers and AI assistants that " +
-      "trusted the current one must trust the new one. PLCs are not affected.",
-  });
-  if (!ok) return;
-  await post("/web-certificate/regenerate");
-  toast("New certificate: restart the gateway to use it");
-  state.settings = await get("/settings");
-  redraw();
-});
-
-// The web UI's own HTTPS certificate: separate from the gateway's OPC UA
-// certificate, so renewing it never concerns a PLC.
-function webCertificate(c) {
-  return html`<div class="setting">
-    <div class="card-head">
-      <span class="title">HTTPS certificate</span>
-      <div class="inline">
-        <a class="button small" href="/api/web-certificate/cert.pem">Download (.pem)</a>
-        <a class="button small" href="/api/web-certificate/cert.der">Download (.der)</a>
-        ${
-          can("admin") &&
-          html`<button class="small" onClick=${regenerateWebCertificate}>Regenerate</button>`
-        }
-      </div>
-    </div>
-    <dl class="kv small readonly-kv">
-      <dt>Subject</dt>
-      <dd>${c.subject}</dd>
-      <dt>Thumbprint</dt>
-      <dd class="mono">${c.thumbprint}</dd>
-      <dt>Valid</dt>
-      <dd>${time(c.not_before)} – ${time(c.not_after)}</dd>
-    </dl>
-    <p class="help small">
-      Self-signed, so there is no separate root CA: trust this certificate itself. macOS: open the
-      .pem, then in Keychain Access set it to <i>Always Trust</i>. Windows: import it into${" "}
-      <i>Trusted Root Certification Authorities</i>. AI assistants (Node):${" "}
-      <span class="mono">NODE_EXTRA_CA_CERTS=/path/to/opcua-audit-gateway-web.pem</span>. It names
-      localhost, this machine and the host names under Gateway certificate; after changing those,
-      regenerate it and restart the gateway. This is not the certificate PLCs trust (that is on
-      the <a href="#/certificates">Certificates</a> page).
     </p>
   </div>`;
 }

@@ -132,6 +132,10 @@ pub struct CertificateInfo {
     pub thumbprint: String,
     pub not_before: Option<String>,
     pub not_after: Option<String>,
+    /// Configured host names this certificate does not name yet: it was
+    /// made before they were added, so clients using them refuse it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_hostnames: Vec<String>,
 }
 
 impl CertificateInfo {
@@ -141,6 +145,19 @@ impl CertificateInfo {
             thumbprint: cert.thumbprint().as_hex_string(),
             not_before: cert.not_before().ok().map(|t| t.to_rfc3339()),
             not_after: cert.not_after().ok().map(|t| t.to_rfc3339()),
+            missing_hostnames: Vec::new(),
+        }
+    }
+
+    /// For the gateway's own certificates: which of `names` it lacks.
+    pub fn with_hostnames(cert: &X509, names: &[String]) -> Self {
+        Self {
+            missing_hostnames: names
+                .iter()
+                .filter(|n| cert.is_hostname_valid(n).is_err())
+                .cloned()
+                .collect(),
+            ..Self::from_x509(cert)
         }
     }
 }
@@ -528,6 +545,26 @@ mod tests {
             second.thumbprint().as_hex_string()
         );
         assert!(pki.trusted().is_empty());
+    }
+
+    #[test]
+    fn reports_host_names_the_certificate_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gateway = GatewayConfig {
+            certificate_hostnames: vec!["gateway.test".into(), "192.168.1.221".into()],
+            ..GatewayConfig::default()
+        };
+        let pki = Pki::open(dir.path()).unwrap();
+        let (cert, _) = pki.ensure_own_certificate(&gateway).unwrap();
+        let names = &gateway.certificate_hostnames;
+        assert!(CertificateInfo::with_hostnames(&cert, names)
+            .missing_hostnames
+            .is_empty());
+
+        // Added after the certificate was made: the one a client will miss.
+        gateway.certificate_hostnames.push("10.0.0.7".into());
+        let info = CertificateInfo::with_hostnames(&cert, &gateway.certificate_hostnames);
+        assert_eq!(info.missing_hostnames, ["10.0.0.7"]);
     }
 
     #[test]

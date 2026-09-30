@@ -80,7 +80,7 @@ pub fn regenerate_web_certificate(config: &Config) -> anyhow::Result<X509> {
 /// The TLS configuration: the configured PEM files, or else the web UI's own
 /// self-signed certificate (browsers ask to accept it once, or import it as
 /// trusted: Settings, Web UI). Also returns the certificate it presents
-/// (DER), which is what the Settings page offers for download.
+/// (DER), which is what the Certificates page offers for download.
 pub fn server_config(config: &Config) -> anyhow::Result<(ServerConfig, Vec<u8>)> {
     let (chain, key) = match (&config.web.tls_certificate, &config.web.tls_private_key) {
         (Some(cert), Some(key)) => {

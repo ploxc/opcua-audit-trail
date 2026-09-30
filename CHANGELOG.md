@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Certificates page:** everything about certificates in one place. The
+  gateway's host names moved there from Settings, next to the certificate
+  that carries them; saving them offers a new certificate. The web UI's
+  HTTPS certificate moved there too. Both cards show the host names a
+  certificate lacks, so a client that would refuse it is visible beforehand.
 - The web UI is built with Preact (vendored, no build step). It looks the
   same, but a refresh no longer disturbs what is being typed on any page: the
   Targets page keeps refreshing the targets' status while a target is edited,
