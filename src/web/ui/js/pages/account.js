@@ -184,10 +184,16 @@ function tokensCard() {
           unless an administrator gives it permission to change something. Everything it does is
           recorded in the trail.
         </p>`
-        : html`<p class="section-note">
-          The MCP endpoint is ${mcp?.enabled ? "on but needs HTTPS" : "off"}: an administrator can
-          change that on the <a href="#/settings">Settings</a> page.
-        </p>`
+        : mcp?.enabled
+          ? html`<p class="section-note">
+              The MCP endpoint is on but needs HTTPS: an administrator sets${" "}
+              <span class="mono">tls = true</span> under <span class="mono">[web]</span> in the
+              config file and restarts the gateway.
+            </p>`
+          : html`<p class="section-note">
+              The MCP endpoint is off: an administrator can turn it on on the${" "}
+              <a href="#/settings">Settings</a> page.
+            </p>`
     }
     ${on && newToken && newTokenBox(newToken)}
     ${
