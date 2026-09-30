@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The target name's check (letters, digits, `.`, `_`, `-`) had an invalid
   pattern, so browsers skipped it; it works now.
+- The Account page said HTTPS for MCP could be turned on under Settings; it
+  names the config file now (`tls = true` under `[web]`, then restart).
 
 ## [0.1.0] - 2026-09-26
 
