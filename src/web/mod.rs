@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod browser;
+mod events;
 mod mcp;
 mod settings;
 pub mod tls;
@@ -50,6 +51,11 @@ pub struct AppState {
     pub exports: Arc<crate::export::Exports>,
     /// The certificate the web server presents (DER); `None` without HTTPS.
     pub web_certificate: Option<Arc<Vec<u8>>>,
+    /// Cancelled when the gateway stops: live streams end, or the web
+    /// server would wait for them forever.
+    pub stopping: tokio_util::sync::CancellationToken,
+    /// Cancelled to stop the gateway for a restart by its service manager.
+    pub restart: tokio_util::sync::CancellationToken,
 }
 
 impl AppState {
@@ -150,12 +156,15 @@ pub fn router(state: AppState) -> Router {
         .route("/audit/verify", get(audit_verify))
         .route("/audit/most-written", get(audit_most_written))
         .route("/alarms", get(alarms))
+        .route("/events", get(events::events))
         .route("/alarms/acknowledge", post(acknowledge_alarms))
         .route("/settings", get(settings::get))
         .route("/settings/audit", put(settings::put_audit))
         .route("/settings/export", put(settings::put_export))
         .route("/settings/gateway", put(settings::put_gateway))
         .route("/settings/mcp", put(settings::put_mcp))
+        .route("/settings/web/https", post(settings::enable_https))
+        .route("/restart", post(settings::restart))
         .route("/users", get(list_users).post(create_user))
         .route("/users/{name}", put(update_user).delete(delete_user))
         .route("/browser/{target}/connect", post(browser::connect))

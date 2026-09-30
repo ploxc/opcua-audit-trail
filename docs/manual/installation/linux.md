@@ -25,4 +25,6 @@ sudo journalctl -u opcua-audit-gateway | grep "first login"
 The web UI only listens on this machine. For access from other machines, set
 under `[web]` in the config `listen = "0.0.0.0:8080"` and `tls = true` (see
 [HTTPS](../https.md)), then `sudo systemctl restart opcua-audit-gateway`.
+HTTPS alone can also be turned on in the web UI, which restarts the service
+itself.
 Logs: `journalctl -u opcua-audit-gateway`.

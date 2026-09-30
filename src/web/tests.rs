@@ -84,6 +84,8 @@ async fn web_with(change: impl FnOnce(&mut AppState)) -> Web {
         browser: Default::default(),
         exports,
         web_certificate: None,
+        stopping: Default::default(),
+        restart: Default::default(),
     };
     change(&mut state);
     Web {
@@ -1857,4 +1859,108 @@ async fn mcp_acknowledges_only_what_was_shown() {
         )
         .await;
     assert_eq!(again["result"]["isError"], true, "{again}");
+}
+
+/// The next event of a live stream as text, or None when it ended.
+async fn next_event(body: &mut Body) -> Option<String> {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+        .await
+        .expect("an event within 5 s")?;
+    let data = frame.unwrap().into_data().unwrap();
+    Some(String::from_utf8(data.to_vec()).unwrap())
+}
+
+/// The seq in an `audit` event.
+fn event_seq(event: &str) -> i64 {
+    assert!(event.contains("event: audit"), "{event}");
+    let data = event
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap();
+    data.trim().parse().unwrap()
+}
+
+#[tokio::test]
+async fn live_events_follow_the_trail_and_end_with_the_session() {
+    let w = web().await;
+    let (status, _, _) = w.send(Method::GET, "/api/events", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let auditor = w.login("auditor").await;
+    let request = Request::builder()
+        .uri("/api/events")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::COOKIE, &auditor)
+        .body(Body::empty())
+        .unwrap();
+    let response = w.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    let mut body = response.into_body();
+
+    // At once: where the trail is.
+    let first = event_seq(&next_event(&mut body).await.unwrap());
+
+    // A new record (another login) is announced with its seq.
+    w.login("admin").await;
+    let second = event_seq(&next_event(&mut body).await.unwrap());
+    assert!(second > first, "{second} > {first}");
+
+    // After logout the stream ends at its next check: the next record, or
+    // the keep-alive within 15 s.
+    w.send(Method::POST, "/api/logout", Some(&auditor), None)
+        .await;
+    w.login("admin").await;
+    assert_eq!(next_event(&mut body).await, None);
+}
+
+#[tokio::test]
+async fn live_events_end_when_the_gateway_stops() {
+    // Otherwise the web server waits for the stream when it shuts down.
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let token = stopping.clone();
+    let w = web_with(move |s| s.stopping = token).await;
+    let auditor = w.login("auditor").await;
+    let request = Request::builder()
+        .uri("/api/events")
+        .header(header::HOST, "127.0.0.1:8080")
+        .header(header::COOKIE, &auditor)
+        .body(Body::empty())
+        .unwrap();
+    let mut body = w.app.clone().oneshot(request).await.unwrap().into_body();
+    next_event(&mut body).await.unwrap();
+    stopping.cancel();
+    assert_eq!(next_event(&mut body).await, None);
+}
+
+#[tokio::test]
+async fn admins_turn_on_https_for_the_next_start() {
+    let w = web().await;
+    let operator = w.login("operator").await;
+    let (status, _) = w
+        .post("/api/settings/web/https", &operator, json!({}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let admin = w.login("admin").await;
+    let (status, _) = w.post("/api/settings/web/https", &admin, json!({})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Written for the next start, with the user's comments kept...
+    let text = std::fs::read_to_string(&w.config_path).unwrap();
+    let config: toml::Value = toml::from_str(&text).unwrap();
+    assert_eq!(config["web"]["tls"].as_bool(), Some(true));
+    assert!(text.contains("# Loopback only by default"));
+    // ...while the running web UI stays as it is until then.
+    let (_, settings) = w.get("/api/settings", &admin).await;
+    assert_eq!(settings["web"]["tls"], true);
+    assert_eq!(settings["web"]["tls_running"], false);
+    let (_, records) = w.get("/api/audit?kind=config_changed", &admin).await;
+    assert!(records[0]["event"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("HTTPS"));
 }

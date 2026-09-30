@@ -29,6 +29,22 @@ without a restart or disconnecting clients. Passwords and tokens are never
 shown again once saved. Shortening the retention deletes older records right
 away.
 
-The web server's address, HTTPS and the data paths take effect only at
-start, and a wrong value could lock you out, so they are changed in the file
-(see [Configuration](configuration.md)).
+The web server's address and the data paths take effect only at start, and
+a wrong value could lock you out, so they are changed in the file (see
+[Configuration](configuration.md)). HTTPS can be turned on from the
+Certificates page (see [HTTPS](https.md)).
+
+## Live updates
+
+Pages update by themselves: a client that connects, a target that goes down,
+a new record with Live on in the audit trail. The gateway tells the open
+pages when the trail grows (`/api/events`, Server-Sent Events); they then
+fetch what they show. Only the Browser's watch list reads values every
+second.
+
+- **Behind a reverse proxy**, the proxy must not buffer that stream. The
+  gateway sends `X-Accel-Buffering: no`, which nginx follows; with others
+  turn buffering off for `/api/events`.
+- **Over plain HTTP** a browser opens at most six connections per host, and
+  every open tab keeps one. With many tabs on one gateway, use HTTPS (it
+  shares one connection).

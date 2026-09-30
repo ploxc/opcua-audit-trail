@@ -8,7 +8,7 @@ import { MenuButton, dialog, eventBadge, formData, statusBadge } from "../compon
 import { EVENT_GROUPS, eventsByLabel, plural, time, userLabel, valueText } from "../format.js";
 import { SummariseControls, summarisedBadge } from "../summarise.js";
 import { alarm, unacked } from "../alarms.js";
-import { can, load, redraw, schedule, state } from "../state.js";
+import { can, load, redraw, state } from "../state.js";
 
 // ---------- the records table ----------
 
@@ -405,11 +405,12 @@ function alarmBar() {
 
 // ---------- the page ----------
 
-/** The "Live" toggle: reloads the records every 3 s. */
+/** The "Live" toggle: new records appear as they are written. */
 function toggleLive() {
   state.audit.live = !state.audit.live;
-  schedule("audit");
-  redraw();
+  // Catch up with what was written while it was off.
+  if (state.audit.live) load();
+  else redraw();
 }
 
 const verify = safe(async () => {
@@ -430,7 +431,7 @@ export function AuditPage() {
           class="live-toggle ${a.live ? "on" : ""}"
           onClick=${toggleLive}
           aria-pressed=${a.live ? "true" : "false"}
-          title=${a.live ? "Stop reloading" : "Reload the records every 3 s"}
+          title=${a.live ? "Stop following new records" : "Show new records as they are written"}
         >
           <span class="live-dot"></span>Live
         </button>

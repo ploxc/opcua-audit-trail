@@ -186,9 +186,8 @@ function tokensCard() {
         </p>`
         : mcp?.enabled
           ? html`<p class="section-note">
-              The MCP endpoint is on but needs HTTPS: an administrator sets${" "}
-              <span class="mono">tls = true</span> under <span class="mono">[web]</span> in the
-              config file and restarts the gateway.
+              The MCP endpoint is on but needs HTTPS: an administrator turns it on on the${" "}
+              <a href="#/certificates">Certificates</a> page (Web UI certificate).
             </p>`
           : html`<p class="section-note">
               The MCP endpoint is off: an administrator can turn it on on the${" "}

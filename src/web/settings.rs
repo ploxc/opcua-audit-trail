@@ -71,7 +71,13 @@ struct GatewayView {
 #[derive(Serialize)]
 struct WebView {
     listen: String,
+    /// HTTPS in the config (or the environment)...
     tls: bool,
+    /// ...and in the running web server: they differ until a restart.
+    tls_running: bool,
+    /// Whether the gateway can restart itself (a service manager starts it
+    /// again), so the UI can offer it.
+    can_restart: bool,
     /// Set when the environment decides `tls` (the variable's name).
     tls_env: Option<&'static str>,
     tls_certificate: Option<String>,
@@ -113,6 +119,8 @@ pub async fn get(State(s): State<AppState>, user: AuthUser) -> ApiResult<Setting
         web: WebView {
             listen: c.web.listen.to_string(),
             tls: c.web.tls,
+            tls_running: s.config.web.tls,
+            can_restart: can_restart(),
             tls_env: std::env::var_os(crate::config::WEB_TLS_ENV)
                 .is_some()
                 .then_some(crate::config::WEB_TLS_ENV),
@@ -432,6 +440,62 @@ pub async fn put_mcp(
             .await;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether a service manager starts the gateway again after it stops with
+/// an error: systemd sets `INVOCATION_ID` for its services (the unit has
+/// `Restart=on-failure`). Elsewhere (Windows service, by hand, Docker) a
+/// stopped gateway stays stopped.
+fn can_restart() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
+}
+
+/// Turns on HTTPS for the web UI, for the next start.
+pub async fn enable_https(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    if std::env::var_os(crate::config::WEB_TLS_ENV).is_some() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "{} decides HTTPS here; change it there",
+                crate::config::WEB_TLS_ENV
+            ),
+        ));
+    }
+    if !s.targets.config().await.web.tls {
+        s.targets
+            .enable_web_tls()
+            .await
+            .map_err(ApiError::bad_request)?;
+        s.config_changed(
+            &user,
+            "HTTPS for the web UI turned on (applies after a restart)".into(),
+        )
+        .await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Stops the gateway so its service manager starts it again.
+pub async fn restart(State(s): State<AppState>, user: AuthUser) -> Result<StatusCode, ApiError> {
+    user.require(Role::Admin)?;
+    if !can_restart() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "this gateway cannot restart itself: restart its service".into(),
+        ));
+    }
+    s.config_changed(&user, "Gateway restarted from the web UI".into())
+        .await;
+    // After the answer has gone out.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        s.restart.cancel();
+    });
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[cfg(test)]
