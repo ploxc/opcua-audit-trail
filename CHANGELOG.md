@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Manual:** a Performance page with measurements on a PLCnext AXC F 2152
+  (what reads, writes and new sessions cost through the gateway, and what
+  `fail_mode` and `record_old_value` change), and how to measure your own.
+- **Stress test:** `--write-node`, `--watch-node` and `--string-node` run the
+  scenarios on a real PLC's nodes; a number is written as the node's own
+  type.
+
 ### Changed
 
 - The web UI is built with Preact (vendored, no build step). It looks the
@@ -14,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Targets page keeps refreshing the targets' status while a target is edited,
   and the audit trail's Live mode leaves the filters alone. Leaving a page
   drops an unsaved edit.
+- **Stress test:** no longer checks the server certificate's host name and
+  dates (it trusts every server anyway), so a PLC whose certificate names
+  only its host name, or whose clock is off, works; a hint when the server
+  refuses anonymous logins.
 - The container image has a description on its package page: that it is the
   Docker image, how to start it and where the first password is.
 

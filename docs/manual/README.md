@@ -40,3 +40,5 @@ How to install, set up and use the OPC UA Audit Gateway. For the design, see
 
 - [Configuration](configuration.md): the config file and environment
   variables.
+- [Performance](performance.md): what the gateway costs, measured on a
+  PLCnext, and how to measure your own.

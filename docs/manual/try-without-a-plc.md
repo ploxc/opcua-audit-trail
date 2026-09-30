@@ -47,4 +47,4 @@ down the same way.
 
 To load the gateway, `cargo run --release --example stress -- all` runs
 stress scenarios against it (see the comment at the top of
-`examples/stress.rs`).
+`examples/stress.rs`, and [Performance](performance.md) for a real PLC).
