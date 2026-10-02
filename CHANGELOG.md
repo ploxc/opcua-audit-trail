@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A client whose certificate lists its application URI after another name
+  (node-opcua puts the DNS name first) was refused with
+  `BadCertificateUriInvalid`; the URI may now be anywhere among the
+  certificate's alternative names, as the specification allows.
+
 - The target name's check (letters, digits, `.`, `_`, `-`) had an invalid
   pattern, so browsers skipped it; it works now.
 - The Account page said HTTPS for MCP could be turned on under Settings; it
