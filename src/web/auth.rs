@@ -321,7 +321,15 @@ impl FromRequestParts<AppState> for AuthUser {
             .ok_or_else(unauthorized)?
             .value()
             .to_string();
-        let (username, epoch) = state.sessions.get(&token).ok_or_else(unauthorized)?;
+        // A refresh the UI does by itself is not activity: an open tab alone
+        // must not keep a session alive past its idle timeout.
+        let background = parts.headers.contains_key("x-background");
+        let session = if background {
+            state.sessions.peek(&token)
+        } else {
+            state.sessions.get(&token)
+        };
+        let (username, epoch) = session.ok_or_else(unauthorized)?;
         // The user database decides: a deleted user, or a password or role
         // changed since login (also with the command line), ends the session.
         let current = state

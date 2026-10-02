@@ -63,9 +63,7 @@ fn stream(s: AppState, token: String) -> impl Stream<Item = Result<Event, Infall
                 _ = s.stopping.cancelled() => Next::End,
             };
             // Logged out, expired, or the password or role changed: stop.
-            if session_role(&s, &token).is_none_or(|r| r < Role::Auditor) {
-                return None;
-            }
+            session_role(&s, &token)?;
             let event = match next {
                 Next::Committed(seq) => {
                     tokio::time::sleep(MIN_GAP).await;

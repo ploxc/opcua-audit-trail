@@ -122,9 +122,26 @@ async function restartGateway(https) {
   if (!ok) return;
   await post("/restart");
   toast("Restarting…");
-  // Back when it is up; with HTTPS on the new address.
-  const scheme = https ? "https:" : location.protocol;
-  setTimeout(() => location.replace(`${scheme}//${location.host}/`), 8000);
+  // Wait until it has stopped. Whether it is back cannot be checked from
+  // here on https: the browser does not trust its certificate yet, so a
+  // check fails just as when it is still starting. The user goes there.
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      await fetch("/api/health", { cache: "no-store" });
+    } catch {
+      break;
+    }
+  }
+  const url = `${https ? "https:" : location.protocol}//${location.host}/`;
+  await dialog({
+    title: "The gateway is restarting",
+    confirm: "Open it",
+    body:
+      `It is back in about 10 to 20 seconds at ${url}` +
+      (https ? ", with a certificate warning until you trust it." : "."),
+  });
+  location.replace(url);
 }
 
 const turnOnHttps = (web) =>
