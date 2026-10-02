@@ -1493,6 +1493,7 @@ dependencies = [
  "tracing-subscriber",
  "webpki-roots",
  "windows-service",
+ "x509-cert",
 ]
 
 [[package]]
