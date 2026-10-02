@@ -816,10 +816,10 @@ async fn create_session(ctx: Ctx, request: Box<CreateSessionRequest>) -> Respons
         if request.client_nonce.len() < NONCE_LENGTH {
             return fault(handle, StatusCode::BadNonceInvalid);
         }
-        if channel_cert
-            .is_application_uri_valid(request.client_description.application_uri.as_ref())
-            .is_err()
-        {
+        if !names_application_uri(
+            channel_cert,
+            request.client_description.application_uri.as_ref(),
+        ) {
             return fault(handle, StatusCode::BadCertificateUriInvalid);
         }
     }
@@ -1449,5 +1449,47 @@ mod tests {
             security_rank(SecurityPolicy::None, MessageSecurityMode::SignAndEncrypt),
             none
         );
+    }
+}
+
+/// Whether `cert` carries `uri` among its subject alternative names.
+/// async-opcua's `is_application_uri_valid` only looks at the first entry,
+/// but the specification allows any position, and node-opcua puts the DNS
+/// name first.
+fn names_application_uri(cert: &opcua::crypto::X509, uri: &str) -> bool {
+    use x509_cert::der::Decode;
+    use x509_cert::ext::pkix::name::GeneralName;
+    use x509_cert::ext::pkix::SubjectAltName;
+    let Ok(der) = cert.to_der() else {
+        return false;
+    };
+    let Ok(parsed) = x509_cert::Certificate::from_der(&der) else {
+        return false;
+    };
+    match parsed.tbs_certificate.get::<SubjectAltName>() {
+        Ok(Some((_, names))) => names.0.iter().any(
+            |n| matches!(n, GeneralName::UniformResourceIdentifier(v) if v.to_string() == uri),
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod application_uri_tests {
+    use super::names_application_uri;
+    use opcua::crypto::X509;
+
+    #[test]
+    fn the_application_uri_may_follow_other_names() {
+        // DNS:client.test first, then URI:urn:client.test:app, as node-opcua
+        // makes them.
+        let cert = X509::from_der(include_bytes!("testdata/dns-first-san.der")).unwrap();
+        assert!(cert
+            .is_application_uri_valid("urn:client.test:app")
+            .is_err());
+        assert!(names_application_uri(&cert, "urn:client.test:app"));
+        assert!(!names_application_uri(&cert, "urn:other"));
+        // The DNS name is no application URI.
+        assert!(!names_application_uri(&cert, "client.test"));
     }
 }
