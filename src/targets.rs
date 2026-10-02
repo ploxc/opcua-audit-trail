@@ -133,6 +133,38 @@ impl TargetManager {
         Ok((old, new_config))
     }
 
+    /// Turns on HTTPS for the web UI: `[web] tls = true` in the config file,
+    /// for the next start. Only that key is written, not the rest of `[web]`
+    /// (the running value may come from the environment instead).
+    pub async fn enable_web_tls(&self) -> anyhow::Result<()> {
+        use toml_edit::{value, Item, Table};
+        let mut config = self.config.lock().await;
+        // HTTPS must be able to start, or the web UI stays off after the
+        // restart and the UI cannot undo it.
+        let mut with_tls = config.clone();
+        with_tls.web.tls = true;
+        crate::web::tls::server_config(&with_tls).context("HTTPS cannot start")?;
+        let path = &self.config_path;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut doc: toml_edit::DocumentMut = text
+            .parse()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let root = doc.as_table_mut();
+        // Also `web = { … }`: set the key in place, keep the others.
+        if !root.get("web").is_some_and(Item::is_table_like) {
+            root.insert("web", Item::Table(Table::new()));
+        }
+        root["web"]
+            .as_table_like_mut()
+            .expect("just checked")
+            .insert("tls", value(true));
+        crate::fsutil::write_atomic(path, doc.to_string().as_bytes(), None)
+            .with_context(|| format!("writing {}", path.display()))?;
+        config.web.tls = true;
+        Ok(())
+    }
+
     pub async fn targets(&self) -> Vec<TargetConfig> {
         self.config.lock().await.targets.clone()
     }
@@ -447,8 +479,12 @@ mod tests {
     }
 
     async fn manager(dir: &std::path::Path) -> TargetManager {
+        manager_with(dir, EXAMPLE_CONFIG).await
+    }
+
+    async fn manager_with(dir: &std::path::Path, text: &str) -> TargetManager {
         let path = dir.join("config.toml");
-        std::fs::write(&path, EXAMPLE_CONFIG).unwrap();
+        std::fs::write(&path, text).unwrap();
         let config = Config::load(&path).unwrap();
         crate::pki::Pki::open(&config.gateway.pki_dir)
             .unwrap()
@@ -458,6 +494,18 @@ mod tests {
         let statuses = discovery::initial_statuses(&config);
         let client = Arc::new(discovery::discovery_client(&config).unwrap());
         TargetManager::new(path, config, statuses, client, audit)
+    }
+
+    #[tokio::test]
+    async fn turning_on_https_keeps_an_inline_web_table() {
+        let dir = tempfile::tempdir().unwrap();
+        // An inline [web] keeps its other keys.
+        let m = manager_with(dir.path(), "web = { listen = \"0.0.0.0:18080\" }\n").await;
+        m.enable_web_tls().await.unwrap();
+        let text = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        let config: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(config["web"]["listen"].as_str(), Some("0.0.0.0:18080"));
+        assert_eq!(config["web"]["tls"].as_bool(), Some(true));
     }
 
     #[tokio::test]

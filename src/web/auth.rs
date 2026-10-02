@@ -132,6 +132,15 @@ impl Sessions {
         Some((session.username.clone(), session.epoch))
     }
 
+    /// Like `get`, but not counted as activity: an open live stream alone
+    /// must not keep a session alive.
+    fn peek(&self, token: &str) -> Option<(String, i64)> {
+        let map = self.map.lock();
+        let session = map.get(token)?;
+        (session.last_seen.elapsed() < IDLE_TIMEOUT && session.created.elapsed() < MAX_LIFETIME)
+            .then(|| (session.username.clone(), session.epoch))
+    }
+
     fn remove(&self, token: &str) {
         self.map.lock().remove(token);
     }
@@ -244,6 +253,22 @@ pub fn client_address(
     )
 }
 
+/// The session cookie of a request.
+pub fn session_token(state: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
+    CookieJar::from_headers(headers)
+        .get(cookie_name(state.config.web.tls))
+        .map(|c| c.value().to_string())
+}
+
+/// The role of a session that is still valid (not expired, logged out, or
+/// changed by a new password, role or deletion), without counting as
+/// activity. For long-lived requests that check again while they run.
+pub fn session_role(state: &AppState, token: &str) -> Option<Role> {
+    let (username, epoch) = state.sessions.peek(token)?;
+    let current = state.users.session_state(&username).ok()??;
+    (current.epoch == epoch && !current.must_change_password).then_some(current.role)
+}
+
 /// The logged-in user of a request. Extracting it rejects anonymous requests.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthUser {
@@ -296,7 +321,15 @@ impl FromRequestParts<AppState> for AuthUser {
             .ok_or_else(unauthorized)?
             .value()
             .to_string();
-        let (username, epoch) = state.sessions.get(&token).ok_or_else(unauthorized)?;
+        // A refresh the UI does by itself is not activity: an open tab alone
+        // must not keep a session alive past its idle timeout.
+        let background = parts.headers.contains_key("x-background");
+        let session = if background {
+            state.sessions.peek(&token)
+        } else {
+            state.sessions.get(&token)
+        };
+        let (username, epoch) = session.ok_or_else(unauthorized)?;
         // The user database decides: a deleted user, or a password or role
         // changed since login (also with the command line), ends the session.
         let current = state

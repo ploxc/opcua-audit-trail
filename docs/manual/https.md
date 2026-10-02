@@ -10,8 +10,17 @@ tls = true                          # a self-signed certificate of its own, or:
 # tls_private_key = "web-key.pem"
 ```
 
+An administrator can also turn it on in the web UI: **Certificates → Web UI
+certificate (HTTPS) → Turn on**. That writes `tls = true` to the config file;
+it applies after a restart. Installed as a Linux service (systemd), the UI
+offers **Restart now**, waits until the gateway has stopped and then opens
+the `https://` address. Elsewhere (Windows
+service, by hand) restart the gateway yourself. The address (`listen`) stays
+in the config file: a wrong one would lock you out.
+
 The container image has HTTPS on by default: `OPCUA_GATEWAY_WEB_TLS`
-(`true`/`false`, in `docker-compose.yml`) overrides `tls` in the config file.
+(`true`/`false`, in `docker-compose.yml`) overrides `tls` in the config file,
+and the UI cannot change it.
 
 ## The web UI's own certificate
 

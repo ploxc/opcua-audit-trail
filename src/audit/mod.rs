@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::config::{AuditConfig, FailMode};
 pub use event::{AuditEntry, AuditEvent};
@@ -180,9 +180,17 @@ pub struct AuditHandle {
     tx: mpsc::Sender<Command>,
     settings: Arc<AuditSettings>,
     lost: Arc<LostEvents>,
+    /// The seq of the last committed record, for live updates.
+    committed: Arc<watch::Sender<i64>>,
 }
 
 impl AuditHandle {
+    /// Changes whenever records are committed; holds the last one's seq.
+    /// Bursts coalesce: a receiver only sees the latest value.
+    pub fn committed(&self) -> watch::Receiver<i64> {
+        self.committed.subscribe()
+    }
+
     /// Records an event. In fail-open mode this never blocks and only fails if
     /// the event could not even be counted; in fail-closed mode it returns once
     /// the record is committed.
@@ -264,6 +272,8 @@ pub fn start(path: &Path, config: &AuditConfig) -> anyhow::Result<AuditHandle> {
     let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
     let lost = Arc::new(LostEvents::open(path));
     let writer_lost = lost.clone();
+    let committed = Arc::new(watch::Sender::new(0));
+    let writer_committed = committed.clone();
     let db = path.to_path_buf();
     std::thread::Builder::new()
         .name("audit-writer".into())
@@ -271,7 +281,7 @@ pub fn start(path: &Path, config: &AuditConfig) -> anyhow::Result<AuditHandle> {
             let mut restarts = Vec::new();
             loop {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    writer_loop(&mut store, &mut rx, &writer_lost)
+                    writer_loop(&mut store, &mut rx, &writer_lost, &writer_committed)
                 }));
                 if run.is_ok() {
                     break;
@@ -318,10 +328,16 @@ pub fn start(path: &Path, config: &AuditConfig) -> anyhow::Result<AuditHandle> {
         tx,
         settings: Arc::new(AuditSettings::new(config)),
         lost,
+        committed,
     })
 }
 
-fn writer_loop(store: &mut AuditStore, rx: &mut mpsc::Receiver<Command>, lost: &LostEvents) {
+fn writer_loop(
+    store: &mut AuditStore,
+    rx: &mut mpsc::Receiver<Command>,
+    lost: &LostEvents,
+    committed: &watch::Sender<i64>,
+) {
     while let Some(first) = rx.blocking_recv() {
         let mut batch = Vec::new();
         let mut acks = Vec::new();
@@ -345,7 +361,9 @@ fn writer_loop(store: &mut AuditStore, rx: &mut mpsc::Receiver<Command>, lost: &
         }
 
         if !batch.is_empty() {
-            write_batch(store, batch, acks, lost);
+            if let Some(seq) = write_batch(store, batch, acks, lost) {
+                committed.send_replace(seq);
+            }
         }
         for cmd in after {
             match cmd {
@@ -363,12 +381,13 @@ fn writer_loop(store: &mut AuditStore, rx: &mut mpsc::Receiver<Command>, lost: &
     }
 }
 
+/// Returns the seq of the last record written.
 fn write_batch(
     store: &mut AuditStore,
     mut batch: Vec<AuditEntry>,
     acks: Vec<Option<Ack>>,
     lost: &LostEvents,
-) {
+) -> Option<i64> {
     // Held until the result is saved: the file never runs behind a report.
     let mut saved = lost.saved.lock().unwrap_or_else(|e| e.into_inner());
     let lost_before = lost.count.swap(0, Ordering::Relaxed);
@@ -382,13 +401,15 @@ fn write_batch(
         .store(lost_before + unacked, Ordering::Relaxed);
     let result = store.append(&batch);
     lost.in_flight.store(0, Ordering::Relaxed);
-    match result {
+    let last = match result {
         Ok(seqs) => {
+            let last = seqs.last().copied();
             for (ack, seq) in acks.into_iter().zip(seqs) {
                 if let Some(ack) = ack {
                     let _ = ack.send(Ok(seq));
                 }
             }
+            last
         }
         Err(e) => {
             tracing::error!("audit store write failed: {e:#}");
@@ -396,9 +417,11 @@ fn write_batch(
             for ack in acks.into_iter().flatten() {
                 let _ = ack.send(Err(e.to_string()));
             }
+            None
         }
-    }
+    };
     lost.save_locked(&mut saved);
+    last
 }
 
 /// Read access for the web UI and the CLI. Uses its own read-only connection,

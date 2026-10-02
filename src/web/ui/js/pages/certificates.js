@@ -109,6 +109,58 @@ const regenerateWebCertificate = safe(async () => {
   await load();
 });
 
+/** Stops the gateway; its service manager (systemd) starts it again. */
+async function restartGateway(https) {
+  const ok = await dialog({
+    title: "Restart the gateway?",
+    confirm: "Restart",
+    danger: true,
+    body:
+      "Clients are disconnected for a few seconds and reconnect. Everyone logs in again." +
+      (https ? " The web UI then answers on https:// only." : ""),
+  });
+  if (!ok) return;
+  await post("/restart");
+  toast("Restarting…");
+  // Wait until it has stopped. Whether it is back cannot be checked from
+  // here on https: the browser does not trust its certificate yet, so a
+  // check fails just as when it is still starting. The user goes there.
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      await fetch("/api/health", { cache: "no-store" });
+    } catch {
+      break;
+    }
+  }
+  const url = `${https ? "https:" : location.protocol}//${location.host}/`;
+  await dialog({
+    title: "The gateway is restarting",
+    confirm: "Open it",
+    body:
+      `It is back in about 10 to 20 seconds at ${url}` +
+      (https ? ", with a certificate warning until you trust it." : "."),
+  });
+  location.replace(url);
+}
+
+const turnOnHttps = (web) =>
+  safe(async () => {
+    const ok = await dialog({
+      title: "Turn on HTTPS?",
+      confirm: "Turn on",
+      body:
+        "Written to the config file; it applies after a restart. The web UI then answers on " +
+        "https:// only, with a self-signed certificate of its own: browsers warn until it is " +
+        "trusted (download it here afterwards).",
+    });
+    if (!ok) return;
+    await post("/settings/web/https");
+    await load();
+    if (web.can_restart) await restartGateway(true);
+    else toast("Saved: restart the gateway to switch to HTTPS");
+  });
+
 // Names the configured host names a certificate does not carry yet.
 const missing = (c, fix) =>
   c?.missing_hostnames?.length > 0 &&
@@ -235,16 +287,7 @@ function webCard(web, admin) {
     </div>
     <dl class="kv">
       <dt>HTTPS</dt>
-      <dd>
-        ${web.tls ? "on" : "off"}${" "}
-        ${
-          !web.tls &&
-          html`<span class="muted small"
-            >(turn it on with <span class="mono">tls = true</span> under${" "}
-            <span class="mono">[web]</span> in the config file, then restart)</span
-          >`
-        }
-      </dd>
+      <dd>${httpsState(web, admin)}</dd>
       ${
         web.tls_certificate
           ? html`<dt>Certificate</dt>
@@ -269,6 +312,27 @@ function webCard(web, admin) {
       </p>`
     }
   </div>`;
+}
+
+// Whether HTTPS is on, and the button to turn it on or apply it.
+function httpsState(web, admin) {
+  if (web.tls_env) {
+    return html`${web.tls ? "on" : "off"}${" "}
+      <span class="muted small">(set by <span class="mono">${web.tls_env}</span>)</span>`;
+  }
+  if (web.tls && web.tls_running) return "on";
+  if (web.tls) {
+    return html`on after a restart${" "}
+      ${
+        admin && web.can_restart
+          ? html`<button class="small" onClick=${safe(() => restartGateway(true))}>
+              Restart now
+            </button>`
+          : html`<span class="muted small">(restart the gateway to apply it)</span>`
+      }`;
+  }
+  return html`off${" "}
+    ${admin && html`<button class="small" onClick=${turnOnHttps(web)}>Turn on…</button>`}`;
 }
 
 // Installing a certificate and key made elsewhere.

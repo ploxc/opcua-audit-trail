@@ -493,8 +493,20 @@ async fn run(
         sessions: Default::default(),
         browser: Default::default(),
         exports,
+        stopping: Default::default(),
+        restart: Default::default(),
     };
     tokio::spawn(state.browser.clone().reap_idle(state.clone()));
+    let stopping = state.stopping.clone();
+    let restart = state.restart.clone();
+    let restarting = restart.clone();
+    let shutdown = async move {
+        tokio::select! {
+            _ = shutdown => {}
+            _ = restarting.cancelled() => {}
+        }
+        stopping.cancel();
+    };
     let router = web::router(state);
     if config.web.tls && tls.is_none() {
         shutdown.await;
@@ -536,8 +548,17 @@ async fn run(
         tracing::error!("could not record shutdown: {e}");
     }
     audit.flush().await;
+    if restart.is_cancelled() {
+        // A failure for the service manager, which starts it again.
+        tracing::info!("stopped for a restart");
+        return Ok(ExitCode::from(RESTART_EXIT_CODE));
+    }
     Ok(ExitCode::SUCCESS)
 }
+
+/// Exit code of a restart asked for in the web UI (EX_TEMPFAIL): systemd's
+/// `Restart=on-failure` starts the gateway again.
+const RESTART_EXIT_CODE: u8 = 75;
 
 async fn shutdown_signal() {
     let ctrl_c = async {
