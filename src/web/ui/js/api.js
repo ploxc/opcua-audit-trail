@@ -21,6 +21,8 @@ export async function api(method, path, body) {
     headers: { "X-Requested-With": "opcua-audit-gateway" },
     credentials: "same-origin",
   };
+  // Refreshes nobody asked for do not keep the session alive.
+  if (background) options.headers["X-Background"] = "1";
   if (body !== undefined) {
     options.headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
@@ -43,6 +45,18 @@ export async function api(method, path, body) {
     throw new ApiError(response.status, (data && data.error) || response.statusText);
   }
   return data;
+}
+
+let background = false;
+
+/** Runs `fn` with its requests marked as background refreshes. */
+export async function inBackground(fn) {
+  background = true;
+  try {
+    return await fn();
+  } finally {
+    background = false;
+  }
 }
 
 export const get = (path) => api("GET", path);

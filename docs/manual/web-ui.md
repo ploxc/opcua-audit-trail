@@ -45,6 +45,6 @@ second.
 - **Behind a reverse proxy**, the proxy must not buffer that stream. The
   gateway sends `X-Accel-Buffering: no`, which nginx follows; with others
   turn buffering off for `/api/events`.
-- **Over plain HTTP** a browser opens at most six connections per host, and
-  every open tab keeps one. With many tabs on one gateway, use HTTPS (it
-  shares one connection).
+- **Tabs:** a browser opens at most six connections per host, and every
+  open tab of the UI keeps one for its updates. With more than about five
+  tabs on one gateway in the same browser, the others wait; close a few.

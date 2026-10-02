@@ -360,8 +360,12 @@ embedded, so the UI needs no internet access.
   ends (checked at every event and keep-alive, without counting as
   activity) and when the gateway stops (else the web server would wait for
   it). `X-Accel-Buffering: no` keeps nginx-style proxies from buffering.
-  The UI keeps polling only the Browser's watch list (values read from the
-  PLC) and a quiet 30 s refresh for what is not in the trail.
+  The UI refreshes the open page at most once a second (the dashboard every
+  3 s), and marks those requests `X-Background`: like the stream, they do
+  not count as session activity, so an open tab alone does not keep a
+  session past its idle timeout. It keeps polling only the Browser's watch
+  list (values read from the PLC) and a quiet 30 s refresh for what is not
+  in the trail.
 - Confirmations use an in-page dialog that explains the consequence.
 
 The web UI binds to `127.0.0.1` by default; on a loopback address it only
