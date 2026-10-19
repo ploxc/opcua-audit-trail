@@ -27,7 +27,7 @@ use crate::users::{Role, UserStore};
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = env!("GATEWAY_VERSION"),
     about = "Transparent OPC UA gateway with an audit trail of every write"
 )]
 struct Cli {
@@ -409,7 +409,7 @@ async fn run(
     let audit = audit::start(&db, &config.audit)?;
     audit
         .record_committed(AuditEntry::new(AuditEvent::GatewayStarted {
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: env!("GATEWAY_VERSION").into(),
         }))
         .await
         .context("writing the first audit record")?;
