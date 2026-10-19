@@ -279,7 +279,7 @@ async fn handle(s: &AppState, ctx: &Caller, message: Value) -> Option<Value> {
                     "serverInfo": {
                         "name": "opcua-audit-gateway",
                         "title": "OPC UA Audit Gateway",
-                        "version": env!("CARGO_PKG_VERSION"),
+                        "version": env!("GATEWAY_VERSION"),
                     },
                     "instructions": INSTRUCTIONS,
                 }),
@@ -612,7 +612,7 @@ async fn call(s: &AppState, tool: &str, args: &Value) -> anyhow::Result<Value> {
             let exports: Vec<_> = s.exports.statuses().read().values().cloned().collect();
             let alarms = s.reader.alarms().await?;
             Ok(json!({
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": env!("GATEWAY_VERSION"),
                 "application_name": s.config.gateway.application_name,
                 "targets": super::target_views(s).await,
                 "unacknowledged": alarms.iter().map(|a| json!({
