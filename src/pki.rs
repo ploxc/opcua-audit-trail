@@ -310,13 +310,15 @@ impl Pki {
             .map_err(|_| anyhow!("the private key is not a PEM encoded RSA key"))?;
         check_key_pair(&cert, &key)?;
         // Clients reject a certificate that is not valid now or names
-        // another application.
+        // another application. Some (async-opcua among them) only look at
+        // the first alternative name, so the URI must come first here,
+        // although the gateway accepts it anywhere in a client's.
         cert.is_time_valid(&chrono::Utc::now())
             .map_err(|_| anyhow!("the certificate is expired or not yet valid"))?;
         cert.is_application_uri_valid(&gateway.application_uri())
             .map_err(|_| {
                 anyhow!(
-                    "the certificate's subjectAltName must contain the application URI {}",
+                    "the certificate's first subjectAltName must be the application URI {}",
                     gateway.application_uri()
                 )
             })?;

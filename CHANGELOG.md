@@ -19,7 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes `tls = true` to the config file, after checking that HTTPS can
   start. Installed as a Linux service, the UI then offers to restart the
   gateway and opens the `https://` address.
-
+- **Which build runs:** the version carries the git commit it was built
+  from, e.g. `0.1.0 (8568bbc)` (`-dirty` with uncommitted changes), in the
+  web UI, `--version`, the API, MCP and the `gateway_started` record. A
+  build without git shows the plain version, or the commit given in
+  `GATEWAY_COMMIT`.
 - **Manual:** a Performance page with measurements on a PLCnext AXC F 2152
   (what reads, writes and new sessions cost through the gateway, and what
   `fail_mode` and `record_old_value` change), and how to measure your own.
@@ -47,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Docker image, how to start it and where the first password is.
 
 ### Fixed
+
+- A client whose certificate lists its application URI after another name
+  (node-opcua puts the DNS name first) was refused with
+  `BadCertificateUriInvalid`; the URI may now be anywhere among the
+  certificate's alternative names, as the specification allows.
 
 - The target name's check (letters, digits, `.`, `_`, `-`) had an invalid
   pattern, so browsers skipped it; it works now.

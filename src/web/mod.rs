@@ -411,7 +411,7 @@ async fn font(Path(file): Path<String>) -> Response {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+    Json(serde_json::json!({ "status": "ok", "version": env!("GATEWAY_VERSION") }))
 }
 
 #[derive(Serialize)]
@@ -462,7 +462,7 @@ async fn status(State(s): State<AppState>, user: AuthUser) -> ApiResult<StatusRe
     // Copy out first: the lock must not be held across the awaits below.
     let exports = s.exports.statuses().read().values().cloned().collect();
     Ok(Json(StatusResponse {
-        version: env!("CARGO_PKG_VERSION"),
+        version: env!("GATEWAY_VERSION"),
         ui_version: ui_version(),
         application_name: s.config.gateway.application_name.clone(),
         application_uri: s.config.gateway.application_uri(),
