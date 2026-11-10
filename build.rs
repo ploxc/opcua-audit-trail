@@ -8,6 +8,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GATEWAY_COMMIT");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    // A commit moves the branch, not HEAD itself.
+    if let Some(branch) = std::fs::read_to_string(".git/HEAD")
+        .ok()
+        .and_then(|h| h.strip_prefix("ref: ").map(|r| r.trim().to_string()))
+    {
+        println!("cargo:rerun-if-changed=.git/{branch}");
+        println!("cargo:rerun-if-changed=.git/packed-refs");
+    }
     println!("cargo:rerun-if-changed=src");
     let version = env!("CARGO_PKG_VERSION");
     // Set by a build without .git (e.g. a container build); else from git.
