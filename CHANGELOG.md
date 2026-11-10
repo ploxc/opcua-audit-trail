@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
 ### Added
 
 - **Live updates:** pages update by themselves as soon as something is
@@ -20,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start. Installed as a Linux service, the UI then offers to restart the
   gateway and opens the `https://` address.
 - **Which build runs:** the version carries the git commit it was built
-  from, e.g. `0.1.0 (8568bbc)` (`-dirty` with uncommitted changes), in the
+  from, e.g. `0.2.0 (07c3c93)` (`-dirty` with uncommitted changes), in the
   web UI, `--version`, the API, MCP and the `gateway_started` record. A
   build without git shows the plain version, or the commit given in
   `GATEWAY_COMMIT`.
@@ -56,11 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (node-opcua puts the DNS name first) was refused with
   `BadCertificateUriInvalid`; the URI may now be anywhere among the
   certificate's alternative names, as the specification allows.
-
 - The target name's check (letters, digits, `.`, `_`, `-`) had an invalid
   pattern, so browsers skipped it; it works now.
-- The Account page said HTTPS for MCP could be turned on under Settings; it
-  names the config file now (`tls = true` under `[web]`, then restart).
+- The Account page said HTTPS for MCP could be turned on under Settings,
+  where that was not possible; it now points to the Certificates page.
 
 ## [0.1.0] - 2026-09-26
 
@@ -96,5 +97,6 @@ The first release: a working concept, not production ready. See
 - **Manual:** installation, first login, your first PLC, HTTPS and the rest in
   [docs/manual](docs/manual/README.md).
 
-[Unreleased]: https://github.com/ploxc/opcua-audit-trail/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ploxc/opcua-audit-trail/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ploxc/opcua-audit-trail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ploxc/opcua-audit-trail/releases/tag/v0.1.0
